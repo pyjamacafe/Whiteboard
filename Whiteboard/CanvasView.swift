@@ -262,13 +262,35 @@ class StrokeLayerView: UIView {
             ctx.setLineWidth((model?.eraserSettings.size ?? 20) / scale)
         } else {
             ctx.setBlendMode(.normal)
-            ctx.setStrokeColor(stroke.uiColor.cgColor)
+            ctx.setStrokeColor(themeAdjusted(stroke.uiColor, model?.appSettings.isDarkMode ?? false).cgColor)
             ctx.setLineWidth(stroke.lineWidth)
         }
 
         ctx.addPath(path)
         ctx.strokePath()
         ctx.restoreGState()
+    }
+
+    private func themeAdjusted(_ color: Color, _ isDark: Bool) -> Color {
+        guard isDark else { return color }
+        #if os(iOS)
+        let c = UIColor(color)
+        #else
+        let c = NSColor(color).usingColorSpace(.sRGB) ?? NSColor.black
+        #endif
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        #if os(iOS)
+        c.getRed(&r, green: &g, blue: &b, alpha: &a)
+        #else
+        c.getRed(&r, green: &g, blue: &b, alpha: &a)
+        #endif
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        if luminance < 0.5 {
+            // Lighten while preserving hue: blend toward white
+            let t: CGFloat = 0.6
+            return Color(.sRGB, red: Double(r + (1 - r) * t), green: Double(g + (1 - g) * t), blue: Double(b + (1 - b) * t), opacity: Double(a))
+        }
+        return color
     }
 }
 
@@ -751,12 +773,15 @@ struct CanvasView: View {
                     if let c = char, let digit = Int(c) {
                         let idx = digit - 1
                         switch model.currentTool {
-                        case .pen where idx < model.penSettings.presets.count:
-                            model.penSettings.color = model.penSettings.presets[idx]
-                        case .highlighter where idx < model.highlighterSettings.presets.count:
-                            model.highlighterSettings.color = model.highlighterSettings.presets[idx]
-                        case .fill where idx < model.fillSettings.presets.count:
-                            model.fillSettings.color = model.fillSettings.presets[idx]
+                        case .pen where idx < model.penPresets.count:
+                            model.penSettings.lightColor = model.penPresets[idx]
+                            model.penSettings.darkColor = model.penPresets[idx]
+                        case .highlighter where idx < model.hlPresets.count:
+                            model.highlighterSettings.lightColor = model.hlPresets[idx]
+                            model.highlighterSettings.darkColor = model.hlPresets[idx]
+                        case .fill where idx < model.fillPresets.count:
+                            model.fillSettings.lightColor = model.fillPresets[idx]
+                            model.fillSettings.darkColor = model.fillPresets[idx]
                         default: break
                         }
                     }
@@ -765,6 +790,7 @@ struct CanvasView: View {
 
                 if hasCmd && !hasShift && char == "z" { model.undo(); return nil }
                 if hasCmd && hasShift && char == "z" { model.redo(); return nil }
+                if hasCmd && char == "s" { model.save(); return nil }
 
                 if char == "\u{7F}" || char == "\u{7B}" || event.keyCode == 51 || event.keyCode == 117 {
                     model.deleteSelected()
@@ -850,6 +876,19 @@ struct CanvasView: View {
         return path
     }
 
+    private func macThemeAdjusted(_ color: Color, _ isDark: Bool) -> Color {
+        guard isDark else { return color }
+        guard let c = NSColor(color).usingColorSpace(.sRGB) else { return color }
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        c.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        if luminance < 0.5 {
+            let t: CGFloat = 0.6
+            return Color(.sRGB, red: Double(r + (1 - r) * t), green: Double(g + (1 - g) * t), blue: Double(b + (1 - b) * t), opacity: Double(a))
+        }
+        return color
+    }
+
     private func drawFill(_ region: FillRegion, in context: inout GraphicsContext, transform: CGAffineTransform) {
         let path = Path(region.cgPath).applying(transform)
         context.fill(path, with: .color(region.uiColor))
@@ -875,7 +914,7 @@ struct CanvasView: View {
                           style: StrokeStyle(lineWidth: model.eraserSettings.size, lineCap: .round, lineJoin: .round))
             context.blendMode = .normal
         } else {
-            context.stroke(path, with: .color(stroke.uiColor),
+            context.stroke(path, with: .color(macThemeAdjusted(stroke.uiColor, model.appSettings.isDarkMode)),
                           style: StrokeStyle(lineWidth: stroke.lineWidth * scale,
                                            lineCap: .round, lineJoin: .round))
         }

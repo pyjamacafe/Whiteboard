@@ -65,17 +65,17 @@ struct FillRegion: Identifiable, Codable {
 }
 
 struct CodablePath: Codable {
-    let points: [CGPoint]
+    let points: [CodablePoint]
 
     init(_ path: CGPath) {
-        var pts: [CGPoint] = []
+        var pts: [CodablePoint] = []
         path.applyWithBlock { element in
             let e = element.pointee
             switch e.type {
-            case .moveToPoint: pts.append(e.points[0])
-            case .addLineToPoint: pts.append(e.points[0])
-            case .addQuadCurveToPoint: pts.append(e.points[0]); pts.append(e.points[1])
-            case .addCurveToPoint: pts.append(e.points[0]); pts.append(e.points[1]); pts.append(e.points[2])
+            case .moveToPoint: pts.append(CodablePoint(e.points[0]))
+            case .addLineToPoint: pts.append(CodablePoint(e.points[0]))
+            case .addQuadCurveToPoint: pts.append(CodablePoint(e.points[0])); pts.append(CodablePoint(e.points[1]))
+            case .addCurveToPoint: pts.append(CodablePoint(e.points[0])); pts.append(CodablePoint(e.points[1])); pts.append(CodablePoint(e.points[2]))
             case .closeSubpath: break
             @unknown default: break
             }
@@ -84,15 +84,23 @@ struct CodablePath: Codable {
     }
 
     var cgPath: CGPath {
-        guard points.count >= 2 else { return CGMutablePath() }
+        let raw = points.map(\.cgPoint)
+        guard raw.count >= 2 else { return CGMutablePath() }
         let path = CGMutablePath()
-        path.move(to: points[0])
-        for i in 1..<points.count {
-            path.addLine(to: points[i])
+        path.move(to: raw[0])
+        for i in 1..<raw.count {
+            path.addLine(to: raw[i])
         }
         path.closeSubpath()
         return path
     }
+}
+
+struct CodablePoint: Codable {
+    let x: Double
+    let y: Double
+    init(_ p: CGPoint) { x = Double(p.x); y = Double(p.y) }
+    var cgPoint: CGPoint { CGPoint(x: x, y: y) }
 }
 
 enum Tool: String, CaseIterable {
@@ -109,16 +117,20 @@ struct AppSettings {
 }
 
 struct PenSettings {
-    var color: Color = .black
+    var lightColor: Color = .black
+    var darkColor: Color = .white
     var thickness: CGFloat = 2
     var smoothness: CGFloat = 1
-    var presets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
+    var lightPresets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
+    var darkPresets: [Color] = [.white, .red, .orange, .yellow, .green, .cyan, .purple, .pink]
 }
 
 struct FillSettings {
-    var color: Color = .red
+    var lightColor: Color = .red
+    var darkColor: Color = .red
     var opacity: Double = 0.1
-    var presets: [Color] = [.red, .orange, .yellow, .green, .blue, .purple, .pink, .mint]
+    var lightPresets: [Color] = [.red, .orange, .yellow, .green, .blue, .purple, .pink, .mint]
+    var darkPresets: [Color] = [.red, .orange, .yellow, .green, .cyan, .purple, .pink, .mint]
 }
 
 enum EraserMode: String, CaseIterable {
@@ -132,10 +144,12 @@ struct EraserSettings {
 }
 
 struct HighlighterSettings {
-    var color: Color = .yellow
+    var lightColor: Color = .yellow
+    var darkColor: Color = .yellow
     var thickness: CGFloat = 15
     var opacity: Double = 0.3
-    var presets: [Color] = [.yellow, .green, .cyan, .orange, .pink, .purple, .red, .blue]
+    var lightPresets: [Color] = [.yellow, .green, .cyan, .orange, .pink, .purple, .red, .blue]
+    var darkPresets: [Color] = [.yellow, .green, .cyan, .orange, .pink, .purple, .red, .blue]
 }
 
 typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>)
@@ -152,9 +166,16 @@ class DrawingModel: ObservableObject {
     @Published var fillSettings = FillSettings()
     @Published var eraserSettings = EraserSettings()
     @Published var highlighterSettings = HighlighterSettings()
-    @Published var appSettings = AppSettings() {
-        didSet { applyTheme() }
-    }
+    @Published var appSettings = AppSettings()
+    var openFileURL: URL?
+
+    // Theme-aware colors
+    var penColor: Color { appSettings.isDarkMode ? penSettings.darkColor : penSettings.lightColor }
+    var penPresets: [Color] { appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets }
+    var fillColor: Color { appSettings.isDarkMode ? fillSettings.darkColor : fillSettings.lightColor }
+    var fillPresets: [Color] { appSettings.isDarkMode ? fillSettings.darkPresets : fillSettings.lightPresets }
+    var hlColor: Color { appSettings.isDarkMode ? highlighterSettings.darkColor : highlighterSettings.lightColor }
+    var hlPresets: [Color] { appSettings.isDarkMode ? highlighterSettings.darkPresets : highlighterSettings.lightPresets }
     @Published var selectionLasso: [CGPoint] = []
     @Published var selectionBoundary: [CGPoint] = []
     @Published var selectedStrokeIds: Set<UUID> = []
@@ -179,7 +200,7 @@ class DrawingModel: ObservableObject {
         let isHighlight = currentTool == .highlighter
         currentStroke = Stroke(
             points: [point],
-            color: isEraser ? .white : isHighlight ? highlighterSettings.color : penSettings.color,
+            color: isEraser ? .white : isHighlight ? hlColor : penColor,
             lineWidth: isEraser ? eraserSettings.size : isHighlight ? highlighterSettings.thickness : penSettings.thickness,
             isEraser: isEraser,
             isHighlighter: isHighlight
@@ -439,7 +460,7 @@ class DrawingModel: ObservableObject {
             updateUndoRedo()
             return
         }
-        let region = FillRegion(path: path, color: fillSettings.color.opacity(fillSettings.opacity))
+        let region = FillRegion(path: path, color: fillColor.opacity(fillSettings.opacity))
         fillRegions.append(region)
         updateUndoRedo()
     }
@@ -451,55 +472,6 @@ class DrawingModel: ObservableObject {
             selectedFillIds.removeAll()
             selectionBoundary.removeAll()
         }
-    }
-
-    private func applyTheme() {
-        let lightPresets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
-        let darkPresets: [Color] = [.white, .red, .orange, .yellow, .green, .cyan, .purple, .pink]
-        if appSettings.isDarkMode {
-            if penSettings.color == .black { penSettings.color = .white }
-            if penSettings.presets == lightPresets { penSettings.presets = darkPresets }
-            strokes = strokes.map { s in
-                guard !s.isHighlighter, !s.isEraser else { return s }
-                return Stroke(id: s.id, points: s.points, color: invertForDark(s.uiColor), lineWidth: s.lineWidth, isEraser: s.isEraser, isHighlighter: s.isHighlighter)
-            }
-        } else {
-            if penSettings.color == .white { penSettings.color = .black }
-            if penSettings.presets == darkPresets { penSettings.presets = lightPresets }
-            strokes = strokes.map { s in
-                guard !s.isHighlighter, !s.isEraser else { return s }
-                return Stroke(id: s.id, points: s.points, color: invertForLight(s.uiColor), lineWidth: s.lineWidth, isEraser: s.isEraser, isHighlighter: s.isHighlighter)
-            }
-        }
-    }
-
-    private func luminance(of color: Color) -> CGFloat? {
-        #if os(iOS)
-        let c = UIColor(color)
-        #else
-        let c = NSColor(color).usingColorSpace(.sRGB) ?? NSColor.white
-        #endif
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        #if os(iOS)
-        guard c.getRed(&r, green: &g, blue: &b, alpha: &a) else { return nil }
-        #else
-        c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #endif
-        return 0.299 * r + 0.587 * g + 0.114 * b
-    }
-
-    private func invertForDark(_ color: Color) -> Color {
-        guard let l = luminance(of: color) else { return color }
-        if l < 0.3 { return .white }
-        if l > 0.7 { return .black }
-        return Color(white: 1 - l)
-    }
-
-    private func invertForLight(_ color: Color) -> Color {
-        guard let l = luminance(of: color) else { return color }
-        if l > 0.7 { return .black }
-        if l < 0.3 { return .white }
-        return Color(white: 1 - l)
     }
 
     func undo() {
@@ -557,6 +529,30 @@ class DrawingModel: ObservableObject {
         fillRegions = save.fillRegions
         updateUndoRedo()
     }
+
+    func save() {
+        guard let url = openFileURL else { return }
+        let shouldStop = url.startAccessingSecurityScopedResource()
+        defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
+        if let data = saveData() {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    // MARK: - Menu command helpers (triggered by menu bar or keyboard)
+
+    func openCmd() { pendingAction = .open }
+    func exportPNG() { pendingAction = .export(.png) }
+    func exportPDF() { pendingAction = .export(.pdf) }
+
+    enum PendingAction: Equatable {
+        case open
+        case export(ExportFormat)
+    }
+
+    enum ExportFormat: String { case png, pdf }
+    @Published var pendingAction: PendingAction?
+    @Published var isToolbarVisible: Bool = true
 
     func pngData(size: CGSize, offset: CGPoint = .zero, scale: CGFloat = 3) -> Data? {
         let w = Int(size.width * scale)

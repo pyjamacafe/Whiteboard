@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct SettingsPopupView: View {
     @ObservedObject var model: DrawingModel
     @State private var showingExporter = false
+    @State private var showingImporter = false
     @State private var exportData: Data?
     @State private var exportName = "Untitled"
     @State private var exportType: UTType = .data
@@ -33,43 +34,71 @@ struct SettingsPopupView: View {
 
             Text("Canvas Background").font(.subheadline).foregroundColor(.secondary)
 
-            ForEach(CanvasBackground.allCases, id: \.self) { bg in
-                Button(action: { model.appSettings.canvasBackground = bg }) {
-                    HStack {
+            HStack(spacing: 8) {
+                ForEach(CanvasBackground.allCases, id: \.self) { bg in
+                    let isSelected = model.appSettings.canvasBackground == bg
+                    Button(action: { model.appSettings.canvasBackground = bg }) {
                         Image(systemName: iconName(for: bg))
-                            .frame(width: 20)
-                        Text(bg.rawValue.capitalized)
-                            .foregroundColor(.primary)
-                        Spacer()
-                        if model.appSettings.canvasBackground == bg {
-                            Image(systemName: "checkmark")
-                                .foregroundColor(.accentColor)
-                        }
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
+                            .background(isSelected ? Color.accentColor : Color.primary.opacity(0.08))
+                            .foregroundColor(isSelected ? .white : .secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
                     }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
 
             Divider()
 
-            Text("Export").font(.subheadline).foregroundColor(.secondary)
+            HStack(spacing: 8) {
+                Group {
+                    Button(action: saveFile) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
+                            .background(model.openFileURL != nil ? Color.accentColor : Color.primary.opacity(0.08))
+                            .foregroundColor(model.openFileURL != nil ? .white : .secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .help(model.openFileURL != nil ? "Save" : "Save As…")
 
-            Picker("Format", selection: $exportFormat) {
-                ForEach(ExportFormat.allCases, id: \.self) { fmt in
-                    Text(fmt.rawValue).tag(fmt)
-                }
-            }
-            .pickerStyle(.segmented)
+                    Button(action: { exportFormat = .png; prepareExport() }) {
+                        Image(systemName: "photo")
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
+                            .background(Color.primary.opacity(0.08))
+                            .foregroundColor(.secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .help("Export PNG")
 
-            Button(action: prepareExport) {
-                HStack {
-                    Image(systemName: "square.and.arrow.up")
-                        .frame(width: 20)
-                    Text("Export")
+                    Button(action: { exportFormat = .pdf; prepareExport() }) {
+                        Image(systemName: "doc.richtext")
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
+                            .background(Color.primary.opacity(0.08))
+                            .foregroundColor(.secondary)
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                    }
+                    .help("Export PDF")
                 }
+                .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button(action: { showingImporter = true }) {
+                    Image(systemName: "folder")
+                        .font(.title3)
+                        .frame(width: 32, height: 32)
+                        .background(Color.primary.opacity(0.08))
+                        .foregroundColor(.secondary)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("Open .wb")
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
         }
         .padding(14)
         .background(.thickMaterial)
@@ -77,6 +106,25 @@ struct SettingsPopupView: View {
         .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
         .frame(maxWidth: 260)
         .fileExporter(isPresented: $showingExporter, document: ExportDocument(data: exportData ?? Data()), contentType: exportType, defaultFilename: exportName) { _ in }
+        .fileImporter(isPresented: $showingImporter, allowedContentTypes: [.init(filenameExtension: "wb")!, .data]) { result in
+            if case .success(let url) = result {
+                let shouldStop = url.startAccessingSecurityScopedResource()
+                defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
+                if let data = try? Data(contentsOf: url) {
+                    model.loadData(data)
+                    model.openFileURL = url
+                }
+            }
+        }
+    }
+
+    private func saveFile() {
+        if model.openFileURL != nil {
+            model.save()
+        } else {
+            exportFormat = .wb
+            prepareExport()
+        }
     }
 
     private func prepareExport() {

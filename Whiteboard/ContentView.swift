@@ -4,11 +4,10 @@ import UIKit
 #endif
 
 struct ContentView: View {
-    @StateObject private var model = DrawingModel()
+    @EnvironmentObject var model: DrawingModel
     @State private var hoveredTool: String?
     @State private var settingsTool: Tool?
     @State private var lastTapTime: Date = .distantPast
-    @State private var isToolbarVisible: Bool = true
     @State private var showSettings: Bool = false
 
     var body: some View {
@@ -17,13 +16,13 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             VStack {
-                if isToolbarVisible { toolbar }
-                if isToolbarVisible, let tool = settingsTool, tool != .select {
+                if model.isToolbarVisible { toolbar }
+                if model.isToolbarVisible, let tool = settingsTool, tool != .select {
                     ToolSettingsView(model: model, tool: tool)
                         .padding(.top, 4)
                         .onTapGesture { }
                 }
-                if isToolbarVisible && showSettings {
+                if model.isToolbarVisible && showSettings {
                     SettingsPopupView(model: model)
                         .padding(.top, 4)
                         .onTapGesture { }
@@ -32,8 +31,13 @@ struct ContentView: View {
             }
         }
         .onTapGesture { settingsTool = nil }
+        .onChange(of: model.pendingAction) { action in
+            guard let action = action else { return }
+            showSettings = true
+            model.pendingAction = nil
+        }
         .background(
-            Button("") { isToolbarVisible.toggle() }
+            Button("") { model.isToolbarVisible.toggle() }
                 .keyboardShortcut(.tab, modifiers: [])
                 .hidden()
                 .frame(width: 0, height: 0)
@@ -56,13 +60,25 @@ struct ContentView: View {
                 .hidden()
                 .frame(width: 0, height: 0)
         )
+        .background(
+            Button("") { model.save() }
+                .keyboardShortcut("s", modifiers: .command)
+                .hidden()
+                .frame(width: 0, height: 0)
+        )
+        .background(
+            Button("") { showSettings = true }
+                .keyboardShortcut("o", modifiers: .command)
+                .hidden()
+                .frame(width: 0, height: 0)
+        )
     }
 
     private func toolColor(_ tool: Tool) -> Color {
         switch tool {
-        case .pen: return model.penSettings.color
-        case .highlighter: return model.highlighterSettings.color
-        case .fill: return model.fillSettings.color
+        case .pen: return model.penColor
+        case .highlighter: return model.hlColor
+        case .fill: return model.fillColor
         default: return Color.accentColor
         }
     }

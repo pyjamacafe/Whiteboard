@@ -99,7 +99,9 @@ struct ToolSettingsView: View {
 
     private var penSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            presetRow(presets: $model.penSettings.presets, selected: $model.penSettings.color, lastTapIndex: $lastPenTapIndex)
+            presetRow(presets: model.appSettings.isDarkMode ? $model.penSettings.darkPresets : $model.penSettings.lightPresets,
+                     selected: model.appSettings.isDarkMode ? $model.penSettings.darkColor : $model.penSettings.lightColor,
+                     lastTapIndex: $lastPenTapIndex)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -135,7 +137,9 @@ struct ToolSettingsView: View {
 
     private var fillSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            presetRow(presets: $model.fillSettings.presets, selected: $model.fillSettings.color, lastTapIndex: $lastFillTapIndex)
+            presetRow(presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
+                     selected: model.appSettings.isDarkMode ? $model.fillSettings.darkColor : $model.fillSettings.lightColor,
+                     lastTapIndex: $lastFillTapIndex)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -152,7 +156,9 @@ struct ToolSettingsView: View {
 
     private var highlighterSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            presetRow(presets: $model.highlighterSettings.presets, selected: $model.highlighterSettings.color, lastTapIndex: $lastHighlighterTapIndex)
+            presetRow(presets: model.appSettings.isDarkMode ? $model.highlighterSettings.darkPresets : $model.highlighterSettings.lightPresets,
+                     selected: model.appSettings.isDarkMode ? $model.highlighterSettings.darkColor : $model.highlighterSettings.lightColor,
+                     lastTapIndex: $lastHighlighterTapIndex)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
