@@ -22,7 +22,7 @@ struct ContentView: View {
         return Button(action: { model.selectTool(tool) }) {
             Image(systemName: systemName)
                 .font(.title3)
-                .frame(width: 40, height: 40)
+                .frame(width: 32, height: 32)
                 .background(
                     isSelected ? Color.accentColor :
                     isHovered ? Color.primary.opacity(0.12) : .clear
@@ -31,7 +31,7 @@ struct ContentView: View {
                     isSelected ? .white :
                     isHovered ? .primary : .secondary
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: 7))
         }
         .onHover { hovering in
             hoveredTool = hovering ? systemName : nil
@@ -43,7 +43,7 @@ struct ContentView: View {
         return Button(action: action) {
             Image(systemName: systemName)
                 .font(.title3)
-                .frame(width: 40, height: 40)
+                .frame(width: 32, height: 32)
                 .background(isHovered ? Color.primary.opacity(0.12) : .clear)
                 .foregroundColor(isHovered ? .primary : .secondary)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -58,7 +58,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             toolButton(systemName: "pencil.tip", tool: .pen)
             toolButton(systemName: "eraser", tool: .eraser)
-            toolButton(systemName: "paintbucket.fill", tool: .fill)
+            toolButton(systemName: "drop.fill", tool: .fill)
 
             Divider()
                 .frame(height: 24)
@@ -68,11 +68,11 @@ struct ContentView: View {
             actionButton(systemName: "trash", action: { model.clear() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
         }
         .buttonStyle(.plain)
-        .padding(2)
-        .background(.regularMaterial)
+        .padding(5)
+        .background(.thickMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
-        .padding(.top, 2)
-        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .padding(.top, 12)
+        .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
     }
 }
