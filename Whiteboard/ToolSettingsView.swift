@@ -152,7 +152,7 @@ struct ToolSettingsView: View {
 
     private var highlighterSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
-            presetRow(presets: $model.penSettings.presets, selected: $model.highlighterSettings.color, lastTapIndex: $lastHighlighterTapIndex)
+            presetRow(presets: $model.highlighterSettings.presets, selected: $model.highlighterSettings.color, lastTapIndex: $lastHighlighterTapIndex)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -177,11 +177,22 @@ struct ToolSettingsView: View {
     // MARK: - Eraser
 
     private var eraserSettings: some View {
-        Picker("Mode", selection: $model.eraserSettings.mode) {
-            ForEach(EraserMode.allCases, id: \.self) { mode in
-                Text(mode.rawValue).tag(mode)
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Mode", selection: $model.eraserSettings.mode) {
+                ForEach(EraserMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Size").font(.caption)
+                    Spacer()
+                    Text("\(model.eraserSettings.size, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
+                }
+                Slider(value: $model.eraserSettings.size, in: 5...60, step: 1)
             }
         }
-        .pickerStyle(.segmented)
     }
 }

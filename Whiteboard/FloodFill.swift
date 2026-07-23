@@ -6,8 +6,6 @@ import CoreGraphics
 enum FloodFill {
 
     static func fillPath(at canvasPoint: CGPoint, strokes: [Stroke]) -> CGPath? {
-        print("[FF] fillPath at (\(canvasPoint.x), \(canvasPoint.y))")
-
         var segs: [(CGPoint, CGPoint)] = []
         for s in strokes where !s.isEraser {
             for i in 0..<s.points.count - 1 {
@@ -17,35 +15,25 @@ enum FloodFill {
                 let d = s.points.first!.distance(to: s.points.last!)
                 if d < 30 {
                     segs.append((s.points.last!, s.points.first!))
-                    print("[FF] closed stroke loop (dist=\(d))")
                 }
             }
         }
-        print("[FF] segments: \(segs.count)")
-        guard !segs.isEmpty else { print("[FF] no segments"); return nil }
+        guard !segs.isEmpty else { return nil }
 
         let enclosures = EnclosureDetector.detect(from: segs)
-        print("[FF] enclosures found: \(enclosures.count)")
 
         var best: (path: CGPath, area: CGFloat)?
-        for (idx, path) in enclosures.enumerated() {
+        for path in enclosures {
             let box = path.boundingBox
-            print("[FF] enclosure \(idx): box=\(box), null=\(box.isNull)")
             guard !box.isNull else { continue }
-            let boxContains = box.contains(canvasPoint)
-            print("[FF]   box contains tap: \(boxContains)")
-            guard boxContains else { continue }
+            guard box.contains(canvasPoint) else { continue }
             let pts = pathPoints(path)
-            let pip = pointInPolygon(canvasPoint, pts)
-            print("[FF]   pointInPolygon: \(pip), pts=\(pts.count)")
-            guard pip else { continue }
+            guard pointInPolygon(canvasPoint, pts) else { continue }
             let area = abs(signedArea(pts))
-            print("[FF]   area: \(area)")
             if best == nil || area < best!.area {
                 best = (path, area)
             }
         }
-        print("[FF] best: \(best != nil ? "found area \(best!.area)" : "nil")")
         return best?.path
     }
 
@@ -117,11 +105,8 @@ private enum EnclosureDetector {
 
     /// Detect all enclosed cycles from a set of line segments.
     static func detect(from segments: [(CGPoint, CGPoint)]) -> [CGPath] {
-        print("[DCEL] input segments: \(segments.count)")
-
         // Phase 1: split segments at intersection points
         var split = segments
-        var splitCount = 0
         var i = 0
         while i < split.count {
             var j = i + 1
@@ -135,7 +120,6 @@ private enum EnclosureDetector {
                         split.remove(at: i)
                         split.insert((s1.0, p), at: i)
                         split.insert((p, s1.1), at: i + 1)
-                        splitCount += 1
                         advanced = true
                         break
                     }
@@ -143,7 +127,6 @@ private enum EnclosureDetector {
                         split.remove(at: j)
                         split.insert((s2.0, p), at: j)
                         split.insert((p, s2.1), at: j + 1)
-                        splitCount += 1
                         j += 1
                     }
                 }
@@ -151,8 +134,6 @@ private enum EnclosureDetector {
             }
             if !advanced { i += 1 }
         }
-        print("[DCEL] after split: \(split.count) segments, \(splitCount) splits")
-
         // Phase 2: build DCEL graph
         var adj = [Vertex: [HalfEdge]]()
         var allEdges = [HalfEdge]()
@@ -166,8 +147,6 @@ private enum EnclosureDetector {
             allEdges.append(e1)
             allEdges.append(e2)
         }
-        print("[DCEL] vertices: \(adj.count), half-edges: \(allEdges.count)")
-
         // Sort edges around each vertex by angle (CCW) and link 'next' pointers
         for (v, edges) in adj {
             let sorted = edges.sorted { a, b in
@@ -195,7 +174,6 @@ private enum EnclosureDetector {
 
         // Phase 3: traverse cycles using left-hand turn rule
         var paths = [CGPath]()
-        var cycleCount = 0
         for start in allEdges where !start.visited {
             var pts = [CGPoint]()
             var cur: HalfEdge? = start
@@ -206,7 +184,6 @@ private enum EnclosureDetector {
             }
             if pts.count >= 3 {
                 let area = signedArea(pts)
-                print("[DCEL] cycle \(cycleCount): pts=\(pts.count), area=\(area)")
                 if area > 0 {
                     let path = CGMutablePath()
                     path.move(to: pts[0])
@@ -214,10 +191,8 @@ private enum EnclosureDetector {
                     path.closeSubpath()
                     paths.append(path)
                 }
-                cycleCount += 1
             }
         }
-        print("[DCEL] total cycles: \(cycleCount), positive-area (enclosures): \(paths.count)")
         return paths
     }
 
