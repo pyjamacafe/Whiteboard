@@ -14,6 +14,7 @@ struct ToolSettingsView: View {
             case .pen: penSettings
             case .eraser: eraserSettings
             case .fill: fillSettings
+            case .highlighter: highlighterSettings
             case .select: EmptyView()
             }
         }
@@ -92,6 +93,7 @@ struct ToolSettingsView: View {
 
     @State private var lastPenTapIndex: Int?
     @State private var lastFillTapIndex: Int?
+    @State private var lastHighlighterTapIndex: Int?
 
     // MARK: - Pen
 
@@ -142,6 +144,32 @@ struct ToolSettingsView: View {
                     Text("\(Int(model.fillSettings.opacity * 100))%").font(.caption).foregroundColor(.secondary)
                 }
                 Slider(value: $model.fillSettings.opacity, in: 0.1...1.0, step: 0.05)
+            }
+        }
+    }
+
+    // MARK: - Highlighter
+
+    private var highlighterSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            presetRow(presets: $model.penSettings.presets, selected: $model.highlighterSettings.color, lastTapIndex: $lastHighlighterTapIndex)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Thickness").font(.caption)
+                    Spacer()
+                    Text("\(model.highlighterSettings.thickness, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
+                }
+                Slider(value: $model.highlighterSettings.thickness, in: 5...30, step: 1)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Opacity").font(.caption)
+                    Spacer()
+                    Text("\(Int(model.highlighterSettings.opacity * 100))%").font(.caption).foregroundColor(.secondary)
+                }
+                Slider(value: $model.highlighterSettings.opacity, in: 0.1...1.0, step: 0.05)
             }
         }
     }

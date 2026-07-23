@@ -20,6 +20,7 @@ struct CanvasView: UIViewRepresentable {
 
     func updateUIView(_ uiView: DrawingCanvasView, context: Context) {
         uiView.refresh()
+        uiView.onBeginDraw = onBeginDraw
     }
 }
 
@@ -111,13 +112,19 @@ class StrokeLayerView: UIView {
         for region in model.fillRegions {
             drawFill(region, in: ctx)
         }
-        for stroke in model.strokes {
+        // Highlighter strokes (below pen)
+        // Highlighter strokes (behind pen)
+        for stroke in model.strokes where stroke.isHighlighter {
             drawStroke(stroke, in: ctx)
         }
-        if let current = model.currentStroke {
-            let smoothed = model.simplified(current.points)
-            let smoothStroke = Stroke(id: current.id, points: smoothed, color: current.color, lineWidth: current.lineWidth, isEraser: current.isEraser)
-            drawStroke(smoothStroke, in: ctx)
+        if let current = model.currentStroke, current.isHighlighter {
+            drawStroke(current, in: ctx)
+        }
+        for stroke in model.strokes where !stroke.isHighlighter {
+            drawStroke(stroke, in: ctx)
+        }
+        if let current = model.currentStroke, !current.isHighlighter {
+            drawStroke(current, in: ctx)
         }
 
         // Lasso being drawn
@@ -512,13 +519,17 @@ struct CanvasView: View {
                 for region in model.fillRegions {
                     drawFill(region, in: &context, transform: tf)
                 }
-                for stroke in model.strokes {
+                for stroke in model.strokes where stroke.isHighlighter {
                     drawStroke(stroke, in: &context, transform: tf)
                 }
-                if let current = model.currentStroke {
-                    let smoothed = model.simplified(current.points)
-                    let smoothStroke = Stroke(id: current.id, points: smoothed, color: current.color, lineWidth: current.lineWidth, isEraser: current.isEraser)
-                    drawStroke(smoothStroke, in: &context, transform: tf)
+                if let current = model.currentStroke, current.isHighlighter {
+                    drawStroke(current, in: &context, transform: tf)
+                }
+                for stroke in model.strokes where !stroke.isHighlighter {
+                    drawStroke(stroke, in: &context, transform: tf)
+                }
+                if let current = model.currentStroke, !current.isHighlighter {
+                    drawStroke(current, in: &context, transform: tf)
                 }
 
                 // Lasso being drawn

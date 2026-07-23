@@ -80,6 +80,7 @@ struct ContentView: View {
             toolButton(systemName: "pencil.tip", tool: .pen)
             toolButton(systemName: "eraser", tool: .eraser)
             toolButton(systemName: "drop.fill", tool: .fill)
+            toolButton(systemName: "highlighter", tool: .highlighter)
             toolButton(systemName: "cursorarrow.click", tool: .select)
 
             Divider()

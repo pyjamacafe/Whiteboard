@@ -7,6 +7,7 @@ struct Stroke: Identifiable {
     let color: Color
     let lineWidth: CGFloat
     let isEraser: Bool
+    let isHighlighter: Bool
 }
 
 struct FillRegion: Identifiable {
@@ -16,7 +17,7 @@ struct FillRegion: Identifiable {
 }
 
 enum Tool: String, CaseIterable {
-    case pen, eraser, fill, select
+    case pen, eraser, fill, select, highlighter
 }
 
 struct PenSettings {
@@ -41,6 +42,12 @@ struct EraserSettings {
     var mode: EraserMode = .partial
 }
 
+struct HighlighterSettings {
+    var color: Color = .yellow
+    var thickness: CGFloat = 15
+    var opacity: Double = 0.3
+}
+
 typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>)
 
 class DrawingModel: ObservableObject {
@@ -54,6 +61,7 @@ class DrawingModel: ObservableObject {
     @Published var penSettings = PenSettings()
     @Published var fillSettings = FillSettings()
     @Published var eraserSettings = EraserSettings()
+    @Published var highlighterSettings = HighlighterSettings()
     @Published var selectionLasso: [CGPoint] = []
     @Published var selectionBoundary: [CGPoint] = []
     @Published var selectedStrokeIds: Set<UUID> = []
@@ -75,11 +83,13 @@ class DrawingModel: ObservableObject {
     }
 
     func beginStroke(at point: CGPoint, isEraser: Bool) {
+        let isHighlight = currentTool == .highlighter
         currentStroke = Stroke(
             points: [point],
-            color: isEraser ? .white : penSettings.color,
-            lineWidth: isEraser ? 20 : penSettings.thickness,
-            isEraser: isEraser
+            color: isEraser ? .white : isHighlight ? highlighterSettings.color.opacity(highlighterSettings.opacity) : penSettings.color,
+            lineWidth: isEraser ? 20 : isHighlight ? highlighterSettings.thickness : penSettings.thickness,
+            isEraser: isEraser,
+            isHighlighter: isHighlight
         )
     }
 
@@ -97,10 +107,10 @@ class DrawingModel: ObservableObject {
             erase(stroke)
         } else if stroke.points.count >= 2 {
             var finalStroke = stroke
-            if penSettings.smoothness > 1 {
+            if penSettings.smoothness > 1 && !stroke.isEraser && stroke.lineWidth < 10 {
                 let simplified = simplify(stroke.points, epsilon: penSettings.smoothness)
                 if simplified.count >= 2 {
-                    finalStroke = Stroke(id: stroke.id, points: simplified, color: stroke.color, lineWidth: stroke.lineWidth, isEraser: false)
+                    finalStroke = Stroke(id: stroke.id, points: simplified, color: stroke.color, lineWidth: stroke.lineWidth, isEraser: false, isHighlighter: stroke.isHighlighter)
                 }
             }
             strokes.append(finalStroke)
@@ -203,7 +213,7 @@ class DrawingModel: ObservableObject {
         strokes = strokes.map { s in
             guard selectedStrokeIds.contains(s.id) else { return s }
             return Stroke(id: s.id, points: s.points.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) },
-                          color: s.color, lineWidth: s.lineWidth, isEraser: s.isEraser)
+                          color: s.color, lineWidth: s.lineWidth, isEraser: s.isEraser, isHighlighter: s.isHighlighter)
         }
         fillRegions = fillRegions.map { r in
             guard selectedFillIds.contains(r.id) else { return r }
@@ -300,7 +310,7 @@ class DrawingModel: ObservableObject {
                     }
                     if isErased {
                         if segment.count >= 2 {
-                            newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false))
+                            newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false, isHighlighter: pen.isHighlighter))
                         }
                         segment = []
                     } else {
@@ -308,7 +318,7 @@ class DrawingModel: ObservableObject {
                     }
                 }
                 if segment.count >= 2 {
-                    newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false))
+                    newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false, isHighlighter: pen.isHighlighter))
                 }
             }
             strokes = newStrokes
