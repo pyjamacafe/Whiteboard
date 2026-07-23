@@ -3,23 +3,31 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var model = DrawingModel()
     @State private var hoveredTool: String?
+    @State private var settingsTool: Tool?
+    @State private var lastTapTime: Date = .distantPast
 
     var body: some View {
         ZStack {
-            CanvasView(model: model)
+            CanvasView(model: model, onBeginDraw: { settingsTool = nil })
                 .ignoresSafeArea()
 
             VStack {
                 toolbar
+                if let tool = settingsTool, tool != .select {
+                    ToolSettingsView(model: model, tool: tool)
+                        .padding(.top, 4)
+                        .onTapGesture { } // block tap-through
+                }
                 Spacer()
             }
         }
+        .onTapGesture { settingsTool = nil }
     }
 
     private func toolButton(systemName: String, tool: Tool) -> some View {
         let isSelected = model.currentTool == tool
         let isHovered = hoveredTool == systemName
-        return Button(action: { model.selectTool(tool) }) {
+        return Button(action: {}) {
             Image(systemName: systemName)
                 .font(.title3)
                 .frame(width: 32, height: 32)
@@ -36,6 +44,19 @@ struct ContentView: View {
         .onHover { hovering in
             hoveredTool = hovering ? systemName : nil
         }
+        .highPriorityGesture(
+            TapGesture().onEnded {
+                let now = Date()
+                if now.timeIntervalSince(lastTapTime) < 0.3 {
+                    settingsTool = settingsTool == tool ? nil : tool
+                    lastTapTime = .distantPast
+                } else {
+                    lastTapTime = now
+                    model.selectTool(tool)
+                    if settingsTool != nil { settingsTool = tool }
+                }
+            }
+        )
     }
 
     private func actionButton(systemName: String, action: @escaping () -> Void, disabled: Bool) -> some View {

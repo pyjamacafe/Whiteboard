@@ -15,8 +15,30 @@ struct FillRegion: Identifiable {
     let color: Color
 }
 
-enum Tool {
+enum Tool: String, CaseIterable {
     case pen, eraser, fill, select
+}
+
+struct PenSettings {
+    var color: Color = .black
+    var thickness: CGFloat = 2
+    var smoothness: CGFloat = 3
+    var presets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
+}
+
+struct FillSettings {
+    var color: Color = .red
+    var opacity: Double = 0.1
+    var presets: [Color] = [.red, .orange, .yellow, .green, .blue, .purple, .pink, .mint]
+}
+
+enum EraserMode: String, CaseIterable {
+    case partial = "Partial"
+    case full = "Full Stroke"
+}
+
+struct EraserSettings {
+    var mode: EraserMode = .partial
 }
 
 typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>)
@@ -29,6 +51,9 @@ class DrawingModel: ObservableObject {
     @Published var canRedo: Bool = false
 
     var currentStroke: Stroke?
+    @Published var penSettings = PenSettings()
+    @Published var fillSettings = FillSettings()
+    @Published var eraserSettings = EraserSettings()
     @Published var selectionLasso: [CGPoint] = []
     @Published var selectionBoundary: [CGPoint] = []
     @Published var selectedStrokeIds: Set<UUID> = []
@@ -52,8 +77,8 @@ class DrawingModel: ObservableObject {
     func beginStroke(at point: CGPoint, isEraser: Bool) {
         currentStroke = Stroke(
             points: [point],
-            color: isEraser ? .white : .black,
-            lineWidth: isEraser ? 20 : 2,
+            color: isEraser ? .white : penSettings.color,
+            lineWidth: isEraser ? 20 : penSettings.thickness,
             isEraser: isEraser
         )
     }
@@ -71,7 +96,14 @@ class DrawingModel: ObservableObject {
         if stroke.isEraser {
             erase(stroke)
         } else if stroke.points.count >= 2 {
-            strokes.append(stroke)
+            var finalStroke = stroke
+            if penSettings.smoothness > 1 {
+                let simplified = simplify(stroke.points, epsilon: penSettings.smoothness)
+                if simplified.count >= 2 {
+                    finalStroke = Stroke(id: stroke.id, points: simplified, color: stroke.color, lineWidth: stroke.lineWidth, isEraser: false)
+                }
+            }
+            strokes.append(finalStroke)
         }
         updateUndoRedo()
     }
@@ -195,6 +227,38 @@ class DrawingModel: ObservableObject {
         return sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py))
     }
 
+    // MARK: - RDP simplification
+
+    func simplified(_ points: [CGPoint]) -> [CGPoint] {
+        guard penSettings.smoothness > 1 else { return points }
+        let result = simplify(points, epsilon: penSettings.smoothness)
+        return result.count >= 2 ? result : points
+    }
+
+    private func simplify(_ points: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
+        guard points.count > 2 else { return points }
+        var dmax: CGFloat = 0
+        var idx = 0
+        for i in 1..<points.count - 1 {
+            let d = perpDist(points[i], points[0], points[points.count - 1])
+            if d > dmax { dmax = d; idx = i }
+        }
+        if dmax > epsilon {
+            return simplify(Array(points[0...idx]), epsilon: epsilon).dropLast()
+                + simplify(Array(points[idx..<points.count]), epsilon: epsilon)
+        }
+        return [points[0], points[points.count - 1]]
+    }
+
+    private func perpDist(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x, dy = b.y - a.y
+        let lenSq = dx * dx + dy * dy
+        guard lenSq != 0 else { return sqrt((p.x - a.x) * (p.x - a.x) + (p.y - a.y) * (p.y - a.y)) }
+        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
+        let px = a.x + t * dx, py = a.y + t * dy
+        return sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py))
+    }
+
     func deleteSelected() {
         guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty else {
             clear()
@@ -214,28 +278,41 @@ class DrawingModel: ObservableObject {
     private func erase(_ eraser: Stroke) {
         let threshold = eraser.lineWidth / 2 + 2
 
-        var newStrokes: [Stroke] = []
-        for pen in strokes where !pen.isEraser {
-            var segment: [CGPoint] = []
-            for pp in pen.points {
-                let isErased = eraser.points.contains { ep in
+        let hitByEraser: (Stroke) -> Bool = { pen in
+            pen.points.contains { pp in
+                eraser.points.contains { ep in
                     let dx = pp.x - ep.x, dy = pp.y - ep.y
                     return sqrt(dx * dx + dy * dy) < threshold
                 }
-                if isErased {
-                    if segment.count >= 2 {
-                        newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false))
-                    }
-                    segment = []
-                } else {
-                    segment.append(pp)
-                }
-            }
-            if segment.count >= 2 {
-                newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false))
             }
         }
-        strokes = newStrokes
+
+        if eraserSettings.mode == .full {
+            strokes = strokes.filter { $0.isEraser || !hitByEraser($0) }
+        } else {
+            var newStrokes: [Stroke] = []
+            for pen in strokes where !pen.isEraser {
+                var segment: [CGPoint] = []
+                for pp in pen.points {
+                    let isErased = eraser.points.contains { ep in
+                        let dx = pp.x - ep.x, dy = pp.y - ep.y
+                        return sqrt(dx * dx + dy * dy) < threshold
+                    }
+                    if isErased {
+                        if segment.count >= 2 {
+                            newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false))
+                        }
+                        segment = []
+                    } else {
+                        segment.append(pp)
+                    }
+                }
+                if segment.count >= 2 {
+                    newStrokes.append(Stroke(points: segment, color: pen.color, lineWidth: pen.lineWidth, isEraser: false))
+                }
+            }
+            strokes = newStrokes
+        }
 
         fillRegions = fillRegions.filter { region in
             for ep in eraser.points {
@@ -253,7 +330,7 @@ class DrawingModel: ObservableObject {
             updateUndoRedo()
             return
         }
-        let region = FillRegion(path: path, color: Color.red.opacity(0.2))
+        let region = FillRegion(path: path, color: fillSettings.color.opacity(fillSettings.opacity))
         fillRegions.append(region)
         updateUndoRedo()
     }

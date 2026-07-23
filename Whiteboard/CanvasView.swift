@@ -6,8 +6,13 @@ import SwiftUI
 
 struct CanvasView: UIViewRepresentable {
     @ObservedObject var model: DrawingModel
+    var onBeginDraw: (() -> Void)?
 
     func makeUIView(context: Context) -> DrawingCanvasView {
+        let view = DrawingCanvasView()
+        view.model = model
+        view.onBeginDraw = onBeginDraw
+        return view
         let view = DrawingCanvasView()
         view.model = model
         return view
@@ -110,7 +115,9 @@ class StrokeLayerView: UIView {
             drawStroke(stroke, in: ctx)
         }
         if let current = model.currentStroke {
-            drawStroke(current, in: ctx)
+            let smoothed = model.simplified(current.points)
+            let smoothStroke = Stroke(id: current.id, points: smoothed, color: current.color, lineWidth: current.lineWidth, isEraser: current.isEraser)
+            drawStroke(smoothStroke, in: ctx)
         }
 
         // Lasso being drawn
@@ -219,6 +226,7 @@ class DrawingCanvasView: UIView {
             strokeLayer.model = model
         }
     }
+    var onBeginDraw: (() -> Void)?
 
     private var offset: CGSize = .zero {
         didSet {
@@ -332,6 +340,8 @@ class DrawingCanvasView: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first, let model = model else { return }
+
+        onBeginDraw?()
 
         if model.currentTool == .fill {
             model.performFill(at: toCanvas(touch.location(in: self)))
@@ -455,6 +465,7 @@ extension DrawingCanvasView: UIPencilInteractionDelegate {
 
 struct CanvasView: View {
     @ObservedObject var model: DrawingModel
+    var onBeginDraw: (() -> Void)?
     @State private var offset: CGSize = .zero
     @State private var scale: CGFloat = 1.0
     @State private var pointCount: Int = 0
@@ -505,7 +516,9 @@ struct CanvasView: View {
                     drawStroke(stroke, in: &context, transform: tf)
                 }
                 if let current = model.currentStroke {
-                    drawStroke(current, in: &context, transform: tf)
+                    let smoothed = model.simplified(current.points)
+                    let smoothStroke = Stroke(id: current.id, points: smoothed, color: current.color, lineWidth: current.lineWidth, isEraser: current.isEraser)
+                    drawStroke(smoothStroke, in: &context, transform: tf)
                 }
 
                 // Lasso being drawn
@@ -554,6 +567,7 @@ struct CanvasView: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         hoverLocation = value.location
+                        onBeginDraw?()
 
                         if model.currentTool == .fill {
                             guard !didFill else { return }
