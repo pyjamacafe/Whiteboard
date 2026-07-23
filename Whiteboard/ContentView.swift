@@ -63,7 +63,8 @@ struct ContentView: View {
             Divider()
                 .frame(height: 24)
 
-            actionButton(systemName: "arrow.uturn.backward", action: { model.undo() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
+            actionButton(systemName: "arrow.uturn.backward", action: { model.undo() }, disabled: !model.canUndo)
+            actionButton(systemName: "arrow.uturn.forward", action: { model.redo() }, disabled: !model.canRedo)
             actionButton(systemName: "trash", action: { model.clear() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
         }
         .buttonStyle(.plain)
