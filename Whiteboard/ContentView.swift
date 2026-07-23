@@ -121,24 +121,26 @@ struct ContentView: View {
                 let now = Date()
                 if now.timeIntervalSince(lastTapTime) < 0.3 {
                     settingsTool = settingsTool == tool ? nil : tool
+                    showSettings = false
                     lastTapTime = .distantPast
                 } else {
                     lastTapTime = now
                     model.selectTool(tool)
-                    if settingsTool != nil { settingsTool = tool }
+                    settingsTool = nil
+                    showSettings = false
                 }
             }
         )
     }
 
-    private func actionButton(systemName: String, action: @escaping () -> Void, disabled: Bool) -> some View {
+    private func actionButton(systemName: String, action: @escaping () -> Void, disabled: Bool, isActive: Bool = false) -> some View {
         let isHovered = hoveredTool == systemName
         return Button(action: action) {
             Image(systemName: systemName)
                 .font(.title3)
                 .frame(width: 32, height: 32)
-                .background(isHovered ? Color.primary.opacity(0.12) : .clear)
-                .foregroundColor(isHovered ? .primary : .secondary)
+                .background(isActive ? Color.accentColor : isHovered ? Color.primary.opacity(0.12) : .clear)
+                .foregroundColor(isActive ? .white : isHovered ? .primary : .secondary)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
         }
         .disabled(disabled)
@@ -158,10 +160,7 @@ struct ContentView: View {
             Divider()
                 .frame(height: 24)
 
-            actionButton(systemName: "arrow.uturn.backward", action: { model.undo() }, disabled: !model.canUndo)
-            actionButton(systemName: "arrow.uturn.forward", action: { model.redo() }, disabled: !model.canRedo)
-            actionButton(systemName: "trash", action: { model.deleteSelected() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
-            actionButton(systemName: "gearshape", action: { showSettings.toggle() }, disabled: false)
+            actionButton(systemName: "line.3.horizontal", action: { showSettings.toggle() }, disabled: false, isActive: showSettings)
         }
         .buttonStyle(.plain)
         .padding(5)

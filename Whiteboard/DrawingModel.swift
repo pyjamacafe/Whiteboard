@@ -569,8 +569,9 @@ class DrawingModel: ObservableObject {
 
         ctx.setFillColor(gray: 1, alpha: 1)
         ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-        ctx.translateBy(x: -offset.x * scale, y: -offset.y * scale)
-        ctx.scaleBy(x: scale, y: scale)
+        // Map canvas (y-down) → bitmap (CG y-up) so content top-left is at output origin
+        ctx.translateBy(x: -offset.x * scale, y: CGFloat(h) + offset.y * scale)
+        ctx.scaleBy(x: scale, y: -scale)
 
         // Render fills
         for r in fillRegions {
@@ -621,16 +622,17 @@ class DrawingModel: ObservableObject {
         var mediaBox = rect
         guard let pdf = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { return nil }
         pdf.beginPDFPage(nil)
-        pdf.translateBy(x: -offset.x, y: -offset.y)
-        renderToContext(pdf, size: size)
+        renderToContext(pdf, size: size, offset: offset)
         pdf.endPDFPage()
         pdf.closePDF()
         return cfData! as Data
     }
 
-    private func renderToContext(_ ctx: CGContext, size: CGSize) {
+    private func renderToContext(_ ctx: CGContext, size: CGSize, offset: CGPoint = .zero) {
         ctx.setFillColor(gray: 1, alpha: 1)
         ctx.fill(CGRect(origin: .zero, size: size))
+        ctx.translateBy(x: -offset.x, y: size.height + offset.y)
+        ctx.scaleBy(x: 1, y: -1)
 
         for r in fillRegions {
             ctx.setFillColor(r.uiColor.cgColor ?? CGColor(gray: 0, alpha: 1))

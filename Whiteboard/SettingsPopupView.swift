@@ -21,6 +21,20 @@ struct SettingsPopupView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Settings").font(.headline)
 
+            HStack(spacing: 8) {
+                Button(action: { model.undo() }) { Image(systemName: "arrow.uturn.backward").font(.title3).frame(width: 32, height: 32) }
+                    .disabled(!model.canUndo)
+                Button(action: { model.redo() }) { Image(systemName: "arrow.uturn.forward").font(.title3).frame(width: 32, height: 32) }
+                    .disabled(!model.canRedo)
+                Button(action: { model.deleteSelected() }) { Image(systemName: "trash").font(.title3).frame(width: 32, height: 32) }
+                    .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
+                Spacer()
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+
+            Divider()
+
             Toggle(isOn: $model.appSettings.isDarkMode) {
                 HStack {
                     Image(systemName: model.appSettings.isDarkMode ? "moon.fill" : "sun.max.fill")
