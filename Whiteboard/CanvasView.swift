@@ -103,6 +103,9 @@ class StrokeLayerView: UIView {
         ctx.translateBy(x: offset.width, y: offset.height)
         ctx.scaleBy(x: scale, y: scale)
 
+        for region in model.fillRegions {
+            drawFill(region, in: ctx)
+        }
         for stroke in model.strokes {
             drawStroke(stroke, in: ctx)
         }
@@ -110,6 +113,15 @@ class StrokeLayerView: UIView {
             drawStroke(current, in: ctx)
         }
 
+        ctx.restoreGState()
+    }
+
+    private func drawFill(_ region: FillRegion, in ctx: CGContext) {
+        ctx.saveGState()
+        ctx.setBlendMode(.normal)
+        ctx.setFillColor(UIColor(region.color).cgColor)
+        ctx.addPath(region.path)
+        ctx.fillPath()
         ctx.restoreGState()
     }
 
@@ -267,12 +279,20 @@ class DrawingCanvasView: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first, let model = model else { return }
+
+        if model.currentTool == .fill {
+            model.performFill(at: toCanvas(touch.location(in: self)))
+            strokeLayer.setNeedsDisplay()
+            gridView.setNeedsDisplay()
+            return
+        }
+
         model.beginStroke(at: toCanvas(touch.location(in: self)), isEraser: model.currentTool == .eraser)
         strokeLayer.setNeedsDisplay()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first, let model = model, model.currentStroke != nil else { return }
+        guard let touch = touches.first, let model = model, model.currentTool != .fill, model.currentStroke != nil else { return }
 
         let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
         for ct in coalesced {
@@ -282,11 +302,13 @@ class DrawingCanvasView: UIView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard model?.currentTool != .fill else { return }
         model?.endStroke()
         strokeLayer.setNeedsDisplay()
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard model?.currentTool != .fill else { return }
         model?.endStroke()
         strokeLayer.setNeedsDisplay()
     }
@@ -317,6 +339,15 @@ class DrawingCanvasView: UIView {
 @available(iOS 12.1, *)
 extension DrawingCanvasView: UIPencilInteractionDelegate {
     func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        toggleTool()
+    }
+
+    @available(iOS 17.5, *)
+    func pencilInteractionDidSqueeze(_ interaction: UIPencilInteraction) {
+        toggleTool()
+    }
+
+    private func toggleTool() {
         guard let model = model else { return }
         model.selectTool(model.currentTool == .pen ? .eraser : .pen)
     }
@@ -332,6 +363,7 @@ struct CanvasView: View {
     @State private var scale: CGFloat = 1.0
     @State private var pointCount: Int = 0
     @State private var hoverLocation: CGPoint?
+    @State private var didFill: Bool = false
 
     @State private var keyMonitor: Any?
 
@@ -370,6 +402,9 @@ struct CanvasView: View {
                 let tf = CGAffineTransform(translationX: offset.width, y: offset.height)
                     .scaledBy(x: scale, y: scale)
 
+                for region in model.fillRegions {
+                    drawFill(region, in: &context, transform: tf)
+                }
                 for stroke in model.strokes {
                     drawStroke(stroke, in: &context, transform: tf)
                 }
@@ -390,6 +425,18 @@ struct CanvasView: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         hoverLocation = value.location
+
+                        if model.currentTool == .fill {
+                            guard !didFill else { return }
+                            didFill = true
+                            let cp = CGPoint(
+                                x: (value.location.x - offset.width) / scale,
+                                y: (value.location.y - offset.height) / scale
+                            )
+                            model.performFill(at: cp)
+                            return
+                        }
+
                         let cp = CGPoint(
                             x: (value.location.x - offset.width) / scale,
                             y: (value.location.y - offset.height) / scale
@@ -402,6 +449,10 @@ struct CanvasView: View {
                         pointCount = model.currentStroke?.points.count ?? 0
                     }
                     .onEnded { _ in
+                        if model.currentTool == .fill {
+                            didFill = false
+                            return
+                        }
                         model.endStroke()
                         pointCount = 0
                     }
@@ -417,7 +468,7 @@ struct CanvasView: View {
         }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if event.charactersIgnoringModifiers == "e" || event.charactersIgnoringModifiers == "E" {
+                if let char = event.charactersIgnoringModifiers?.lowercased(), char == "e" || char == "s" {
                     model.selectTool(model.currentTool == .pen ? .eraser : .pen)
                     return nil
                 }
@@ -429,6 +480,11 @@ struct CanvasView: View {
                 NSEvent.removeMonitor(monitor)
             }
         }
+    }
+
+    private func drawFill(_ region: FillRegion, in context: inout GraphicsContext, transform: CGAffineTransform) {
+        let path = Path(region.path).applying(transform)
+        context.fill(path, with: .color(region.color))
     }
 
     private func drawStroke(_ stroke: Stroke, in context: inout GraphicsContext, transform: CGAffineTransform) {

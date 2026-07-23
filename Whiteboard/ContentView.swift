@@ -58,12 +58,13 @@ struct ContentView: View {
         HStack(spacing: 8) {
             toolButton(systemName: "pencil.tip", tool: .pen)
             toolButton(systemName: "eraser", tool: .eraser)
+            toolButton(systemName: "paintbucket.fill", tool: .fill)
 
             Divider()
                 .frame(height: 24)
 
-            actionButton(systemName: "arrow.uturn.backward", action: { model.undo() }, disabled: model.strokes.isEmpty)
-            actionButton(systemName: "trash", action: { model.clear() }, disabled: model.strokes.isEmpty)
+            actionButton(systemName: "arrow.uturn.backward", action: { model.undo() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
+            actionButton(systemName: "trash", action: { model.clear() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
         }
         .buttonStyle(.plain)
         .padding(2)
