@@ -59,13 +59,14 @@ struct ContentView: View {
             toolButton(systemName: "pencil.tip", tool: .pen)
             toolButton(systemName: "eraser", tool: .eraser)
             toolButton(systemName: "drop.fill", tool: .fill)
+            toolButton(systemName: "cursorarrow.click", tool: .select)
 
             Divider()
                 .frame(height: 24)
 
             actionButton(systemName: "arrow.uturn.backward", action: { model.undo() }, disabled: !model.canUndo)
             actionButton(systemName: "arrow.uturn.forward", action: { model.redo() }, disabled: !model.canRedo)
-            actionButton(systemName: "trash", action: { model.clear() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
+            actionButton(systemName: "trash", action: { model.deleteSelected() }, disabled: model.strokes.isEmpty && model.fillRegions.isEmpty)
         }
         .buttonStyle(.plain)
         .padding(5)

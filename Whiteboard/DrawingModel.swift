@@ -2,7 +2,7 @@ import Combine
 import SwiftUI
 
 struct Stroke: Identifiable {
-    let id = UUID()
+    var id = UUID()
     var points: [CGPoint]
     let color: Color
     let lineWidth: CGFloat
@@ -10,16 +10,16 @@ struct Stroke: Identifiable {
 }
 
 struct FillRegion: Identifiable {
-    let id = UUID()
+    var id = UUID()
     let path: CGPath
     let color: Color
 }
 
 enum Tool {
-    case pen, eraser, fill
+    case pen, eraser, fill, select
 }
 
-typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion])
+typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>)
 
 class DrawingModel: ObservableObject {
     @Published var strokes: [Stroke] = []
@@ -29,12 +29,16 @@ class DrawingModel: ObservableObject {
     @Published var canRedo: Bool = false
 
     var currentStroke: Stroke?
+    @Published var selectionLasso: [CGPoint] = []
+    @Published var selectionBoundary: [CGPoint] = []
+    @Published var selectedStrokeIds: Set<UUID> = []
+    @Published var selectedFillIds: Set<UUID> = []
 
     private var undoStack: [CanvasSnapshot] = []
     private var redoStack: [CanvasSnapshot] = []
 
     private func saveState() {
-        undoStack.append((strokes, fillRegions))
+        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds))
         redoStack.removeAll()
         canUndo = true
         canRedo = false
@@ -72,6 +76,141 @@ class DrawingModel: ObservableObject {
         updateUndoRedo()
     }
 
+    // MARK: - Lasso Selection
+
+    func beginLasso(at point: CGPoint) {
+        selectionLasso = [point]
+    }
+
+    func addLassoPoint(_ point: CGPoint) {
+        selectionLasso.append(point)
+    }
+
+    func endLasso() {
+        guard selectionLasso.count >= 3 else { selectionLasso = []; return }
+
+        saveState()
+
+        let path = CGMutablePath()
+        path.move(to: selectionLasso[0])
+        for i in 1..<selectionLasso.count {
+            path.addLine(to: selectionLasso[i])
+        }
+        path.closeSubpath()
+
+        selectedStrokeIds.removeAll()
+        selectedFillIds.removeAll()
+
+        for stroke in strokes where !stroke.isEraser {
+            for p in stroke.points {
+                if path.contains(p) {
+                    selectedStrokeIds.insert(stroke.id)
+                    break
+                }
+            }
+        }
+
+        for region in fillRegions {
+            let box = region.path.boundingBox
+            let center = CGPoint(x: box.midX, y: box.midY)
+            if path.contains(center) || path.contains(box.origin) {
+                selectedFillIds.insert(region.id)
+            }
+        }
+
+        selectionBoundary = selectionLasso
+        selectionLasso = []
+        updateUndoRedo()
+    }
+
+    // MARK: - Move Selection
+
+    var isMoving: Bool = false
+    var lastMovePoint: CGPoint = .zero
+    private var moveDidChange: Bool = false
+
+    func isPointOnSelectedItem(_ point: CGPoint) -> Bool {
+        let threshold: CGFloat = 15
+        for s in strokes where selectedStrokeIds.contains(s.id) {
+            for i in 0..<s.points.count - 1 {
+                let d = pointSegDist(point, s.points[i], s.points[i + 1])
+                if d < threshold { return true }
+            }
+        }
+        for r in fillRegions where selectedFillIds.contains(r.id) {
+            if r.path.contains(point) { return true }
+        }
+        return false
+    }
+
+    func beginMove(at point: CGPoint) {
+        guard isPointOnSelectedItem(point) else {
+            selectedStrokeIds.removeAll()
+            selectedFillIds.removeAll()
+            selectionBoundary.removeAll()
+            beginLasso(at: point)
+            return
+        }
+        isMoving = true
+        lastMovePoint = point
+        moveDidChange = false
+    }
+
+    func commitMove() {
+        guard isMoving else { return }
+        isMoving = false
+        if moveDidChange {
+            saveState()
+            updateUndoRedo()
+        }
+    }
+
+    func moveSelected(by offset: CGSize) {
+        guard isMoving, offset != .zero else { return }
+        moveDidChange = true
+        strokes = strokes.map { s in
+            guard selectedStrokeIds.contains(s.id) else { return s }
+            return Stroke(id: s.id, points: s.points.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) },
+                          color: s.color, lineWidth: s.lineWidth, isEraser: s.isEraser)
+        }
+        fillRegions = fillRegions.map { r in
+            guard selectedFillIds.contains(r.id) else { return r }
+            var t = CGAffineTransform(translationX: offset.width, y: offset.height)
+            let newPath = r.path.copy(using: &t) ?? r.path
+            return FillRegion(id: r.id, path: newPath, color: r.color)
+        }
+        if !selectionBoundary.isEmpty {
+            selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) }
+        }
+    }
+
+    // MARK: - Delete Selected
+
+    private func pointSegDist(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x - a.x, dy = b.y - a.y
+        let lenSq = dx * dx + dy * dy
+        guard lenSq != 0 else { return sqrt((p.x - a.x) * (p.x - a.x) + (p.y - a.y) * (p.y - a.y)) }
+        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
+        let px = a.x + t * dx, py = a.y + t * dy
+        return sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py))
+    }
+
+    func deleteSelected() {
+        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty else {
+            clear()
+            return
+        }
+        saveState()
+        strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
+        fillRegions = fillRegions.filter { !selectedFillIds.contains($0.id) }
+        selectedStrokeIds.removeAll()
+        selectedFillIds.removeAll()
+        selectionBoundary.removeAll()
+        updateUndoRedo()
+    }
+
+    // MARK: - Eraser
+
     private func erase(_ eraser: Stroke) {
         let threshold = eraser.lineWidth / 2 + 2
 
@@ -106,6 +245,8 @@ class DrawingModel: ObservableObject {
         }
     }
 
+    // MARK: - Fill
+
     func performFill(at canvasPoint: CGPoint) {
         saveState()
         guard let path = FloodFill.fillPath(at: canvasPoint, strokes: strokes) else {
@@ -119,23 +260,32 @@ class DrawingModel: ObservableObject {
 
     func selectTool(_ tool: Tool) {
         currentTool = tool
+        if tool != .select {
+            selectedStrokeIds.removeAll()
+            selectedFillIds.removeAll()
+            selectionBoundary.removeAll()
+        }
     }
 
     func undo() {
         guard !undoStack.isEmpty else { return }
-        redoStack.append((strokes, fillRegions))
+        redoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds))
         let prev = undoStack.removeLast()
         strokes = prev.strokes
         fillRegions = prev.fillRegions
+        selectedStrokeIds = prev.selectedStrokeIds
+        selectedFillIds = prev.selectedFillIds
         updateUndoRedo()
     }
 
     func redo() {
         guard !redoStack.isEmpty else { return }
-        undoStack.append((strokes, fillRegions))
+        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds))
         let next = redoStack.removeLast()
         strokes = next.strokes
         fillRegions = next.fillRegions
+        selectedStrokeIds = next.selectedStrokeIds
+        selectedFillIds = next.selectedFillIds
         updateUndoRedo()
     }
 
@@ -144,6 +294,10 @@ class DrawingModel: ObservableObject {
         strokes.removeAll()
         fillRegions.removeAll()
         currentStroke = nil
+        selectedStrokeIds.removeAll()
+        selectedFillIds.removeAll()
+        selectionLasso.removeAll()
+        selectionBoundary.removeAll()
         updateUndoRedo()
     }
 }

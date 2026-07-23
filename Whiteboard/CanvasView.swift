@@ -113,6 +113,59 @@ class StrokeLayerView: UIView {
             drawStroke(current, in: ctx)
         }
 
+        // Lasso being drawn
+        if !model.selectionLasso.isEmpty {
+            ctx.saveGState()
+            ctx.setBlendMode(.normal)
+            ctx.setStrokeColor(UIColor.systemBlue.withAlphaComponent(0.6).cgColor)
+            ctx.setLineWidth(2 / scale)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            let dashes: [CGFloat] = [8 / scale, 5 / scale]
+            ctx.setLineDash(phase: 0, lengths: dashes)
+
+            let lasso = model.selectionLasso
+            let lPath = CGMutablePath()
+            lPath.move(to: lasso[0])
+            var prev = lasso[0]
+            for i in 1..<lasso.count {
+                let pt = lasso[i]
+                let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                lPath.addQuadCurve(to: mid, control: prev)
+                prev = pt
+            }
+            ctx.addPath(lPath)
+            ctx.strokePath()
+            ctx.restoreGState()
+        }
+
+        // Selection boundary — retained lasso outline
+        if !model.selectionBoundary.isEmpty {
+            let pts = model.selectionBoundary
+            ctx.saveGState()
+            ctx.setBlendMode(.normal)
+            ctx.setStrokeColor(UIColor.systemBlue.cgColor)
+            ctx.setLineWidth(2 / scale)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            let dashes: [CGFloat] = [8 / scale, 5 / scale]
+            ctx.setLineDash(phase: 0, lengths: dashes)
+            let bPath = CGMutablePath()
+            bPath.move(to: pts[0])
+            var prev = pts[0]
+            for i in 1..<pts.count {
+                let pt = pts[i]
+                let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                bPath.addQuadCurve(to: mid, control: prev)
+                prev = pt
+            }
+            bPath.closeSubpath()
+            ctx.addPath(bPath)
+            ctx.strokePath()
+            ctx.restoreGState()
+        }
+
+        ctx.restoreGState()
         ctx.restoreGState()
     }
 
@@ -287,12 +340,41 @@ class DrawingCanvasView: UIView {
             return
         }
 
+        if model.currentTool == .select {
+            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
+                let cp = toCanvas(touch.location(in: self))
+                model.beginMove(at: cp)
+            } else {
+                model.beginLasso(at: toCanvas(touch.location(in: self)))
+            }
+            strokeLayer.setNeedsDisplay()
+            return
+        }
+
         model.beginStroke(at: toCanvas(touch.location(in: self)), isEraser: model.currentTool == .eraser)
         strokeLayer.setNeedsDisplay()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first, let model = model, model.currentTool != .fill, model.currentStroke != nil else { return }
+        guard let touch = touches.first, let model = model else { return }
+
+        if model.currentTool == .select {
+            if model.isMoving {
+                let cur = toCanvas(touch.location(in: self))
+                let offset = CGSize(width: cur.x - model.lastMovePoint.x, height: cur.y - model.lastMovePoint.y)
+                model.moveSelected(by: offset)
+                model.lastMovePoint = cur
+            } else {
+                let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
+                for ct in coalesced {
+                    model.addLassoPoint(toCanvas(ct.location(in: self)))
+                }
+            }
+            strokeLayer.setNeedsDisplay()
+            return
+        }
+
+        guard model.currentTool != .fill, model.currentStroke != nil else { return }
 
         let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
         for ct in coalesced {
@@ -302,12 +384,26 @@ class DrawingCanvasView: UIView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if model?.currentTool == .select {
+            if model?.isMoving == true {
+                model?.commitMove()
+            } else {
+                model?.endLasso()
+            }
+            strokeLayer.setNeedsDisplay()
+            return
+        }
         guard model?.currentTool != .fill else { return }
         model?.endStroke()
         strokeLayer.setNeedsDisplay()
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if model?.currentTool == .select {
+            model?.endLasso()
+            strokeLayer.setNeedsDisplay()
+            return
+        }
         guard model?.currentTool != .fill else { return }
         model?.endStroke()
         strokeLayer.setNeedsDisplay()
@@ -412,6 +508,39 @@ struct CanvasView: View {
                     drawStroke(current, in: &context, transform: tf)
                 }
 
+                // Lasso being drawn
+                if !model.selectionLasso.isEmpty {
+                    var lPath = Path()
+                    let lPts = model.selectionLasso
+                    lPath.move(to: lPts[0].applying(tf))
+                    var prev = lPts[0]
+                    for i in 1..<lPts.count {
+                        let pt = lPts[i]
+                        let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                        lPath.addQuadCurve(to: mid.applying(tf), control: prev.applying(tf))
+                        prev = pt
+                    }
+                    context.stroke(lPath, with: .color(.blue.opacity(0.6)),
+                                  style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5]))
+                }
+
+                // Selection boundary — retained lasso outline
+                if !model.selectionBoundary.isEmpty {
+                    let pts = model.selectionBoundary
+                    var bPath = Path()
+                    bPath.move(to: pts[0].applying(tf))
+                    var prev = pts[0]
+                    for i in 1..<pts.count {
+                        let pt = pts[i]
+                        let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                        bPath.addQuadCurve(to: mid.applying(tf), control: prev.applying(tf))
+                        prev = pt
+                    }
+                    bPath.closeSubpath()
+                    context.stroke(bPath, with: .color(.blue),
+                                  style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5]))
+                }
+
                 if let loc = hoverLocation {
                     let dotSize: CGFloat = model.currentTool == .eraser ? 20 : 4
                     let dot = Path(ellipseIn: CGRect(
@@ -437,6 +566,25 @@ struct CanvasView: View {
                             return
                         }
 
+                        if model.currentTool == .select {
+                            let cp = CGPoint(
+                                x: (value.location.x - offset.width) / scale,
+                                y: (value.location.y - offset.height) / scale
+                            )
+                            if model.isMoving {
+                                let offset = CGSize(width: cp.x - model.lastMovePoint.x, height: cp.y - model.lastMovePoint.y)
+                                model.moveSelected(by: offset)
+                                model.lastMovePoint = cp
+                            } else if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
+                                model.beginMove(at: cp)
+                            } else if model.selectionLasso.isEmpty {
+                                model.beginLasso(at: cp)
+                            } else {
+                                model.addLassoPoint(cp)
+                            }
+                            return
+                        }
+
                         let cp = CGPoint(
                             x: (value.location.x - offset.width) / scale,
                             y: (value.location.y - offset.height) / scale
@@ -451,6 +599,11 @@ struct CanvasView: View {
                     .onEnded { _ in
                         if model.currentTool == .fill {
                             didFill = false
+                            return
+                        }
+                        if model.currentTool == .select {
+                            if model.isMoving { model.commitMove() }
+                            else { model.endLasso() }
                             return
                         }
                         model.endStroke()
