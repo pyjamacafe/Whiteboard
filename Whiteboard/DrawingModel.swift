@@ -23,7 +23,7 @@ enum Tool: String, CaseIterable {
 struct PenSettings {
     var color: Color = .black
     var thickness: CGFloat = 2
-    var smoothness: CGFloat = 3
+    var smoothness: CGFloat = 1
     var presets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
 }
 
@@ -86,7 +86,7 @@ class DrawingModel: ObservableObject {
         let isHighlight = currentTool == .highlighter
         currentStroke = Stroke(
             points: [point],
-            color: isEraser ? .white : isHighlight ? highlighterSettings.color.opacity(highlighterSettings.opacity) : penSettings.color,
+            color: isEraser ? .white : isHighlight ? highlighterSettings.color : penSettings.color,
             lineWidth: isEraser ? 20 : isHighlight ? highlighterSettings.thickness : penSettings.thickness,
             isEraser: isEraser,
             isHighlighter: isHighlight

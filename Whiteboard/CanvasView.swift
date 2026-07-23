@@ -112,14 +112,18 @@ class StrokeLayerView: UIView {
         for region in model.fillRegions {
             drawFill(region, in: ctx)
         }
-        // Highlighter strokes (below pen)
-        // Highlighter strokes (behind pen)
+        // Highlighter strokes composited as a group — overlapping areas don't darken
+        ctx.saveGState()
+        ctx.setAlpha(CGFloat(model.highlighterSettings.opacity))
+        ctx.beginTransparencyLayer(auxiliaryInfo: nil)
         for stroke in model.strokes where stroke.isHighlighter {
             drawStroke(stroke, in: ctx)
         }
         if let current = model.currentStroke, current.isHighlighter {
             drawStroke(current, in: ctx)
         }
+        ctx.endTransparencyLayer()
+        ctx.restoreGState()
         for stroke in model.strokes where !stroke.isHighlighter {
             drawStroke(stroke, in: ctx)
         }
@@ -480,6 +484,7 @@ struct CanvasView: View {
     @State private var didFill: Bool = false
 
     @State private var keyMonitor: Any?
+    @State private var scrollMonitor: Any?
 
     var body: some View {
         ZStack {
@@ -519,11 +524,26 @@ struct CanvasView: View {
                 for region in model.fillRegions {
                     drawFill(region, in: &context, transform: tf)
                 }
-                for stroke in model.strokes where stroke.isHighlighter {
-                    drawStroke(stroke, in: &context, transform: tf)
-                }
-                if let current = model.currentStroke, current.isHighlighter {
-                    drawStroke(current, in: &context, transform: tf)
+                // Highlighter strokes — composite all as a single layer at uniform opacity
+                let hlColor = model.highlighterSettings.color
+                let hlWidth = model.highlighterSettings.thickness * scale
+                let hlOpacity = model.highlighterSettings.opacity
+                if hlOpacity > 0 {
+                    context.opacity = hlOpacity
+                    context.drawLayer { layer in
+                        for s in model.strokes where s.isHighlighter {
+                            if let path = makeSmoothPath(s, transform: tf) {
+                                layer.stroke(path, with: .color(hlColor),
+                                            style: StrokeStyle(lineWidth: hlWidth, lineCap: .round, lineJoin: .round))
+                            }
+                        }
+                        if let c = model.currentStroke, c.isHighlighter,
+                           let path = makeSmoothPath(c, transform: tf) {
+                            layer.stroke(path, with: .color(hlColor),
+                                        style: StrokeStyle(lineWidth: hlWidth, lineCap: .round, lineJoin: .round))
+                        }
+                    }
+                    context.opacity = 1
                 }
                 for stroke in model.strokes where !stroke.isHighlighter {
                     drawStroke(stroke, in: &context, transform: tf)
@@ -646,18 +666,40 @@ struct CanvasView: View {
         }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if let char = event.charactersIgnoringModifiers?.lowercased(), char == "e" || char == "s" {
+                let hasCmd = event.modifierFlags.contains(.command)
+                let char = event.charactersIgnoringModifiers?.lowercased()
+                if hasCmd && char == "e" {
                     model.selectTool(model.currentTool == .pen ? .eraser : .pen)
                     return nil
                 }
                 return event
             }
-        }
-        .onDisappear {
-            if let monitor = keyMonitor as? AnyObject {
-                NSEvent.removeMonitor(monitor)
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+                offset.width += event.scrollingDeltaX
+                offset.height += event.scrollingDeltaY
+                return event
             }
         }
+        .onDisappear {
+            for monitor in [keyMonitor, scrollMonitor] {
+                if let m = monitor as? AnyObject { NSEvent.removeMonitor(m) }
+            }
+        }
+    }
+
+    private func makeSmoothPath(_ stroke: Stroke, transform: CGAffineTransform) -> Path? {
+        guard stroke.points.count >= 2 else { return nil }
+        var path = Path()
+        path.move(to: stroke.points[0].applying(transform))
+        var prev = stroke.points[0]
+        for i in 1..<stroke.points.count {
+            let pt = stroke.points[i]
+            let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+            path.addQuadCurve(to: mid.applying(transform), control: prev.applying(transform))
+            prev = pt
+        }
+        path.addLine(to: stroke.points.last!.applying(transform))
+        return path
     }
 
     private func drawFill(_ region: FillRegion, in context: inout GraphicsContext, transform: CGAffineTransform) {
