@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var model = DrawingModel()
+    @State private var hoveredTool: String?
 
     var body: some View {
         ZStack {
@@ -15,49 +16,61 @@ struct ContentView: View {
         }
     }
 
+    private func toolButton(systemName: String, tool: Tool) -> some View {
+        let isSelected = model.currentTool == tool
+        let isHovered = hoveredTool == systemName
+        return Button(action: { model.selectTool(tool) }) {
+            Image(systemName: systemName)
+                .font(.title3)
+                .frame(width: 40, height: 40)
+                .background(
+                    isSelected ? Color.accentColor :
+                    isHovered ? Color.primary.opacity(0.12) : .clear
+                )
+                .foregroundColor(
+                    isSelected ? .white :
+                    isHovered ? .primary : .secondary
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .onHover { hovering in
+            hoveredTool = hovering ? systemName : nil
+        }
+    }
+
+    private func actionButton(systemName: String, action: @escaping () -> Void, disabled: Bool) -> some View {
+        let isHovered = hoveredTool == systemName
+        return Button(action: action) {
+            Image(systemName: systemName)
+                .font(.title3)
+                .frame(width: 40, height: 40)
+                .background(isHovered ? Color.primary.opacity(0.12) : .clear)
+                .foregroundColor(isHovered ? .primary : .secondary)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .disabled(disabled)
+        .onHover { hovering in
+            hoveredTool = hovering ? systemName : nil
+        }
+    }
+
     private var toolbar: some View {
         HStack(spacing: 8) {
-            Button(action: { model.selectTool(.pen) }) {
-                Image(systemName: "pencil.tip")
-                    .font(.title3)
-                    .frame(width: 40, height: 40)
-                    .background(model.currentTool == .pen ? Color.accentColor : .clear)
-                    .foregroundColor(model.currentTool == .pen ? .white : .primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-
-            Button(action: { model.selectTool(.eraser) }) {
-                Image(systemName: "eraser")
-                    .font(.title3)
-                    .frame(width: 40, height: 40)
-                    .background(model.currentTool == .eraser ? Color.accentColor : .clear)
-                    .foregroundColor(model.currentTool == .eraser ? .white : .primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
+            toolButton(systemName: "pencil.tip", tool: .pen)
+            toolButton(systemName: "eraser", tool: .eraser)
 
             Divider()
                 .frame(height: 24)
 
-            Button(action: { model.undo() }) {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.title3)
-                    .frame(width: 40, height: 40)
-            }
-            .disabled(model.strokes.isEmpty)
-
-            Button(action: { model.clear() }) {
-                Image(systemName: "trash")
-                    .font(.title3)
-                    .frame(width: 40, height: 40)
-            }
-            .disabled(model.strokes.isEmpty)
+            actionButton(systemName: "arrow.uturn.backward", action: { model.undo() }, disabled: model.strokes.isEmpty)
+            actionButton(systemName: "trash", action: { model.clear() }, disabled: model.strokes.isEmpty)
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .padding(.top)
-        .shadow(radius: 4)
+        .padding(2)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
+        .padding(.top, 2)
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
     }
 }

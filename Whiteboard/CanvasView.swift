@@ -116,6 +116,17 @@ class StrokeLayerView: UIView {
     private func drawStroke(_ stroke: Stroke, in ctx: CGContext) {
         guard stroke.points.count >= 2 else { return }
 
+        let path = CGMutablePath()
+        path.move(to: stroke.points[0])
+        var prev = stroke.points[0]
+        for i in 1..<stroke.points.count {
+            let pt = stroke.points[i]
+            let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+            path.addQuadCurve(to: mid, control: prev)
+            prev = pt
+        }
+        path.addLine(to: stroke.points.last!)
+
         ctx.saveGState()
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
@@ -129,7 +140,7 @@ class StrokeLayerView: UIView {
             ctx.setLineWidth(stroke.lineWidth)
         }
 
-        ctx.addLines(between: stroke.points)
+        ctx.addPath(path)
         ctx.strokePath()
         ctx.restoreGState()
     }
@@ -322,6 +333,8 @@ struct CanvasView: View {
     @State private var pointCount: Int = 0
     @State private var hoverLocation: CGPoint?
 
+    @State private var keyMonitor: Any?
+
     var body: some View {
         ZStack {
             Canvas { context, size in
@@ -402,6 +415,20 @@ struct CanvasView: View {
                 }
             }
         }
+        .onAppear {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                if event.charactersIgnoringModifiers == "e" || event.charactersIgnoringModifiers == "E" {
+                    model.selectTool(model.currentTool == .pen ? .eraser : .pen)
+                    return nil
+                }
+                return event
+            }
+        }
+        .onDisappear {
+            if let monitor = keyMonitor as? AnyObject {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
     }
 
     private func drawStroke(_ stroke: Stroke, in context: inout GraphicsContext, transform: CGAffineTransform) {
@@ -409,9 +436,14 @@ struct CanvasView: View {
 
         var path = Path()
         path.move(to: stroke.points[0].applying(transform))
+        var prev = stroke.points[0]
         for i in 1..<stroke.points.count {
-            path.addLine(to: stroke.points[i].applying(transform))
+            let pt = stroke.points[i]
+            let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+            path.addQuadCurve(to: mid.applying(transform), control: prev.applying(transform))
+            prev = pt
         }
+        path.addLine(to: stroke.points.last!.applying(transform))
 
         if stroke.isEraser {
             context.blendMode = .clear
