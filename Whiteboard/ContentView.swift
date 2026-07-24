@@ -177,11 +177,12 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .padding(5)
-        .background(.thickMaterial)
+        .background(model.appSettings.isDarkMode ? Color(red: 44/255, green: 44/255, blue: 46/255) : Color(.sRGB, red: 0.97, green: 0.97, blue: 0.97, opacity: 0.85))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
         .padding(.top, 12)
         .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+        .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
     }
 
     private func iconName(_ bg: CanvasBackground) -> String {

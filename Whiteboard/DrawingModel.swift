@@ -113,7 +113,13 @@ enum CanvasBackground: String, CaseIterable {
 
 struct AppSettings {
     var canvasBackground: CanvasBackground = .grid
-    var isDarkMode: Bool = false
+    var isDarkMode: Bool = false {
+        didSet {
+            #if os(macOS)
+            NSApp.appearance = isDarkMode ? NSAppearance(named: .darkAqua) : nil
+            #endif
+        }
+    }
 }
 
 struct PenSettings {
@@ -137,7 +143,7 @@ struct PenSettings {
 struct FillSettings {
     var lightColor: Color = .red
     var darkColor: Color = .red
-    var opacity: Double = 0.1
+    var opacity: Double = 0.25
     var lightPresets: [Color] = [.red, .orange, .yellow, .green, .blue, .purple, .pink, .mint]
     var darkPresets: [Color] = [.red, .orange, .yellow, .green, .cyan, .purple, .pink, .mint]
 }
