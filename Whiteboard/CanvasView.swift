@@ -272,7 +272,6 @@ class StrokeLayerView: UIView {
     }
 
     private func themeAdjusted(_ color: Color, _ isDark: Bool) -> Color {
-        guard isDark else { return color }
         #if os(iOS)
         let c = UIColor(color)
         #else
@@ -285,12 +284,15 @@ class StrokeLayerView: UIView {
         c.getRed(&r, green: &g, blue: &b, alpha: &a)
         #endif
         let luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        if luminance < 0.5 {
-            // Lighten while preserving hue: blend toward white
-            let t: CGFloat = 0.6
+        if isDark {
+            guard luminance < 0.5 else { return color }
+            let t = 1 - luminance
             return Color(.sRGB, red: Double(r + (1 - r) * t), green: Double(g + (1 - g) * t), blue: Double(b + (1 - b) * t), opacity: Double(a))
+        } else {
+            guard luminance > 0.5 else { return color }
+            let t = luminance
+            return Color(.sRGB, red: Double(r * (1 - t)), green: Double(g * (1 - t)), blue: Double(b * (1 - t)), opacity: Double(a))
         }
-        return color
     }
 }
 
@@ -898,16 +900,19 @@ struct CanvasView: View {
     }
 
     private func macThemeAdjusted(_ color: Color, _ isDark: Bool) -> Color {
-        guard isDark else { return color }
         guard let c = NSColor(color).usingColorSpace(.sRGB) else { return color }
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
         c.getRed(&r, green: &g, blue: &b, alpha: &a)
         let luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        if luminance < 0.5 {
-            let t: CGFloat = 0.6
+        if isDark {
+            guard luminance < 0.5 else { return color }
+            let t = 1 - luminance
             return Color(.sRGB, red: Double(r + (1 - r) * t), green: Double(g + (1 - g) * t), blue: Double(b + (1 - b) * t), opacity: Double(a))
+        } else {
+            guard luminance > 0.5 else { return color }
+            let t = luminance
+            return Color(.sRGB, red: Double(r * (1 - t)), green: Double(g * (1 - t)), blue: Double(b * (1 - t)), opacity: Double(a))
         }
-        return color
     }
 
     private func centerOnContent(canvasSize: CGSize) {
