@@ -1,19 +1,22 @@
 import SwiftUI
 
 @main
-struct WhiteboardApp: App {
+struct DoodlesApp: App {
     @StateObject private var model = DrawingModel()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(model)
+                .onReceive(model.$currentBoardId) { _ in setTitle() }
+                .onReceive(model.$showWelcome) { _ in setTitle() }
+                .onAppear { setTitle() }
         }
         .commands {
             CommandGroup(after: .saveItem) {
                 Button("Open…") { model.openCmd() }
                     .keyboardShortcut("o", modifiers: .command)
-                Button("Close Board") { model.closeBoard() }
+                Button("Close Doodle") { model.closeBoard() }
                     .keyboardShortcut("w", modifiers: .command)
             }
             CommandGroup(after: .saveItem) {
@@ -38,5 +41,17 @@ struct WhiteboardApp: App {
                 .keyboardShortcut(.tab, modifiers: [])
             }
         }
+    }
+
+    private func setTitle() {
+        #if os(macOS)
+        let t: String
+        if model.showWelcome { t = "Doodles" }
+        else if let id = model.currentBoardId,
+                let board = model.boards.first(where: { $0.id == id }) {
+            t = "Doodles | \(board.name)"
+        } else { t = "Doodles" }
+        NSApp.windows.first?.title = t
+        #endif
     }
 }

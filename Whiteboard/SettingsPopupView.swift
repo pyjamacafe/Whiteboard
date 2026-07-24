@@ -10,7 +10,7 @@ struct SettingsPopupView: View {
     @State private var exportType: UTType = .data
 
     enum ExportFormat: String, CaseIterable {
-        case wb = "Whiteboard"
+        case wb = "Doodles"
         case png = "PNG"
         case pdf = "PDF"
     }

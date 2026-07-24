@@ -46,7 +46,7 @@ struct HelpView: View {
                     FeatureRow("PNG / PDF", "Export the canvas as a high-resolution image or vector PDF. Cropped to content.")
                 }
 
-                Section("Boards") {
+                Section("Doodles") {
                     FeatureRow("Auto-save", "All boards are saved automatically to the central board library.")
                     FeatureRow("Welcome screen", "Create, rename, delete, and open boards from the welcome screen.")
                 }

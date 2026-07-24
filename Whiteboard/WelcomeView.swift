@@ -28,12 +28,12 @@ struct WelcomeView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.accentColor)
 
-            Text("Whiteboard")
+            Text("Doodles")
                 .font(.largeTitle).bold()
 
             HStack(spacing: 16) {
                 Button(action: { showNewName = true }) {
-                    Label("New Board", systemImage: "plus.square")
+                    Label("New Doodle", systemImage: "plus.square")
                         .frame(maxWidth: 160, minHeight: 44)
                 }
                 .buttonStyle(.borderedProminent)
@@ -56,7 +56,7 @@ struct WelcomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if !model.boards.isEmpty || !model.folders.isEmpty {
-                        Text("Boards").font(.headline).padding(.top, 4)
+                        Text("Doodles").font(.headline).padding(.top, 4)
                     }
 
                     // Folders
@@ -139,8 +139,8 @@ struct WelcomeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { model.loadTrash() }
-        .alert("New Board", isPresented: $showNewName) {
-            TextField("Board name", text: $newName)
+        .alert("New Doodle", isPresented: $showNewName) {
+            TextField("Doodle name", text: $newName)
             Button("Create") {
                 let name = newName.trimmingCharacters(in: .whitespaces)
                 if !name.isEmpty {
@@ -172,7 +172,7 @@ struct WelcomeView: View {
             }
             Button("Cancel", role: .cancel) { renameFolderId = nil }
         } message: { Text("Enter a new name for the folder") }
-        .alert("Delete Board", isPresented: $showDeleteAlert) {
+        .alert("Delete Doodle", isPresented: $showDeleteAlert) {
             Button("Delete", role: .destructive) {
                 if let id = deleteBoardId {
                     model.trashBoard(id: id, name: deleteBoardName)
