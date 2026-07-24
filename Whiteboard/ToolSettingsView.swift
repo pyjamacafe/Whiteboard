@@ -118,19 +118,14 @@ struct ToolSettingsView: View {
                     Spacer()
                     Text(smoothnessLabel).font(.caption).foregroundColor(.secondary)
                 }
-                Slider(value: $model.penSettings.smoothness, in: 1...8, step: 1)
+                Slider(value: $model.penSettings.smoothness, in: 1...9, step: 1)
             }
         }
     }
 
     private var smoothnessLabel: String {
-        switch Int(model.penSettings.smoothness) {
-        case 1: return "Off"
-        case 2...3: return "Low"
-        case 4...5: return "Medium"
-        case 6...7: return "High"
-        default: return "Max"
-        }
+        let v = Int(model.penSettings.smoothness)
+        return v == 1 ? "Off" : "Low \(v - 1)/8"
     }
 
     // MARK: - Fill

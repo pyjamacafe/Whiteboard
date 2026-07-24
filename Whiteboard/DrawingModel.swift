@@ -167,7 +167,40 @@ class DrawingModel: ObservableObject {
     @Published var eraserSettings = EraserSettings()
     @Published var highlighterSettings = HighlighterSettings()
     @Published var appSettings = AppSettings()
-    var openFileURL: URL?
+    var openFileURL: URL? {
+        didSet {
+            if let url = openFileURL { addRecent(url) }
+        }
+    }
+
+    @Published var recentFiles: [URL] = []
+
+    private let recentKey = "recentFiles"
+    private let maxRecent = 5
+
+    init() {
+        loadRecents()
+    }
+
+    private func loadRecents() {
+        guard let data = UserDefaults.standard.data(forKey: recentKey) else { return }
+        let urls = (try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSURL.self], from: data)) as? [URL] ?? []
+        recentFiles = urls
+    }
+
+    private func saveRecents() {
+        let data = try? NSKeyedArchiver.archivedData(withRootObject: recentFiles, requiringSecureCoding: false)
+        UserDefaults.standard.set(data, forKey: recentKey)
+    }
+
+    private func addRecent(_ url: URL) {
+        var files = recentFiles
+        files.removeAll { $0.path == url.path }
+        files.insert(url, at: 0)
+        if files.count > maxRecent { files = Array(files.prefix(maxRecent)) }
+        recentFiles = files
+        saveRecents()
+    }
 
     // Theme-aware colors
     var penColor: Color { appSettings.isDarkMode ? penSettings.darkColor : penSettings.lightColor }
@@ -223,7 +256,8 @@ class DrawingModel: ObservableObject {
         } else if stroke.points.count >= 2 {
             var finalStroke = stroke
             if penSettings.smoothness > 1 && !stroke.isEraser && stroke.lineWidth < 10 {
-                let simplified = simplify(stroke.points, epsilon: penSettings.smoothness)
+                let eps = (penSettings.smoothness - 1) * 0.05
+                let simplified = simplify(stroke.points, epsilon: eps)
                 if simplified.count >= 2 {
                     finalStroke = Stroke(id: stroke.id, points: simplified, color: stroke.uiColor, lineWidth: stroke.lineWidth, isEraser: false, isHighlighter: stroke.isHighlighter)
                 }
@@ -356,7 +390,8 @@ class DrawingModel: ObservableObject {
 
     func simplified(_ points: [CGPoint]) -> [CGPoint] {
         guard penSettings.smoothness > 1 else { return points }
-        let result = simplify(points, epsilon: penSettings.smoothness)
+        let eps = (penSettings.smoothness - 1) * 0.05
+        let result = simplify(points, epsilon: eps)
         return result.count >= 2 ? result : points
     }
 
@@ -542,6 +577,7 @@ class DrawingModel: ObservableObject {
     // MARK: - Menu command helpers (triggered by menu bar or keyboard)
 
     func openCmd() { pendingAction = .open }
+    func closeBoard() { showWelcome = true }
     func exportPNG() { pendingAction = .export(.png) }
     func exportPDF() { pendingAction = .export(.pdf) }
 
@@ -553,6 +589,7 @@ class DrawingModel: ObservableObject {
     enum ExportFormat: String { case png, pdf }
     @Published var pendingAction: PendingAction?
     @Published var isToolbarVisible: Bool = true
+    @Published var showWelcome: Bool = true
 
     func pngData(size: CGSize, offset: CGPoint = .zero, scale: CGFloat = 3) -> Data? {
         let w = Int(size.width * scale)

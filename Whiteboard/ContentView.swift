@@ -11,7 +11,11 @@ struct ContentView: View {
     @State private var showSettings: Bool = false
 
     var body: some View {
-        ZStack {
+        Group {
+            if model.showWelcome {
+                WelcomeView(model: model, onStart: { model.showWelcome = false })
+            } else {
+            ZStack {
             CanvasView(model: model, onBeginDraw: { settingsTool = nil; showSettings = false })
                 .ignoresSafeArea()
 
@@ -30,6 +34,8 @@ struct ContentView: View {
                 Spacer()
             }
         }
+    }
+}
         .onTapGesture { settingsTool = nil }
         .onChange(of: model.pendingAction) { action in
             guard let action = action else { return }
@@ -69,6 +75,12 @@ struct ContentView: View {
         .background(
             Button("") { showSettings = true }
                 .keyboardShortcut("o", modifiers: .command)
+                .hidden()
+                .frame(width: 0, height: 0)
+        )
+        .background(
+            Button("") { model.closeBoard() }
+                .keyboardShortcut("w", modifiers: .command)
                 .hidden()
                 .frame(width: 0, height: 0)
         )

@@ -13,6 +13,8 @@ struct WhiteboardApp: App {
             CommandGroup(after: .saveItem) {
                 Button("Open…") { model.openCmd() }
                     .keyboardShortcut("o", modifiers: .command)
+                Button("Close Board") { model.closeBoard() }
+                    .keyboardShortcut("w", modifiers: .command)
             }
             CommandGroup(after: .saveItem) {
                 Button("Export PNG") { model.exportPNG() }
