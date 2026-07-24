@@ -28,6 +28,7 @@ struct SettingsPopupView: View {
                     .disabled(!model.canRedo)
                 Button(action: { model.deleteSelected() }) { Image(systemName: "trash").font(.title3).frame(width: 32, height: 32) }
                     .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
+                Button(action: { model.needsRecenter = true }) { Image(systemName: "viewfinder").font(.title3).frame(width: 32, height: 32) }
                 Spacer()
             }
             .buttonStyle(.plain)

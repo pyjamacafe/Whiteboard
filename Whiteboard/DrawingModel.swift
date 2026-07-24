@@ -590,6 +590,7 @@ class DrawingModel: ObservableObject {
     @Published var pendingAction: PendingAction?
     @Published var isToolbarVisible: Bool = true
     @Published var showWelcome: Bool = true
+    @Published var needsRecenter: Bool = false
 
     func pngData(size: CGSize, offset: CGPoint = .zero, scale: CGFloat = 3) -> Data? {
         let w = Int(size.width * scale)

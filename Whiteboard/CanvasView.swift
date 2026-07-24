@@ -434,8 +434,17 @@ class DrawingCanvasView: UIView {
     }
 
     func refresh() {
+        if let model = model, model.needsRecenter {
+            centerOnContent()
+            model.needsRecenter = false
+        }
         gridView.setNeedsDisplay()
         strokeLayer.setNeedsDisplay()
+    }
+
+    private func centerOnContent() {
+        offset = .zero
+        scale = 1.0
     }
 
     // MARK: - Touch Handling
@@ -579,9 +588,15 @@ struct CanvasView: View {
     @State private var scrollMonitor: Any?
     @State private var macDashPhase: CGFloat = 0
     @State private var dashTimer: Timer?
+    @State private var viewSize: CGSize?
 
     var body: some View {
         ZStack {
+            GeometryReader { geo in
+                Color.clear.onAppear { viewSize = geo.size }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             Canvas { context, size in
                 let spacing: CGFloat = 30 * scale
                 let isDark = model.appSettings.isDarkMode
@@ -756,6 +771,12 @@ struct CanvasView: View {
                     macDashPhase += 1
                 }
             }
+            .onReceive(model.$needsRecenter) { needs in
+                if needs, let size = viewSize {
+                    centerOnContent(canvasSize: size)
+                    model.needsRecenter = false
+                }
+            }
         }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -887,6 +908,11 @@ struct CanvasView: View {
             return Color(.sRGB, red: Double(r + (1 - r) * t), green: Double(g + (1 - g) * t), blue: Double(b + (1 - b) * t), opacity: Double(a))
         }
         return color
+    }
+
+    private func centerOnContent(canvasSize: CGSize) {
+        offset = .zero
+        scale = 1.0
     }
 
     private func drawFill(_ region: FillRegion, in context: inout GraphicsContext, transform: CGAffineTransform) {
