@@ -20,7 +20,18 @@ enum FloodFill {
         }
         guard !segs.isEmpty else { return nil }
 
-        let enclosures = EnclosureDetector.detect(from: segs)
+        let searchRadius: CGFloat = 500
+        let tapRect = CGRect(x: canvasPoint.x - searchRadius, y: canvasPoint.y - searchRadius,
+                             width: searchRadius * 2, height: searchRadius * 2)
+        let nearSegs = segs.filter { segRect($0).intersects(tapRect) }
+        let sortedSegs = nearSegs.sorted { a, b in
+            let da = min(a.0.distance(to: canvasPoint), a.1.distance(to: canvasPoint))
+            let db = min(b.0.distance(to: canvasPoint), b.1.distance(to: canvasPoint))
+            return da < db
+        }
+        let cappedSegs = sortedSegs.count > 2000 ? Array(sortedSegs.prefix(2000)) : sortedSegs
+
+        let enclosures = EnclosureDetector.detect(from: cappedSegs)
 
         var best: (path: CGPath, area: CGFloat)?
         for path in enclosures {
@@ -35,6 +46,11 @@ enum FloodFill {
             }
         }
         return best?.path
+    }
+
+    private static func segRect(_ seg: (CGPoint, CGPoint)) -> CGRect {
+        CGRect(x: min(seg.0.x, seg.1.x), y: min(seg.0.y, seg.1.y),
+               width: abs(seg.1.x - seg.0.x), height: abs(seg.1.y - seg.0.y))
     }
 
     private static func pathPoints(_ path: CGPath) -> [CGPoint] {
@@ -105,7 +121,6 @@ private enum EnclosureDetector {
 
     /// Detect all enclosed cycles from a set of line segments.
     static func detect(from segments: [(CGPoint, CGPoint)]) -> [CGPath] {
-        // Phase 1: split segments at intersection points
         var split = segments
         var i = 0
         while i < split.count {
@@ -113,28 +128,29 @@ private enum EnclosureDetector {
             var advanced = false
             while j < split.count {
                 let s1 = split[i], s2 = split[j]
-                if let p = intersect(s1.0, s1.1, s2.0, s2.1) {
-                    let on1 = !isEndpoint(p, s1.0, s1.1)
-                    let on2 = !isEndpoint(p, s2.0, s2.1)
-                    if on1 {
-                        split.remove(at: i)
-                        split.insert((s1.0, p), at: i)
-                        split.insert((p, s1.1), at: i + 1)
-                        advanced = true
-                        break
-                    }
-                    if on2 {
-                        split.remove(at: j)
-                        split.insert((s2.0, p), at: j)
-                        split.insert((p, s2.1), at: j + 1)
-                        j += 1
+                if segRect(s1).intersects(segRect(s2)) {
+                    if let p = intersect(s1.0, s1.1, s2.0, s2.1) {
+                        let on1 = !isEndpoint(p, s1.0, s1.1)
+                        let on2 = !isEndpoint(p, s2.0, s2.1)
+                        if on1 {
+                            split.remove(at: i)
+                            split.insert((s1.0, p), at: i)
+                            split.insert((p, s1.1), at: i + 1)
+                            advanced = true; break
+                        }
+                        if on2 {
+                            split.remove(at: j)
+                            split.insert((s2.0, p), at: j)
+                            split.insert((p, s2.1), at: j + 1)
+                            j += 1
+                        }
                     }
                 }
                 j += 1
             }
             if !advanced { i += 1 }
         }
-        // Phase 2: build DCEL graph
+
         var adj = [Vertex: [HalfEdge]]()
         var allEdges = [HalfEdge]()
 
@@ -147,6 +163,7 @@ private enum EnclosureDetector {
             allEdges.append(e1)
             allEdges.append(e2)
         }
+
         // Sort edges around each vertex by angle (CCW) and link 'next' pointers
         for (v, edges) in adj {
             let sorted = edges.sorted { a, b in
@@ -197,6 +214,11 @@ private enum EnclosureDetector {
     }
 
     // MARK: - Helpers
+
+    private static func segRect(_ seg: (CGPoint, CGPoint)) -> CGRect {
+        CGRect(x: min(seg.0.x, seg.1.x), y: min(seg.0.y, seg.1.y),
+               width: abs(seg.1.x - seg.0.x), height: abs(seg.1.y - seg.0.y))
+    }
 
     private static func intersect(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> CGPoint? {
         let d1x = b.x - a.x, d1y = b.y - a.y
