@@ -10,7 +10,12 @@ struct DoodlesApp: App {
                 .environmentObject(model)
                 .onReceive(model.$currentBoardId) { _ in setTitle() }
                 .onReceive(model.$showWelcome) { _ in setTitle() }
-                .onAppear { setTitle() }
+                .onAppear {
+                    setTitle()
+                }
+                #if os(macOS)
+                .background(WindowAccessor(model: model))
+                #endif
         }
         .commands {
             CommandGroup(after: .saveItem) {
@@ -54,4 +59,34 @@ struct DoodlesApp: App {
         NSApp.windows.first?.title = t
         #endif
     }
+
+    #if os(macOS)
+    private func setupWindowDelegate() {
+        // already handled via NSApp delegate method below
+    }
+    #endif
 }
+
+
+#if os(macOS)
+struct WindowAccessor: NSViewRepresentable {
+    let model: DrawingModel
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            view.window?.delegate = context.coordinator
+        }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+    class Coordinator: NSObject, NSWindowDelegate {
+        let model: DrawingModel
+        init(model: DrawingModel) { self.model = model }
+        func windowShouldClose(_ sender: NSWindow) -> Bool {
+            if !model.showWelcome { model.closeBoard(); return false }
+            return true
+        }
+    }
+}
+#endif

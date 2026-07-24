@@ -122,7 +122,16 @@ struct PenSettings {
     var thickness: CGFloat = 2
     var smoothness: CGFloat = 1
     var lightPresets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
-    var darkPresets: [Color] = [.white, .red, .orange, .yellow, .green, .cyan, .purple, .pink]
+    var darkPresets: [Color] = [
+        Color(red: 0.96, green: 0.96, blue: 0.96),
+        Color(red: 1.0, green: 0.6, blue: 0.6),
+        Color(red: 1.0, green: 0.75, blue: 0.5),
+        Color(red: 0.9, green: 0.9, blue: 0.5),
+        Color(red: 0.6, green: 0.9, blue: 0.6),
+        Color(red: 0.5, green: 0.8, blue: 1.0),
+        Color(red: 0.75, green: 0.6, blue: 1.0),
+        Color(red: 1.0, green: 0.6, blue: 0.8),
+    ]
 }
 
 struct FillSettings {
@@ -934,13 +943,18 @@ class DrawingModel: ObservableObject {
             ctx.fillPath()
         }
 
-        // Render strokes (highlighter first)
-        for s in strokes where s.isHighlighter {
-            renderStrokeForExport(s, ctx: ctx)
+        // Render highlighter strokes as a group with uniform opacity
+        let hlOpacity = CGFloat(highlighterSettings.opacity)
+        if !strokes.contains(where: \.isHighlighter) == false {
+            ctx.saveGState()
+            ctx.setAlpha(hlOpacity)
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            renderStrokesForExport(strokes.filter(\.isHighlighter), ctx: ctx)
+            ctx.endTransparencyLayer()
+            ctx.restoreGState()
         }
-        for s in strokes where !s.isHighlighter {
-            renderStrokeForExport(s, ctx: ctx)
-        }
+        // Pen and eraser strokes
+        renderStrokesForExport(strokes.filter { !$0.isHighlighter }, ctx: ctx)
 
         guard let image = ctx.makeImage() else { return nil }
         let cfData = CFDataCreateMutable(nil, 0)
@@ -948,6 +962,10 @@ class DrawingModel: ObservableObject {
         CGImageDestinationAddImage(dest, image, nil)
         guard CGImageDestinationFinalize(dest) else { return nil }
         return cfData! as Data
+    }
+
+    private func renderStrokesForExport(_ strokes: [Stroke], ctx: CGContext) {
+        for s in strokes { renderStrokeForExport(s, ctx: ctx) }
     }
 
     private func renderStrokeForExport(_ s: Stroke, ctx: CGContext) {
@@ -993,11 +1011,15 @@ class DrawingModel: ObservableObject {
             ctx.addPath(r.cgPath)
             ctx.fillPath()
         }
-        for s in strokes where s.isHighlighter {
-            renderStrokeForExport(s, ctx: ctx)
+        let hlOpacity = CGFloat(highlighterSettings.opacity)
+        if strokes.contains(where: \.isHighlighter) {
+            ctx.saveGState()
+            ctx.setAlpha(hlOpacity)
+            ctx.beginTransparencyLayer(auxiliaryInfo: nil)
+            for s in strokes where s.isHighlighter { renderStrokeForExport(s, ctx: ctx) }
+            ctx.endTransparencyLayer()
+            ctx.restoreGState()
         }
-        for s in strokes where !s.isHighlighter {
-            renderStrokeForExport(s, ctx: ctx)
-        }
+        for s in strokes where !s.isHighlighter { renderStrokeForExport(s, ctx: ctx) }
     }
 }

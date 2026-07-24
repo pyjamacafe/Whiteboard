@@ -51,6 +51,14 @@ struct WelcomeView: View {
                 }
                 .buttonStyle(.bordered)
                 .help("New Folder")
+
+                Button(action: { model.appSettings.isDarkMode.toggle() }) {
+                    Image(systemName: model.appSettings.isDarkMode ? "moon.fill" : "sun.max.fill")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.bordered)
+                .help("Toggle Theme")
             }
 
             ScrollView {
@@ -138,6 +146,14 @@ struct WelcomeView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        #if os(macOS)
+        .background(model.appSettings.isDarkMode ? Color(red: 28/255, green: 28/255, blue: 30/255) : Color(.windowBackgroundColor))
+        #else
+        .background(model.appSettings.isDarkMode ? Color(red: 28/255, green: 28/255, blue: 30/255) : Color(.systemBackground))
+        #endif
+        .foregroundColor(model.appSettings.isDarkMode ? .white : .primary)
+        .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
+        .accentColor(model.appSettings.isDarkMode ? Color(red: 0.5, green: 0.8, blue: 1.0) : nil)
         .onAppear { model.loadTrash() }
         .alert("New Doodle", isPresented: $showNewName) {
             TextField("Doodle name", text: $newName)

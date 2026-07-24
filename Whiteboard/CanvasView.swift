@@ -46,8 +46,8 @@ class CanvasGridView: UIView {
         guard let ctx = UIGraphicsGetCurrentContext(), let model = model else { return }
 
         let isDark = model.appSettings.isDarkMode
-        let bg: UIColor = isDark ? .black : .white
-        let fg: UIColor = isDark ? .systemGray4 : .systemGray5
+        let bg: UIColor = isDark ? UIColor(red: 28/255, green: 28/255, blue: 30/255, alpha: 1) : .white
+        let fg: UIColor = isDark ? UIColor(red: 56/255, green: 56/255, blue: 58/255, alpha: 1) : .systemGray5
         ctx.setFillColor(bg.cgColor)
         ctx.fill(rect)
 
@@ -600,8 +600,8 @@ struct CanvasView: View {
             Canvas { context, size in
                 let spacing: CGFloat = 30 * scale
                 let isDark = model.appSettings.isDarkMode
-                let bg = isDark ? Color.black : Color.white
-                let fg = isDark ? Color.gray.opacity(0.3) : Color.gray.opacity(0.2)
+                let bg = isDark ? Color(red: 28/255, green: 28/255, blue: 30/255) : Color.white
+                let fg = isDark ? Color(red: 56/255, green: 56/255, blue: 58/255) : Color.gray.opacity(0.2)
 
                 context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(bg))
 
