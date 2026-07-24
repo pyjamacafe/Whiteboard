@@ -29,6 +29,8 @@ struct SettingsPopupView: View {
                 Button(action: { model.deleteSelected() }) { Image(systemName: "trash").font(.title3).frame(width: 32, height: 32) }
                     .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
                 Button(action: { model.needsRecenter = true }) { Image(systemName: "viewfinder").font(.title3).frame(width: 32, height: 32) }
+                Divider().frame(height: 24)
+                Button(action: { model.showWelcome = true }) { Image(systemName: "house").font(.title3).frame(width: 32, height: 32) }
                 Spacer()
             }
             .buttonStyle(.plain)
@@ -44,6 +46,27 @@ struct SettingsPopupView: View {
                 }
             }
             .toggleStyle(.switch)
+
+            Divider()
+
+            HStack(spacing: 8) {
+                Button(action: { model.saveDefaults() }) {
+                    Label("Save Defaults", systemImage: "bookmark").font(.caption)
+                }
+                .buttonStyle(.bordered)
+
+                if model.hasDefaults {
+                    Button(action: { model.loadDefaults() }) {
+                        Label("Load Defaults", systemImage: "bookmark.fill").font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button(action: { model.resetToFactory() }) {
+                        Label("Reset", systemImage: "arrow.counterclockwise").font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
 
             Divider()
 

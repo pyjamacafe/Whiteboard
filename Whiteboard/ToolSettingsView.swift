@@ -1,9 +1,5 @@
 import SwiftUI
 
-extension Int: Identifiable {
-    public var id: Int { self }
-}
-
 struct ToolSettingsView: View {
     @ObservedObject var model: DrawingModel
     let tool: Tool
@@ -45,7 +41,8 @@ struct ToolSettingsView: View {
                             if lastTapIndex.wrappedValue == i {
                                 // Double-tap → show color picker to change preset
                                 lastTapIndex.wrappedValue = nil
-                                showingColorPickerIndex = i
+                                colorPickerIndex = i
+                                showColorPicker = true
                             } else {
                                 lastTapIndex.wrappedValue = i
                                 selected.wrappedValue = color
@@ -59,14 +56,17 @@ struct ToolSettingsView: View {
                 }
             }
         }
-        .sheet(item: $showingColorPickerIndex) { idx in
-            ColorPickerView(currentColor: presets.wrappedValue[idx]) { newColor in
-                presets.wrappedValue[idx] = newColor
+        .sheet(isPresented: $showColorPicker) {
+            if let idx = colorPickerIndex {
+                ColorPickerView(currentColor: presets.wrappedValue[idx]) { newColor in
+                    presets.wrappedValue[idx] = newColor
+                }
             }
         }
     }
 
-    @State private var showingColorPickerIndex: Int?
+    @State private var colorPickerIndex: Int?
+    @State private var showColorPicker: Bool = false
 
     private struct ColorPickerView: View {
         let currentColor: Color

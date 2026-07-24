@@ -180,6 +180,7 @@ class DrawingModel: ObservableObject {
 
     init() {
         loadRecents()
+        loadBoards()
     }
 
     private func loadRecents() {
@@ -202,6 +203,317 @@ class DrawingModel: ObservableObject {
         saveRecents()
     }
 
+    // MARK: - Default Settings
+
+    private let defaultsKey = "savedDefaults"
+
+    struct SettingsSnapshot: Codable {
+        let penLightColor: CodableColor
+        let penDarkColor: CodableColor
+        let penThickness: CGFloat
+        let penSmoothness: CGFloat
+        let fillLightColor: CodableColor
+        let fillDarkColor: CodableColor
+        let fillOpacity: Double
+        let hlLightColor: CodableColor
+        let hlDarkColor: CodableColor
+        let hlThickness: CGFloat
+        let hlOpacity: Double
+        let eraserSize: CGFloat
+        let eraserMode: String
+        let canvasBg: String
+        let isDarkMode: Bool
+    }
+
+    func saveDefaults() {
+        let s = SettingsSnapshot(
+            penLightColor: CodableColor(penSettings.lightColor),
+            penDarkColor: CodableColor(penSettings.darkColor),
+            penThickness: penSettings.thickness,
+            penSmoothness: penSettings.smoothness,
+            fillLightColor: CodableColor(fillSettings.lightColor),
+            fillDarkColor: CodableColor(fillSettings.darkColor),
+            fillOpacity: fillSettings.opacity,
+            hlLightColor: CodableColor(highlighterSettings.lightColor),
+            hlDarkColor: CodableColor(highlighterSettings.darkColor),
+            hlThickness: highlighterSettings.thickness,
+            hlOpacity: highlighterSettings.opacity,
+            eraserSize: eraserSettings.size,
+            eraserMode: eraserSettings.mode.rawValue,
+            canvasBg: appSettings.canvasBackground.rawValue,
+            isDarkMode: appSettings.isDarkMode
+        )
+        if let data = try? JSONEncoder().encode(s) {
+            UserDefaults.standard.set(data, forKey: defaultsKey)
+        }
+    }
+
+    func loadDefaults() {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              let s = try? JSONDecoder().decode(SettingsSnapshot.self, from: data) else { return }
+        penSettings.lightColor = s.penLightColor.color
+        penSettings.darkColor = s.penDarkColor.color
+        penSettings.thickness = s.penThickness
+        penSettings.smoothness = s.penSmoothness
+        fillSettings.lightColor = s.fillLightColor.color
+        fillSettings.darkColor = s.fillDarkColor.color
+        fillSettings.opacity = s.fillOpacity
+        highlighterSettings.lightColor = s.hlLightColor.color
+        highlighterSettings.darkColor = s.hlDarkColor.color
+        highlighterSettings.thickness = s.hlThickness
+        highlighterSettings.opacity = s.hlOpacity
+        eraserSettings.size = s.eraserSize
+        eraserSettings.mode = EraserMode(rawValue: s.eraserMode) ?? .partial
+        appSettings.canvasBackground = CanvasBackground(rawValue: s.canvasBg) ?? .grid
+        appSettings.isDarkMode = s.isDarkMode
+    }
+
+    func resetToFactory() {
+        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        penSettings = PenSettings()
+        fillSettings = FillSettings()
+        highlighterSettings = HighlighterSettings()
+        eraserSettings = EraserSettings()
+        appSettings = AppSettings()
+    }
+
+    var hasDefaults: Bool {
+        UserDefaults.standard.data(forKey: defaultsKey) != nil
+    }
+
+    // MARK: - Board Storage
+
+    private var boardsDir: URL {
+        let fm = FileManager.default
+        #if os(macOS)
+        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        #else
+        let appSupport = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
+        #endif
+        let dir = appSupport.appendingPathComponent("com.whiteboard.boards")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    private var indexURL: URL { boardsDir.appendingPathComponent("boards.json") }
+
+    struct BoardMeta: Codable, Identifiable {
+        var id: String
+        var name: String
+        var created: Date
+        var modified: Date
+    }
+
+    @Published var boards: [BoardMeta] = []
+    @Published var folders: [BoardFolder] = []
+    @Published var currentBoardId: String?
+
+    struct BoardFolder: Codable, Identifiable {
+        var id: String
+        var name: String
+        var boardIds: [String]
+    }
+
+    func loadBoards() {
+        guard let data = try? Data(contentsOf: indexURL),
+              let list = try? JSONDecoder().decode(BoardIndex.self, from: data) else {
+            boards = []; folders = []; return
+        }
+        boards = list.boards.sorted { $0.modified > $1.modified }
+        folders = list.folders
+    }
+
+    private struct BoardIndex: Codable {
+        var boards: [BoardMeta]
+        var folders: [BoardFolder]
+    }
+
+    private func saveBoards() {
+        let index = BoardIndex(boards: boards, folders: folders)
+        if let data = try? JSONEncoder().encode(index) {
+            try? data.write(to: indexURL, options: .atomic)
+        }
+    }
+
+    func createBoard(name: String, folderId: String? = nil) {
+        let id = UUID().uuidString.prefix(8).lowercased()
+        let meta = BoardMeta(id: String(id), name: name, created: Date(), modified: Date())
+        boards.insert(meta, at: 0)
+        if let fid = folderId, let idx = folders.firstIndex(where: { $0.id == fid }) {
+            folders[idx].boardIds.insert(String(id), at: 0)
+        }
+        saveBoards()
+        currentBoardId = meta.id
+        openFileURL = boardURL(for: meta.id)
+        clear()
+    }
+
+    func renameBoard(id: String, to newName: String) {
+        guard let idx = boards.firstIndex(where: { $0.id == id }) else { return }
+        boards[idx].name = newName
+        boards[idx].modified = Date()
+        saveBoards()
+    }
+
+    // MARK: - Folders
+
+    func createFolder(name: String) {
+        let id = UUID().uuidString.prefix(8).lowercased()
+        folders.append(BoardFolder(id: String(id), name: name, boardIds: []))
+        saveBoards()
+    }
+
+    func renameFolder(id: String, to newName: String) {
+        guard let idx = folders.firstIndex(where: { $0.id == id }) else { return }
+        folders[idx].name = newName
+        saveBoards()
+    }
+
+    func deleteFolder(id: String) {
+        folders.removeAll { $0.id == id }
+        saveBoards()
+    }
+
+    func moveBoard(boardId: String, toFolder folderId: String?) {
+        for fi in folders.indices { folders[fi].boardIds.removeAll { $0 == boardId } }
+        if let fid = folderId, let idx = folders.firstIndex(where: { $0.id == fid }) {
+            folders[idx].boardIds.append(boardId)
+        }
+        saveBoards()
+    }
+
+    func boardIdsInFolder(_ folderId: String) -> [String] {
+        folders.first(where: { $0.id == folderId })?.boardIds ?? []
+    }
+
+    func deleteBoard(id: String) {
+        let src = boardURL(for: id)
+        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
+        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        let dst = trashDir.appendingPathComponent("\(id)_\(Date().timeIntervalSince1970).wb")
+        try? FileManager.default.moveItem(at: src, to: dst)
+        boards.removeAll { $0.id == id }
+        for fi in folders.indices { folders[fi].boardIds.removeAll { $0 == id } }
+        saveBoards()
+        if currentBoardId == id { currentBoardId = nil }
+        cleanTrash()
+    }
+
+    func restoreBoard(id: String) -> Bool {
+        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(at: trashDir, includingPropertiesForKeys: nil) else { return false }
+        let match = files.first { $0.lastPathComponent.hasPrefix("\(id)_") }
+        guard let src = match else { return false }
+        guard let data = try? Data(contentsOf: src) else { return false }
+        // Extract original name from the board index (or use a fallback)
+        let indexURL = trashDir.appendingPathComponent("trash_index.json")
+        var trashIndex: [TrashEntry] = (try? JSONDecoder().decode([TrashEntry].self, from: Data(contentsOf: indexURL))) ?? []
+        let entry = trashIndex.first(where: { $0.id == id })
+        let name = entry?.name ?? "Restored Board"
+        createBoard(name: name)
+        if let current = currentBoardId {
+            let dst = boardURL(for: current)
+            try? data.write(to: dst, options: .atomic)
+            loadBoard(id: current)
+            // Reload from the written file
+            if let reload = try? Data(contentsOf: dst),
+               let saved = try? JSONDecoder().decode(SaveData.self, from: reload) {
+                strokes = saved.strokes
+                fillRegions = saved.fillRegions
+            }
+        }
+        try? FileManager.default.removeItem(at: src)
+        trashIndex.removeAll { $0.id == id }
+        if let updated = try? JSONEncoder().encode(trashIndex) { try? updated.write(to: indexURL) }
+        return true
+    }
+
+    struct TrashEntry: Codable {
+        let id: String
+        let name: String
+        let deletedAt: Date
+    }
+
+    @Published var trashedBoards: [TrashEntry] = []
+
+    func loadTrash() {
+        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
+        let indexURL = trashDir.appendingPathComponent("trash_index.json")
+        guard let data = try? Data(contentsOf: indexURL),
+              let list = try? JSONDecoder().decode([TrashEntry].self, from: data) else {
+            trashedBoards = []; return
+        }
+        trashedBoards = list.sorted { $0.deletedAt > $1.deletedAt }
+    }
+
+    private func cleanTrash() {
+        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
+        let indexURL = trashDir.appendingPathComponent("trash_index.json")
+        let index: [TrashEntry] = (try? JSONDecoder().decode([TrashEntry].self, from: Data(contentsOf: indexURL))) ?? []
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 3600)
+        let remaining = index.filter { $0.deletedAt > cutoff }
+        // Remove files older than 30 days
+        for entry in index where entry.deletedAt <= cutoff {
+            let file = trashDir.appendingPathComponent("\(entry.id)_\(entry.deletedAt.timeIntervalSince1970).wb")
+            try? FileManager.default.removeItem(at: file)
+        }
+        if remaining.count != index.count {
+            if let data = try? JSONEncoder().encode(remaining) { try? data.write(to: indexURL) }
+        }
+        loadTrash()
+    }
+
+    func trashBoard(id: String, name: String) {
+        let entry = TrashEntry(id: id, name: name, deletedAt: Date())
+        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
+        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
+        let indexURL = trashDir.appendingPathComponent("trash_index.json")
+        var index: [TrashEntry] = (try? JSONDecoder().decode([TrashEntry].self, from: Data(contentsOf: indexURL))) ?? []
+        index.append(entry)
+        if let data = try? JSONEncoder().encode(index) { try? data.write(to: indexURL) }
+        deleteBoard(id: id)
+    }
+
+    func loadBoard(id: String) {
+        let url = boardURL(for: id)
+        guard let data = try? Data(contentsOf: url),
+              let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return }
+        saveState()
+        strokes = save.strokes
+        fillRegions = save.fillRegions
+        currentBoardId = id
+        openFileURL = url
+        updateUndoRedo()
+    }
+
+    private func boardURL(for id: String) -> URL {
+        boardsDir.appendingPathComponent("\(id).wb")
+    }
+
+    func openBoardByID(_ id: String) {
+        loadBoard(id: id)
+    }
+
+    // MARK: - Auto-save
+
+    private var saveWorkItem: DispatchWorkItem?
+
+    private func scheduleAutoSave() {
+        saveWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.performAutoSave() }
+        saveWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    private func performAutoSave() {
+        guard let id = currentBoardId, let data = saveData() else { return }
+        try? data.write(to: boardURL(for: id), options: .atomic)
+        if let idx = boards.firstIndex(where: { $0.id == id }) {
+            boards[idx].modified = Date()
+            saveBoards()
+        }
+    }
+
     // Theme-aware colors
     var penColor: Color { appSettings.isDarkMode ? penSettings.darkColor : penSettings.lightColor }
     var penPresets: [Color] { appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets }
@@ -222,6 +534,7 @@ class DrawingModel: ObservableObject {
         redoStack.removeAll()
         canUndo = true
         canRedo = false
+        scheduleAutoSave()
     }
 
     private func updateUndoRedo() {
@@ -431,6 +744,7 @@ class DrawingModel: ObservableObject {
         selectedFillIds.removeAll()
         selectionBoundary.removeAll()
         updateUndoRedo()
+        scheduleAutoSave()
     }
 
     // MARK: - Eraser
@@ -484,6 +798,7 @@ class DrawingModel: ObservableObject {
                 return true
             }
             self.updateUndoRedo()
+            self.scheduleAutoSave()
         }
     }
 
