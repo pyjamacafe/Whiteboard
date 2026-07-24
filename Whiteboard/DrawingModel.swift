@@ -3,6 +3,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 #if os(macOS)
 import AppKit
+typealias PlatformImage = NSImage
+#else
+import UIKit
+typealias PlatformImage = UIImage
 #endif
 
 struct Stroke: Identifiable, Codable {
@@ -921,6 +925,7 @@ class DrawingModel: ObservableObject {
     @Published var isToolbarVisible: Bool = true
     @Published var showWelcome: Bool = true
     @Published var needsRecenter: Bool = false
+    @Published var welcomeFolderName: String?
 
     func pngData(size: CGSize, offset: CGPoint = .zero, scale: CGFloat = 3) -> Data? {
         let w = Int(size.width * scale)
@@ -1027,5 +1032,62 @@ class DrawingModel: ObservableObject {
             ctx.restoreGState()
         }
         for s in strokes where !s.isHighlighter { renderStrokeForExport(s, ctx: ctx) }
+    }
+
+    // MARK: - Thumbnail
+
+    func thumbnail(for boardId: String, size: CGSize = CGSize(width: 240, height: 320)) -> PlatformImage? {
+        let url = boardURL(for: boardId)
+        guard let data = try? Data(contentsOf: url),
+              let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return nil }
+        return renderThumbnail(strokes: save.strokes, fillRegions: save.fillRegions, size: size)
+    }
+
+    private func renderThumbnail(strokes: [Stroke], fillRegions: [FillRegion], size: CGSize) -> PlatformImage? {
+        let isDark = appSettings.isDarkMode
+        let w = Int(size.width), h = Int(size.height)
+        var pixels = [UInt8](repeating: 255, count: w * h * 4)
+        guard let ctx = CGContext(
+            data: &pixels, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        if isDark {
+            ctx.setFillColor(CGColor(red: 28/255, green: 28/255, blue: 30/255, alpha: 1))
+        } else {
+            ctx.setFillColor(gray: 1, alpha: 1)
+        }
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+
+        var minX: CGFloat = .greatestFiniteMagnitude, maxX: CGFloat = 0
+        var minY: CGFloat = .greatestFiniteMagnitude, maxY: CGFloat = 0
+        for s in strokes { for p in s.points { minX = min(minX, p.x); maxX = max(maxX, p.x); minY = min(minY, p.y); maxY = max(maxY, p.y) } }
+        for r in fillRegions { let box = r.cgPath.boundingBox; if !box.isNull { minX = min(minX, box.minX); maxX = max(maxX, box.maxX); minY = min(minY, box.minY); maxY = max(maxY, box.maxY) } }
+        guard maxX > minX, maxY > minY else { return nil }
+
+        let pad: CGFloat = 10, cw = maxX - minX + pad * 2, ch = maxY - minY + pad * 2
+        let sc = min(CGFloat(w) / cw, CGFloat(h) / ch) * 0.9
+        let ox = (CGFloat(w) - cw * sc) / 2 - (minX - pad) * sc
+        let oy = (CGFloat(h) - ch * sc) / 2 - (minY - pad) * sc
+
+        ctx.translateBy(x: ox, y: oy + CGFloat(h))
+        ctx.scaleBy(x: sc, y: -sc)
+
+        for r in fillRegions { ctx.setFillColor(r.uiColor.cgColor ?? CGColor(gray: 0.5, alpha: 1)); ctx.beginPath(); ctx.addPath(r.cgPath); ctx.fillPath() }
+        for s in strokes where !s.isEraser {
+            ctx.saveGState(); ctx.setLineCap(CGLineCap.round); ctx.setLineJoin(CGLineJoin.round)
+            ctx.setStrokeColor(s.uiColor.cgColor ?? CGColor(gray: 0, alpha: 1))
+            ctx.setLineWidth(max(s.lineWidth, 1))
+            ctx.addLines(between: s.points); ctx.strokePath(); ctx.restoreGState()
+        }
+
+        guard let cgImage = ctx.makeImage() else { return nil }
+        #if os(macOS)
+        return NSImage(cgImage: cgImage, size: size)
+        #else
+        return UIImage(cgImage: cgImage)
+        #endif
     }
 }

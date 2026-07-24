@@ -144,6 +144,14 @@ struct ContentView: View {
         }
         .onHover { hovering in
             hoveredTool = hovering ? systemName : nil
+            #if os(macOS)
+            if hovering || settingsTool == tool { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+            #endif
+        }
+        .onChange(of: settingsTool) { _, newValue in
+            #if os(macOS)
+            if newValue == tool { NSCursor.pointingHand.set() }
+            #endif
         }
         .highPriorityGesture(
             TapGesture().onEnded {

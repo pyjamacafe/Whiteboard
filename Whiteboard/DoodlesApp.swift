@@ -10,6 +10,7 @@ struct DoodlesApp: App {
                 .environmentObject(model)
                 .onReceive(model.$currentBoardId) { _ in setTitle() }
                 .onReceive(model.$showWelcome) { _ in setTitle() }
+                .onReceive(model.$welcomeFolderName) { _ in setTitle() }
                 .onAppear {
                     setTitle()
                 }
@@ -51,8 +52,13 @@ struct DoodlesApp: App {
     private func setTitle() {
         #if os(macOS)
         let t: String
-        if model.showWelcome { t = "Doodles" }
-        else if let id = model.currentBoardId,
+        if model.showWelcome {
+            if let folder = model.welcomeFolderName {
+                t = "Doodles | \(folder)"
+            } else {
+                t = "Doodles | All Boards"
+            }
+        } else if let id = model.currentBoardId,
                 let board = model.boards.first(where: { $0.id == id }) {
             t = "Doodles | \(board.name)"
         } else { t = "Doodles" }
