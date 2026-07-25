@@ -7,7 +7,6 @@ import CoreGraphics
 enum FloodFill {
 
     static func fillPath(at canvasPoint: CGPoint, strokes: [Stroke]) -> CGPath? {
-        let t0 = CFAbsoluteTimeGetCurrent()
 
         var segs: [(CGPoint, CGPoint)] = []
         for s in strokes where !s.isEraser {
@@ -22,8 +21,6 @@ enum FloodFill {
             }
         }
         guard !segs.isEmpty else { return nil }
-        let t1 = CFAbsoluteTimeGetCurrent()
-        print("[fill] collect \(segs.count) segs: \(String(format: "%.1f", (t1-t0)*1000))ms")
 
         let searchRadius: CGFloat = 500
         let tapRect = CGRect(x: canvasPoint.x - searchRadius, y: canvasPoint.y - searchRadius,
@@ -35,8 +32,6 @@ enum FloodFill {
             return da < db
         })
         let cappedSegs = sortedSegs.count > 2000 ? Array(sortedSegs.prefix(2000)) : sortedSegs
-        let t2 = CFAbsoluteTimeGetCurrent()
-        print("[fill] filter+sort -> \(cappedSegs.count) segs: \(String(format: "%.1f", (t2-t1)*1000))ms")
 
         // Bridge nearby stroke-endpoints so barely-touching strokes
         // form a connected graph for the DCEL.
@@ -80,12 +75,8 @@ enum FloodFill {
         }
         if bridgeCount > 0 {
         }
-        let t3 = CFAbsoluteTimeGetCurrent()
-        print("[fill] bridge: \(String(format: "%.1f", (t3-t2)*1000))ms (\(bridgeCount) bridges)")
 
         let enclosures = EnclosureDetector.detect(from: bridged)
-        let t4 = CFAbsoluteTimeGetCurrent()
-        print("[fill] DCEL detect: \(String(format: "%.1f", (t4-t3)*1000))ms -> \(enclosures.count) enclosures")
 
         // If DCEL found nothing, try simple closed-stroke detection
         if enclosures.isEmpty {
@@ -106,8 +97,6 @@ enum FloodFill {
                 best = (path, area)
             }
         }
-        let t5 = CFAbsoluteTimeGetCurrent()
-        print("[fill] select best: \(String(format: "%.1f", (t5-t4)*1000))ms -> \(best != nil)")
         return best?.path
     }
 
@@ -233,7 +222,6 @@ private enum EnclosureDetector {
 
         // Phase 1: split segments at intersections
         var i = 0
-        let pd0 = CFAbsoluteTimeGetCurrent()
         while i < split.count {
             var j = i + 1
             var advanced = false
@@ -261,11 +249,9 @@ private enum EnclosureDetector {
             }
             if !advanced { i += 1 }
         }
-        print("[DCEL] Phase 1 intersect split: \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-pd0)*1000))ms (\(split.count) segs)")
 
         var adj = [Vertex: [HalfEdge]]()
         var allEdges = [HalfEdge]()
-        let pd1 = CFAbsoluteTimeGetCurrent()
 
         for seg in split {
             let v1 = Vertex(point: seg.0), v2 = Vertex(point: seg.1)
@@ -276,8 +262,6 @@ private enum EnclosureDetector {
             allEdges.append(e1)
             allEdges.append(e2)
         }
-        print("[DCEL] Phase 2a build adj: \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-pd1)*1000))ms (\(adj.count) vertices)")
-        let pd2 = CFAbsoluteTimeGetCurrent()
 
         // Sort edges around each vertex by angle (CCW) and link 'next' pointers
         for (v, edges) in adj {
@@ -303,8 +287,6 @@ private enum EnclosureDetector {
                 }
             }
         }
-        print("[DCEL] Phase 2b sort+link: \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-pd2)*1000))ms")
-        let pd3 = CFAbsoluteTimeGetCurrent()
 
         // Phase 3: traverse cycles using left-hand turn rule
         var paths = [CGPath]()
@@ -328,7 +310,6 @@ private enum EnclosureDetector {
                 }
             }
         }
-        print("[DCEL] Phase 3 traverse: \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-pd3)*1000))ms -> \(paths.count) cycles")
         return paths
     }
 

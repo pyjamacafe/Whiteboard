@@ -740,7 +740,7 @@ class DrawingModel: ObservableObject {
     }
 
     func endLasso() {
-        guard selectionLasso.count >= 3 else { print("[sel] endLasso — selectionLasso.count=\(selectionLasso.count) < 3, returning"); selectionLasso = []; return }
+        guard selectionLasso.count >= 3 else { selectionLasso = []; return }
 
         saveState()
 
@@ -773,7 +773,6 @@ class DrawingModel: ObservableObject {
 
         selectionBoundary = selectionLasso
         selectionLasso = []
-        print("[sel] endLasso — selected \(selectedStrokeIds.count) strokes, \(selectedFillIds.count) fills, boundary=\(selectionBoundary.count) pts")
         updateUndoRedo()
     }
 
@@ -986,17 +985,14 @@ class DrawingModel: ObservableObject {
     }
 
     func deleteSelected() {
-        print("[sel] deleteSelected called — selectedStrokeIds=\(selectedStrokeIds.count) selectedFillIds=\(selectedFillIds.count) boundary=\(selectionBoundary.count)")
         saveState()
         if !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty {
-            print("[sel] deleting \(selectedStrokeIds.count) strokes and \(selectedFillIds.count) fills")
             strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
             fillRegions = fillRegions.filter { !selectedFillIds.contains($0.id) }
             selectedStrokeIds.removeAll()
             selectedFillIds.removeAll()
         }
         selectionBoundary.removeAll()
-        print("[sel] after deleteSelected — strokes=\(strokes.count) fills=\(fillRegions.count) boundary=\(selectionBoundary.count)")
         updateUndoRedo()
         scheduleAutoSave()
     }
@@ -1057,16 +1053,13 @@ class DrawingModel: ObservableObject {
     // MARK: - Fill
 
     func performFill(at canvasPoint: CGPoint) {
-        let t0 = CFAbsoluteTimeGetCurrent()
         saveState()
         guard let path = FloodFill.fillPath(at: canvasPoint, strokes: strokes) else {
-            print("[fill] performFill: no path (total \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-t0)*1000))ms)")
             updateUndoRedo()
             return
         }
         let region = FillRegion(path: path, color: fillColor.opacity(fillSettings.opacity), presetIndex: fillPresetIndex)
         fillRegions.append(region)
-        print("[fill] performFill: fill region created (total \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-t0)*1000))ms)")
         updateUndoRedo()
     }
 

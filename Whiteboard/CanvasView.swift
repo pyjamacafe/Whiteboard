@@ -651,12 +651,10 @@ class DrawingCanvasView: UIView {
             let cp = toCanvas(touch.location(in: self))
             if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
                 let onSelected = model.isPointOnSelectedItem(cp) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(cp))
-                print("[sel] touchesBegan select — selection exists, onSelected=\(onSelected)")
                 if onSelected {
                     let now = Date()
                     if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
                         Self.lastSelectTap = .distantPast
-                        print("[sel] double-tap detected — showing delete menu, selections=\(model.selectedStrokeIds.count)/\(model.selectedFillIds.count) boundary=\(model.selectionBoundary.count)")
                         model.showDeleteMenu = true
                         let tapLoc = touch.location(in: self)
                         model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
@@ -766,7 +764,6 @@ class DrawingCanvasView: UIView {
         }
         if model?.currentTool == .select {
             if model?.showDeleteMenu == true { return }
-            print("[sel] touchesEnded select — isMoving=\(model?.isMoving == true) calling \(model?.isMoving == true ? "commitMove" : "endLasso")")
             if model?.isMoving == true {
                 model?.commitMove()
             } else {
