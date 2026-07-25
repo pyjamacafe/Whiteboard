@@ -18,10 +18,14 @@ jobs:
 
       - name: Select Xcode 16
         run: |
-          XCODE_PATH=$(ls /Applications/Xcode_16*.app /Applications/Xcode_15.4.app 2>/dev/null | sort -r | head -1)
-          if [ -z "$XCODE_PATH" ]; then XCODE_PATH="/Applications/Xcode.app"; fi
-          echo "Using Xcode at: $XCODE_PATH"
-          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          for p in /Applications/Xcode_16*.app /Applications/Xcode_15.4.app /Applications/Xcode.app; do
+            if [ -d "$p" ]; then
+              echo "Using Xcode at: $p"
+              sudo xcode-select -s "$p/Contents/Developer"
+              break
+            fi
+          done
+          xcodebuild -version
 
       - name: Show Xcode version
         run: xcodebuild -version
