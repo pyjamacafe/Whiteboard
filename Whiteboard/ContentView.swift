@@ -61,7 +61,6 @@ struct ContentView: View {
         }
 
         return content
-            .onTapGesture { settingsTool = nil }
             .onChange(of: model.pendingAction) { _, newValue in
                 guard let newValue else { return }
                 if newValue == .open { showImporter = true }
@@ -108,6 +107,12 @@ struct ContentView: View {
                 }
             }
             .animation(.easeOut(duration: 0.15), value: model.showDeleteMenu)
+            .confirmationDialog("Clear Canvas?", isPresented: $model.showClearConfirmation, titleVisibility: .visible) {
+                Button("Clear", role: .destructive) { model.clear() }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("This will permanently delete all strokes, fills, and laser annotations.")
+            }
     }
 
     private var shortcutButtons: some View {
@@ -224,6 +229,35 @@ struct ContentView: View {
                 .frame(height: 24)
 
             toolButton(systemName: "laser.burst", tool: .laser)
+
+            Divider()
+                .frame(height: 24)
+
+            Button(action: { model.undo() }) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.title3)
+                    .frame(width: 32, height: 32)
+                    .foregroundColor(model.canUndo ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canUndo)
+
+            Button(action: { model.redo() }) {
+                Image(systemName: "arrow.uturn.forward")
+                    .font(.title3)
+                    .frame(width: 32, height: 32)
+                    .foregroundColor(model.canRedo ? .primary : .secondary)
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canRedo)
+
+            Button(action: { model.showWelcome = true }) {
+                Image(systemName: "house")
+                    .font(.title3)
+                    .frame(width: 32, height: 32)
+                    .foregroundColor(.primary)
+            }
+            .buttonStyle(.plain)
 
             Divider()
                 .frame(height: 24)

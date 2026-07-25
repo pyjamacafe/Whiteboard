@@ -194,7 +194,7 @@ struct PenSettings {
     var lightColor: Color = .black
     var darkColor: Color = .white
     var thickness: CGFloat = 3
-    let widthOptions: [CGFloat] = [2, 3, 4, 5, 6, 7, 8]
+    let widthOptions: [CGFloat] = [2, 2.5, 3, 3.5, 4]
     var lightPresets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
     var darkPresets: [Color] = [
         Color(red: 0.96, green: 0.96, blue: 0.96),
@@ -239,11 +239,11 @@ struct HighlighterSettings {
 
 struct LaserSettings {
     var retainStrokes: Bool = false
-    let tailFade: Double = 5.0
-    var size: CGFloat = 6
+    let tailFade: Double = 3.0
+    var size: CGFloat = 1.5
 }
 
-typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>)
+typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>, laserStrokes: [(points: [CGPoint], time: Date, isRetained: Bool)])
 
 class DrawingModel: ObservableObject {
     @Published var strokes: [Stroke] = []
@@ -261,7 +261,13 @@ class DrawingModel: ObservableObject {
     @Published var fillSettings = FillSettings()
     @Published var eraserSettings = EraserSettings()
     @Published var highlighterSettings = HighlighterSettings()
-    @Published var laserSettings = LaserSettings()
+    @Published var laserSettings = LaserSettings() {
+        didSet {
+            if !laserSettings.retainStrokes {
+                persistentLaserStrokes.removeAll()
+            }
+        }
+    }
     @Published var appSettings = AppSettings()
     var openFileURL: URL? {
         didSet {
@@ -668,14 +674,14 @@ class DrawingModel: ObservableObject {
     var laserTail: [(point: CGPoint, time: Date)] = []
     var laserPointer: CGPoint?
     var laserTailFadeStart: Date?
-    var persistentLaserStrokes: [[CGPoint]] = []
+    var persistentLaserStrokes: [(points: [CGPoint], time: Date, isRetained: Bool)] = []
     var laserTailFading: Bool { laserTailFadeStart != nil }
 
     private var undoStack: [CanvasSnapshot] = []
     private var redoStack: [CanvasSnapshot] = []
 
     private func saveState() {
-        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds))
+        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, persistentLaserStrokes))
         redoStack.removeAll()
         canUndo = true
         canRedo = false
@@ -699,7 +705,8 @@ class DrawingModel: ObservableObject {
             lineWidth: isEraser ? eraserSettings.size : isHighlight ? highlighterSettings.thickness : penSettings.thickness,
             isEraser: isEraser,
             isHighlighter: isHighlight,
-            presetIndex: pIdx
+            presetIndex: pIdx,
+            isCatmullRom: !isEraser && !isHighlight
         )
     }
 
@@ -717,12 +724,7 @@ class DrawingModel: ObservableObject {
             erase(stroke)
             return
         } else if stroke.points.count >= 2 {
-            // Apply Catmull-Rom smoothing to the raw input points
-            var finalStroke = stroke
-            if !stroke.isEraser && stroke.lineWidth < 10 {
-                finalStroke = Stroke(id: stroke.id, points: stroke.points, color: stroke.uiColor, lineWidth: stroke.lineWidth, isEraser: false, isHighlighter: stroke.isHighlighter, presetIndex: stroke.presetIndex, isCatmullRom: true)
-            }
-            strokes.append(finalStroke)
+            strokes.append(stroke)
         }
         updateUndoRedo()
     }
@@ -958,7 +960,7 @@ class DrawingModel: ObservableObject {
 
     func deleteSelected() {
         guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty else {
-            clear()
+            showClearConfirmation = true
             return
         }
         saveState()
@@ -1057,27 +1059,30 @@ class DrawingModel: ObservableObject {
         }
         fillLassoPoints = []
         showDeleteMenu = false
+        showClearConfirmation = false
     }
 
     func undo() {
         guard !undoStack.isEmpty else { return }
-        redoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds))
+        redoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, persistentLaserStrokes))
         let prev = undoStack.removeLast()
         strokes = prev.strokes
         fillRegions = prev.fillRegions
         selectedStrokeIds = prev.selectedStrokeIds
         selectedFillIds = prev.selectedFillIds
+        persistentLaserStrokes = prev.laserStrokes
         updateUndoRedo()
     }
 
     func redo() {
         guard !redoStack.isEmpty else { return }
-        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds))
+        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, persistentLaserStrokes))
         let next = redoStack.removeLast()
         strokes = next.strokes
         fillRegions = next.fillRegions
         selectedStrokeIds = next.selectedStrokeIds
         selectedFillIds = next.selectedFillIds
+        persistentLaserStrokes = next.laserStrokes
         updateUndoRedo()
     }
 
@@ -1085,6 +1090,7 @@ class DrawingModel: ObservableObject {
         saveState()
         strokes.removeAll()
         fillRegions.removeAll()
+        persistentLaserStrokes.removeAll()
         currentStroke = nil
         selectedStrokeIds.removeAll()
         selectedFillIds.removeAll()
@@ -1172,6 +1178,7 @@ class DrawingModel: ObservableObject {
     enum ExportFormat: String { case png, pdf }
     @Published var pendingAction: PendingAction?
     @Published var showDeleteMenu: Bool = false
+    @Published var showClearConfirmation: Bool = false
     @Published var isToolbarVisible: Bool = true
     @Published var showWelcome: Bool = true
     @Published var needsRecenter: Bool = false

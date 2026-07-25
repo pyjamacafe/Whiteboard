@@ -250,7 +250,17 @@ class StrokeLayerView: UIView {
         }
 
         // Persistent laser strokes with glow
-        for strokePts in model.persistentLaserStrokes where strokePts.count >= 2 {
+        for strokeEntry in model.persistentLaserStrokes where strokeEntry.points.count >= 2 {
+            let strokePts = strokeEntry.points
+            let now = Date()
+            let age = strokeEntry.isRetained ? 0 : now.timeIntervalSince(strokeEntry.time)
+            let fadeAlpha = max(0, 1 - CGFloat(age / model.laserSettings.tailFade))
+            guard fadeAlpha > 0 else { continue }
+            if fadeAlpha < 1 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+                    self?.setNeedsDisplay()
+                }
+            }
             ctx.saveGState()
             ctx.setLineCap(.round)
             ctx.setLineJoin(.round)
@@ -267,12 +277,12 @@ class StrokeLayerView: UIView {
             basePath.addLine(to: strokePts.last!)
             // Glow (red shadow)
             ctx.setLineWidth(ls * 3)
-            ctx.setStrokeColor(UIColor.red.withAlphaComponent(0.15).cgColor)
+            ctx.setStrokeColor(UIColor.red.withAlphaComponent(max(0.9 * fadeAlpha, 0)).cgColor)
             ctx.addPath(basePath)
             ctx.strokePath()
             ctx.setLineWidth(ls)
             let isDark = model.appSettings.isDarkMode
-            ctx.setStrokeColor((isDark ? UIColor.white : UIColor.black).cgColor)
+            ctx.setStrokeColor((isDark ? UIColor.black : UIColor.white).withAlphaComponent(fadeAlpha).cgColor)
             ctx.addPath(basePath)
             ctx.strokePath()
             ctx.restoreGState()
@@ -306,7 +316,14 @@ class StrokeLayerView: UIView {
                 }
                 smoothPath.addLine(to: pts.last!.point)
                 let isDark = model.appSettings.isDarkMode
-                ctx.setStrokeColor((isDark ? UIColor.white : UIColor.black).withAlphaComponent(CGFloat(alpha) * 0.5).cgColor)
+                // Glow (red shadow) with alpha
+                ctx.setLineWidth(ls * 3)
+                ctx.setStrokeColor(UIColor.red.withAlphaComponent(CGFloat(alpha) * 0.9).cgColor)
+                ctx.addPath(smoothPath)
+                ctx.strokePath()
+                // Core stroke with alpha
+                ctx.setLineWidth(ls)
+                ctx.setStrokeColor((isDark ? UIColor.black : UIColor.white).withAlphaComponent(CGFloat(alpha)).cgColor)
                 ctx.addPath(smoothPath)
                 ctx.strokePath()
                 ctx.restoreGState()
@@ -319,7 +336,7 @@ class StrokeLayerView: UIView {
             ctx.setBlendMode(.normal)
             let ls = model.laserSettings.size / scale
             let isDark = model.appSettings.isDarkMode
-            let lc = isDark ? UIColor.white : UIColor.black
+            let lc = isDark ? UIColor.black : UIColor.white
 
             for i in (0...3).reversed() {
                 let r = ls + CGFloat(i) * 4 / scale
@@ -476,6 +493,7 @@ class DrawingCanvasView: UIView {
     }()
 
     private weak var hoverIndicator: CALayer?
+    private var isTouchActive: Bool = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -534,9 +552,13 @@ class DrawingCanvasView: UIView {
         switch gesture.state {
         case .began, .changed:
             let loc = gesture.location(in: self)
-            showHoverIndicator(at: loc)
+            if !isTouchActive {
+                showHoverIndicator(at: loc)
+            }
         case .ended, .cancelled:
-            hideHoverIndicator()
+            if !isTouchActive {
+                hideHoverIndicator()
+            }
         default:
             break
         }
@@ -600,6 +622,8 @@ class DrawingCanvasView: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first, let model = model else { return }
+        isTouchActive = true
+        hideHoverIndicator()
         lastTouchPoint = touch.location(in: self)
         #if os(iOS) && !targetEnvironment(macCatalyst)
         guard touch.type == .pencil else { return }
@@ -696,23 +720,21 @@ class DrawingCanvasView: UIView {
         for ct in coalesced {
             model.addPoint(toCanvas(ct.location(in: self)))
         }
-        // Update hover indicator for eraser
-        if model.currentTool == .eraser, let touchLoc = coalesced.last {
-            showHoverIndicator(at: touchLoc.location(in: self))
-        }
         strokeLayer.setNeedsDisplay()
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        isTouchActive = false
         if model?.currentTool == .laser {
             if let model = model, !model.laserTail.isEmpty {
                 let strokePts = model.laserTail.map { $0.point }
-                model.persistentLaserStrokes.append(strokePts)
+                model.persistentLaserStrokes.append((points: strokePts, time: Date(), isRetained: model.laserSettings.retainStrokes))
                 if !model.laserSettings.retainStrokes {
                     model.laserTailFadeStart = Date()
                 } else {
                     model.laserTail.removeAll()
                 }
+                model.laserPointer = nil
             }
             strokeLayer.setNeedsDisplay()
             return
@@ -738,6 +760,7 @@ class DrawingCanvasView: UIView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        isTouchActive = false
         if model?.currentTool == .select {
             model?.endLasso()
             strokeLayer.setNeedsDisplay()
@@ -931,7 +954,12 @@ struct CanvasView: View {
                 }
 
                 // Persistent laser strokes with glow (macOS)
-                for strokePts in model.persistentLaserStrokes where strokePts.count >= 2 {
+                for strokeEntry in model.persistentLaserStrokes where strokeEntry.points.count >= 2 {
+                    let strokePts = strokeEntry.points
+                    let now = Date()
+            let age = strokeEntry.isRetained ? 0 : now.timeIntervalSince(strokeEntry.time)
+                    let fadeAlpha = max(0, 1 - CGFloat(age / model.laserSettings.tailFade))
+                    guard fadeAlpha > 0 else { continue }
                     var basePath = Path()
                     basePath.move(to: strokePts[0].applying(CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: offset.width, y: offset.height)))
                     var prev = strokePts[0]
@@ -942,10 +970,9 @@ struct CanvasView: View {
                         prev = pt
                     }
                     basePath.addLine(to: strokePts.last!.applying(CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: offset.width, y: offset.height)))
-                    // Glow
                     let ls = model.laserSettings.size
-                    context.stroke(basePath, with: .color(.red.opacity(0.15)), style: StrokeStyle(lineWidth: ls * 3, lineCap: .round, lineJoin: .round))
-                    context.stroke(basePath, with: .color(model.appSettings.isDarkMode ? .white : .black), style: StrokeStyle(lineWidth: ls, lineCap: .round, lineJoin: .round))
+                    context.stroke(basePath, with: .color(Color.red.opacity(Double(fadeAlpha) * 0.9)), style: StrokeStyle(lineWidth: ls * 3, lineCap: .round, lineJoin: .round))
+                    context.stroke(basePath, with: .color((model.appSettings.isDarkMode ? Color.black : Color.white).opacity(Double(fadeAlpha))), style: StrokeStyle(lineWidth: ls, lineCap: .round, lineJoin: .round))
                 }
 
                 // Current laser tail
@@ -968,15 +995,20 @@ struct CanvasView: View {
                         }
                         tailPath.addLine(to: CGPoint(x: pts.last!.point.x * scale + offset.width, y: pts.last!.point.y * scale + offset.height))
                         let isDark = model.appSettings.isDarkMode
-                        context.stroke(tailPath, with: .color((isDark ? Color.white : Color.black).opacity(Double(alpha) * 0.5)),
-                                      style: StrokeStyle(lineWidth: model.laserSettings.size / 2, lineCap: .round, lineJoin: .round))
+                        let ls = model.laserSettings.size
+                        // Glow with alpha
+                        context.stroke(tailPath, with: .color(Color.red.opacity(Double(alpha) * 0.9)),
+                                      style: StrokeStyle(lineWidth: ls * 3, lineCap: .round, lineJoin: .round))
+                        // Core with alpha
+                        context.stroke(tailPath, with: .color((isDark ? Color.black : Color.white).opacity(Double(alpha))),
+                                      style: StrokeStyle(lineWidth: ls, lineCap: .round, lineJoin: .round))
                     }
                 }
 
                 // Laser pointer dot
                 if model.currentTool == .laser, let lp = model.laserPointer {
                     let ls = model.laserSettings.size
-                    let lc = model.appSettings.isDarkMode ? Color.white : Color.black
+                    let lc = model.appSettings.isDarkMode ? Color.black : Color.white
                     let cp = CGPoint(x: lp.x * scale + offset.width, y: lp.y * scale + offset.height)
                     for i in (0...3).reversed() {
                         let r = ls + CGFloat(i) * 4
@@ -1069,13 +1101,14 @@ struct CanvasView: View {
                         if model.currentTool == .laser {
                             if !model.laserTail.isEmpty {
                                 let strokePts = model.laserTail.map { $0.point }
-                                model.persistentLaserStrokes.append(strokePts)
+                model.persistentLaserStrokes.append((points: strokePts, time: Date(), isRetained: model.laserSettings.retainStrokes))
                                 if !model.laserSettings.retainStrokes {
                                     model.laserTailFadeStart = Date()
                                 } else {
                                     model.laserTail.removeAll()
                                 }
                             }
+                            model.laserPointer = nil
                             pointCount += 1
                             return
                         }

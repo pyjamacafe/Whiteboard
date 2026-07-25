@@ -104,16 +104,17 @@ struct ToolSettingsView: View {
                            selectedIndex: $model.penPresetIndex,
                            lastTapIndex: $lastPenTapIndex)
 
-            // Width picker: 2–8pt
-            HStack(spacing: 2) {
+            // Width picker: dots of varying size (2–5pt)
+            HStack(spacing: 8) {
                 ForEach(model.penSettings.widthOptions, id: \.self) { w in
                     Button(action: { model.penSettings.thickness = w }) {
-                        Text("\(Int(w))")
-                            .font(.caption2)
-                            .frame(width: 20, height: 20)
-                            .background(model.penSettings.thickness == w ? Color.accentColor : Color.clear)
-                            .foregroundColor(model.penSettings.thickness == w ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Circle()
+                            .fill(model.penSettings.thickness == w ? Color.accentColor : Color.primary.opacity(0.4))
+                            .frame(width: 4 + w * 2, height: 4 + w * 2)
+                            .overlay(
+                                model.penSettings.thickness == w ?
+                                Circle().stroke(Color.primary, lineWidth: 1) : nil
+                            )
                     }
                     .buttonStyle(.plain)
                 }
@@ -130,16 +131,17 @@ struct ToolSettingsView: View {
                            selectedIndex: $model.fillPresetIndex,
                            lastTapIndex: $lastFillTapIndex)
 
-            // Opacity picker: 25%, 50%, 75%, 100%
-            HStack(spacing: 2) {
+            // Opacity circles showing the selected fill color at each level
+            HStack(spacing: 6) {
                 ForEach(model.fillSettings.opacityOptions, id: \.self) { op in
                     Button(action: { model.fillSettings.opacity = op }) {
-                        Text("\(Int(op * 100))%")
-                            .font(.caption2)
-                            .frame(width: 32, height: 20)
-                            .background(model.fillSettings.opacity == op ? Color.accentColor : Color.clear)
-                            .foregroundColor(model.fillSettings.opacity == op ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Circle()
+                            .fill(model.fillColor.opacity(op))
+                            .frame(width: 18, height: 18)
+                            .overlay(
+                                model.fillSettings.opacity == op ?
+                                Circle().stroke(Color.primary, lineWidth: 1.5) : nil
+                            )
                     }
                     .buttonStyle(.plain)
                 }
@@ -156,16 +158,17 @@ struct ToolSettingsView: View {
                            selectedIndex: $model.hlPresetIndex,
                            lastTapIndex: $lastHighlighterTapIndex)
 
-            // Thickness picker
-            HStack(spacing: 2) {
+            // Thickness dots
+            HStack(spacing: 6) {
                 ForEach(model.highlighterSettings.thicknessOptions, id: \.self) { t in
                     Button(action: { model.highlighterSettings.thickness = t }) {
-                        Text("\(Int(t))")
-                            .font(.caption2)
-                            .frame(width: 24, height: 20)
-                            .background(model.highlighterSettings.thickness == t ? Color.accentColor : Color.clear)
-                            .foregroundColor(model.highlighterSettings.thickness == t ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Circle()
+                            .fill(model.highlighterSettings.thickness == t ? Color.accentColor : Color.primary.opacity(0.4))
+                            .frame(width: t * 0.5 + 4, height: t * 0.5 + 4)
+                            .overlay(
+                                model.highlighterSettings.thickness == t ?
+                                Circle().stroke(Color.primary, lineWidth: 1) : nil
+                            )
                     }
                     .buttonStyle(.plain)
                 }
@@ -177,23 +180,32 @@ struct ToolSettingsView: View {
 
     private var eraserSettings: some View {
         HStack(spacing: 12) {
-            Picker("", selection: $model.eraserSettings.mode) {
+            // Mode icons
+            HStack(spacing: 4) {
                 ForEach(EraserMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
+                    Button(action: { model.eraserSettings.mode = mode }) {
+                        Image(systemName: mode == .partial ? "circle.dotted" : "circle.fill")
+                            .font(.title3)
+                            .frame(width: 32, height: 32)
+                            .background(model.eraserSettings.mode == mode ? Color.accentColor : Color.clear)
+                            .foregroundColor(model.eraserSettings.mode == mode ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            .pickerStyle(.segmented)
-            .frame(width: 160)
 
-            HStack(spacing: 2) {
+            // Size dots
+            HStack(spacing: 6) {
                 ForEach([10, 20, 30, 40, 50, 60], id: \.self) { s in
                     Button(action: { model.eraserSettings.size = CGFloat(s) }) {
-                        Text("\(s)")
-                            .font(.caption2)
-                            .frame(width: 24, height: 20)
-                            .background(Int(model.eraserSettings.size) == s ? Color.accentColor : Color.clear)
-                            .foregroundColor(Int(model.eraserSettings.size) == s ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        Circle()
+                            .fill(Int(model.eraserSettings.size) == s ? Color.accentColor : Color.primary.opacity(0.4))
+                            .frame(width: CGFloat(s) * 0.4 + 4, height: CGFloat(s) * 0.4 + 4)
+                            .overlay(
+                                Int(model.eraserSettings.size) == s ?
+                                Circle().stroke(Color.primary, lineWidth: 1) : nil
+                            )
                     }
                     .buttonStyle(.plain)
                 }
@@ -205,22 +217,27 @@ struct ToolSettingsView: View {
 
     private var laserSettings: some View {
         HStack(spacing: 12) {
-            Toggle(isOn: $model.laserSettings.retainStrokes) {
-                Text("Retain")
-                    .font(.caption2)
+            Button(action: { model.laserSettings.retainStrokes.toggle() }) {
+                Image(systemName: model.laserSettings.retainStrokes ? "pin.fill" : "pin")
+                    .font(.body)
+                    .frame(width: 28, height: 28)
+                    .background(model.laserSettings.retainStrokes ? Color.accentColor : Color.clear)
+                    .foregroundColor(model.laserSettings.retainStrokes ? .white : .primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
             }
-            .toggleStyle(.switch)
-            .frame(width: 80)
+            .buttonStyle(.plain)
 
-            HStack(spacing: 2) {
-                ForEach([2, 4, 6, 8, 10], id: \.self) { s in
-                    Button(action: { model.laserSettings.size = CGFloat(s) }) {
-                        Text("\(s)")
-                            .font(.caption2)
-                            .frame(width: 20, height: 20)
-                            .background(Int(model.laserSettings.size) == s ? Color.accentColor : Color.clear)
-                            .foregroundColor(Int(model.laserSettings.size) == s ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
+            // Size dots
+            HStack(spacing: 6) {
+                ForEach([1.5, 2.5, 4, 6, 8], id: \.self) { s in
+                    Button(action: { model.laserSettings.size = s }) {
+                        Circle()
+                            .fill(abs(model.laserSettings.size - s) < 0.01 ? Color.accentColor : Color.primary.opacity(0.4))
+                            .frame(width: s * 1.5 + 4, height: s * 1.5 + 4)
+                            .overlay(
+                                abs(model.laserSettings.size - s) < 0.01 ?
+                                Circle().stroke(Color.primary, lineWidth: 1) : nil
+                            )
                     }
                     .buttonStyle(.plain)
                 }
