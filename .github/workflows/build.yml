@@ -1,0 +1,62 @@
+name: Build macOS App
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Archive
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select latest Xcode
+        run: |
+          ls /Applications/Xcode*.app/Contents/Developer | head -5
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build and Archive
+        run: |
+          xcodebuild clean archive \
+            -project Whiteboard.xcodeproj \
+            -scheme Whiteboard \
+            -configuration Release \
+            -archivePath ${{ runner.temp }}/Whiteboard.xcarchive \
+            -destination "generic/platform=macOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Export .app bundle
+        run: |
+          mkdir -p ${{ runner.temp }}/export
+          cp -R ${{ runner.temp }}/Whiteboard.xcarchive/Products/Applications/Whiteboard.app ${{ runner.temp }}/export/
+
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "Whiteboard" \
+            -srcfolder ${{ runner.temp }}/export/Whiteboard.app \
+            -ov -format UDZO \
+            ${{ runner.temp }}/Whiteboard.dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Whiteboard-macOS
+          path: ${{ runner.temp }}/Whiteboard.dmg
+
+      - name: Upload .app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Whiteboard-app
+          path: ${{ runner.temp }}/export/Whiteboard.app
