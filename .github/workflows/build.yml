@@ -16,10 +16,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select latest Xcode
+      - name: Select Xcode 16
         run: |
-          ls /Applications/Xcode*.app/Contents/Developer | head -5
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          XCODE_PATH=$(ls /Applications/Xcode_16*.app /Applications/Xcode_15.4.app 2>/dev/null | sort -r | head -1)
+          if [ -z "$XCODE_PATH" ]; then XCODE_PATH="/Applications/Xcode.app"; fi
+          echo "Using Xcode at: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
 
       - name: Show Xcode version
         run: xcodebuild -version
