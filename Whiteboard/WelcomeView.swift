@@ -242,6 +242,7 @@ struct WelcomeView: View {
                         }
                     }
                     .padding(.horizontal, 24)
+                    .padding(.top, 12)
                 } else {
                     VStack(spacing: 2) {
                         ForEach(items) { board in
@@ -282,40 +283,56 @@ struct WelcomeView: View {
     private func thumbnailCell(_ board: DrawingModel.BoardMeta) -> some View {
         let img = model.thumbnail(for: board.id)
         let isHovered = hoveredBoard == board.id
-        return VStack(spacing: 8) {
+        return VStack(spacing: 0) {
+            // Thumbnail
             Group {
                 if let img = img {
                     #if os(macOS)
-                    Image(nsImage: img)
-                        .resizable().aspectRatio(contentMode: .fill)
+                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
                     #else
-                    Image(uiImage: img)
-                        .resizable().aspectRatio(contentMode: .fill)
+                    Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
                     #endif
                 } else {
-                    Image(systemName: "doc.text")
-                        .font(.largeTitle).foregroundColor(.secondary)
+                    Image(systemName: "doc.text").font(.largeTitle).foregroundColor(.secondary)
                 }
             }
             .frame(maxWidth: .infinity)
-            .aspectRatio(0.75, contentMode: .fill)
+            .frame(height: 120)
+            .aspectRatio(4/3, contentMode: .fill)
             .background(Color.primary.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.25), lineWidth: 1))
-            .shadow(color: .black.opacity(isHovered ? 0.15 : 0), radius: isHovered ? 8 : 0, y: isHovered ? 4 : 0)
-            .scaleEffect(isHovered ? 1.03 : 1)
-            .animation(.easeOut(duration: 0.15), value: isHovered)
-            .onTapGesture { model.loadBoard(id: board.id); onStart() }
+            .clipped()
 
-            Text(board.name).font(.caption).lineLimit(1)
-            Text(board.modified.formatted(date: .abbreviated, time: .shortened))
-                .font(.caption2).foregroundColor(.secondary).lineLimit(1)
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(board.name).font(.caption).lineLimit(1)
+                Text(board.modified.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption2).foregroundColor(.secondary).lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Button(action: { startRename(board) }) { Image(systemName: "pencil").font(.caption2) }
+                        .buttonStyle(.plain).pointingHand()
+                    Button(action: { exportBoard(board) }) { Image(systemName: "square.and.arrow.up").font(.caption2) }
+                        .buttonStyle(.plain).pointingHand()
+                    Spacer()
+                    Button(action: { confirmDelete(board) }) { Image(systemName: "trash").font(.caption2) }
+                        .buttonStyle(.plain).pointingHand()
+                }
+            }
+            .padding(8)
         }
-        .frame(maxWidth: 200)
+        .frame(width: 180)
+        .background(Color.primary.opacity(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.15), lineWidth: 1))
+        .shadow(color: .black.opacity(isHovered ? 0.12 : 0.04), radius: isHovered ? 8 : 3, y: isHovered ? 4 : 1)
+        .scaleEffect(isHovered ? 1.02 : 1)
+        .animation(.easeOut(duration: 0.15), value: isHovered)
+        .onTapGesture { model.loadBoard(id: board.id); onStart() }
         .onHover { hovering in
             hoveredBoard = hovering ? board.id : nil
             #if os(macOS)
-            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
             #endif
         }
     }
@@ -375,6 +392,10 @@ struct WelcomeView: View {
 
     private func confirmDelete(_ board: DrawingModel.BoardMeta) {
         deleteBoardId = board.id; deleteBoardName = board.name; showDeleteAlert = true
+    }
+
+    private func exportBoard(_ board: DrawingModel.BoardMeta) {
+        model.pendingAction = .export(.png)
     }
 
     private func startRename(_ board: DrawingModel.BoardMeta) {

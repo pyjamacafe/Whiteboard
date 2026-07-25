@@ -40,6 +40,8 @@ struct DoodlesApp: App {
                     .keyboardShortcut("e", modifiers: [])
                 Button("Selection") { model.selectTool(.select) }
                     .keyboardShortcut("s", modifiers: [])
+                Button("Laser") { model.selectTool(.laser) }
+                    .keyboardShortcut("l", modifiers: [])
                 Divider()
                 Button(model.isToolbarVisible ? "Hide Toolbar" : "Show Toolbar") {
                     model.isToolbarVisible.toggle()

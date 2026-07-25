@@ -11,6 +11,7 @@ struct ToolSettingsView: View {
             case .eraser: eraserSettings
             case .fill: fillSettings
             case .highlighter: highlighterSettings
+            case .laser: laserSettings
             case .select: EmptyView()
             }
         }
@@ -24,7 +25,7 @@ struct ToolSettingsView: View {
 
     // MARK: - Preset row
 
-    private func presetRow(presets: Binding<[Color]>, selected: Binding<Color>, lastTapIndex: Binding<Int?>) -> some View {
+    private func presetRow(presets: Binding<[Color]>, selected: Binding<Color>, selectedIndex: Binding<Int>, lastTapIndex: Binding<Int?>) -> some View {
         HStack(spacing: 6) {
             ForEach(0..<8, id: \.self) { i in
                 let color = presets.wrappedValue[i]
@@ -39,13 +40,13 @@ struct ToolSettingsView: View {
                         .shadow(color: .black.opacity(0.1), radius: 1)
                         .onTapGesture {
                             if lastTapIndex.wrappedValue == i {
-                                // Double-tap → show color picker to change preset
                                 lastTapIndex.wrappedValue = nil
                                 colorPickerIndex = i
                                 showColorPicker = true
                             } else {
                                 lastTapIndex.wrappedValue = i
                                 selected.wrappedValue = color
+                                selectedIndex.wrappedValue = i
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                                     if lastTapIndex.wrappedValue == i {
                                         lastTapIndex.wrappedValue = nil
@@ -101,6 +102,7 @@ struct ToolSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             presetRow(presets: model.appSettings.isDarkMode ? $model.penSettings.darkPresets : $model.penSettings.lightPresets,
                      selected: model.appSettings.isDarkMode ? $model.penSettings.darkColor : $model.penSettings.lightColor,
+                     selectedIndex: $model.penPresetIndex,
                      lastTapIndex: $lastPenTapIndex)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -134,6 +136,7 @@ struct ToolSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             presetRow(presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
                      selected: model.appSettings.isDarkMode ? $model.fillSettings.darkColor : $model.fillSettings.lightColor,
+                     selectedIndex: $model.fillPresetIndex,
                      lastTapIndex: $lastFillTapIndex)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -153,6 +156,7 @@ struct ToolSettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             presetRow(presets: model.appSettings.isDarkMode ? $model.highlighterSettings.darkPresets : $model.highlighterSettings.lightPresets,
                      selected: model.appSettings.isDarkMode ? $model.highlighterSettings.darkColor : $model.highlighterSettings.lightColor,
+                     selectedIndex: $model.hlPresetIndex,
                      lastTapIndex: $lastHighlighterTapIndex)
 
             VStack(alignment: .leading, spacing: 4) {
@@ -193,6 +197,41 @@ struct ToolSettingsView: View {
                     Text("\(model.eraserSettings.size, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
                 }
                 Slider(value: $model.eraserSettings.size, in: 5...60, step: 1)
+            }
+        }
+    }
+
+    // MARK: - Laser
+
+    private var laserSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Mode", selection: $model.laserSettings.mode) {
+                ForEach(LaserMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if model.laserSettings.mode == .tail {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Tail Fade").font(.caption)
+                        Spacer()
+                        Text("\(model.laserSettings.tailFade, specifier: "%.1f")s").font(.caption).foregroundColor(.secondary)
+                    }
+                    Slider(value: $model.laserSettings.tailFade, in: 0.3...5.0, step: 0.1)
+                }
+            }
+
+            ColorPicker("Color", selection: $model.laserSettings.color)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Size").font(.caption)
+                    Spacer()
+                    Text("\(model.laserSettings.size, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
+                }
+                Slider(value: $model.laserSettings.size, in: 2...20, step: 1)
             }
         }
     }

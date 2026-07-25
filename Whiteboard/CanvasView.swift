@@ -14,9 +14,6 @@ struct CanvasView: UIViewRepresentable {
         view.model = model
         view.onBeginDraw = onBeginDraw
         return view
-        let view = DrawingCanvasView()
-        view.model = model
-        return view
     }
 
     func updateUIView(_ uiView: DrawingCanvasView, context: Context) {
@@ -200,6 +197,32 @@ class StrokeLayerView: UIView {
             ctx.restoreGState()
         }
 
+        // Fill lasso being drawn
+        if !model.fillLassoPoints.isEmpty {
+            ctx.saveGState()
+            ctx.setBlendMode(.normal)
+            ctx.setStrokeColor(UIColor.systemYellow.withAlphaComponent(0.8).cgColor)
+            ctx.setLineWidth(2 / scale)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            let dashes: [CGFloat] = [8 / scale, 5 / scale]
+            ctx.setLineDash(phase: dashPhase / scale, lengths: dashes)
+
+            let fPts = model.fillLassoPoints
+            let fPath = CGMutablePath()
+            fPath.move(to: fPts[0])
+            var prev = fPts[0]
+            for i in 1..<fPts.count {
+                let pt = fPts[i]
+                let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                fPath.addQuadCurve(to: mid, control: prev)
+                prev = pt
+            }
+            ctx.addPath(fPath)
+            ctx.strokePath()
+            ctx.restoreGState()
+        }
+
         // Selection boundary — retained lasso outline
         if !model.selectionBoundary.isEmpty {
             let pts = model.selectionBoundary
@@ -226,6 +249,60 @@ class StrokeLayerView: UIView {
             ctx.restoreGState()
         }
 
+        // Laser tail — fades uniformly after the pen is lifted
+        if model.currentTool == .laser, model.laserSettings.mode == .tail, !model.laserTail.isEmpty {
+            let pts = model.laserTail
+            let now = Date()
+            let fade = model.laserSettings.tailFade
+            let alpha = model.laserTailFadeStart.map { max(0, 1 - now.timeIntervalSince($0) / fade) } ?? 1
+            if alpha <= 0 { model.laserTail.removeAll(); model.laserTailFadeStart = nil }
+            if alpha > 0, alpha < 1 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { [weak self] in
+                    self?.setNeedsDisplay()
+                }
+            }
+            if alpha <= 0 || pts.count < 2 { /* skip */ } else {
+                ctx.saveGState()
+                ctx.setLineCap(.round)
+                ctx.setLineJoin(.round)
+                let ls = model.laserSettings.size / scale
+                ctx.setLineWidth(ls / 2)
+                let smoothPath = CGMutablePath()
+                smoothPath.move(to: pts[0].point)
+                var prev = pts[0].point
+                for i in 1..<pts.count {
+                    let pt = pts[i].point
+                    let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                    smoothPath.addQuadCurve(to: mid, control: prev)
+                    prev = pt
+                }
+                smoothPath.addLine(to: pts.last!.point)
+                ctx.setStrokeColor(UIColor(model.laserSettings.color).withAlphaComponent(CGFloat(alpha) * 0.5).cgColor)
+                ctx.addPath(smoothPath)
+                ctx.strokePath()
+                ctx.restoreGState()
+            }
+        }
+
+        // Laser pointer dot
+        if model.currentTool == .laser, let lp = model.laserPointer {
+            ctx.saveGState()
+            ctx.setBlendMode(.normal)
+            let ls = model.laserSettings.size / scale
+            let lc = UIColor(model.laserSettings.color)
+
+            for i in (0...3).reversed() {
+                let r = ls + CGFloat(i) * 4 / scale
+                ctx.setFillColor(lc.withAlphaComponent(0.08 - CGFloat(i) * 0.02).cgColor)
+                ctx.addEllipse(in: CGRect(x: lp.x - r, y: lp.y - r, width: r * 2, height: r * 2))
+                ctx.fillPath()
+            }
+            ctx.setFillColor(lc.cgColor)
+            ctx.addEllipse(in: CGRect(x: lp.x - ls / 2, y: lp.y - ls / 2, width: ls, height: ls))
+            ctx.fillPath()
+            ctx.restoreGState()
+        }
+
         ctx.restoreGState()
         ctx.restoreGState()
     }
@@ -233,7 +310,7 @@ class StrokeLayerView: UIView {
     private func drawFill(_ region: FillRegion, in ctx: CGContext) {
         ctx.saveGState()
         ctx.setBlendMode(.normal)
-        ctx.setFillColor(UIColor(region.uiColor).cgColor)
+        ctx.setFillColor(UIColor(region.displayColor(for: model!)).cgColor)
         ctx.addPath(region.cgPath)
         ctx.fillPath()
         ctx.restoreGState()
@@ -262,7 +339,8 @@ class StrokeLayerView: UIView {
             ctx.setLineWidth((model?.eraserSettings.size ?? 20) / scale)
         } else {
             ctx.setBlendMode(.normal)
-            ctx.setStrokeColor(themeAdjusted(stroke.uiColor, model?.appSettings.isDarkMode ?? false).cgColor)
+            let color = stroke.displayColor(for: model!)
+            ctx.setStrokeColor(UIColor(color).cgColor)
             ctx.setLineWidth(stroke.lineWidth)
         }
 
@@ -271,29 +349,6 @@ class StrokeLayerView: UIView {
         ctx.restoreGState()
     }
 
-    private func themeAdjusted(_ color: Color, _ isDark: Bool) -> Color {
-        #if os(iOS)
-        let c = UIColor(color)
-        #else
-        let c = NSColor(color).usingColorSpace(.sRGB) ?? NSColor.black
-        #endif
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        #if os(iOS)
-        c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #else
-        c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #endif
-        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        if isDark {
-            guard luminance < 0.5 else { return color }
-            let t = 1 - luminance
-            return Color(.sRGB, red: Double(r + (1 - r) * t), green: Double(g + (1 - g) * t), blue: Double(b + (1 - b) * t), opacity: Double(a))
-        } else {
-            guard luminance > 0.5 else { return color }
-            let t = luminance
-            return Color(.sRGB, red: Double(r * (1 - t)), green: Double(g * (1 - t)), blue: Double(b * (1 - t)), opacity: Double(a))
-        }
-    }
 }
 
 // MARK: - Canvas Container View
@@ -306,6 +361,7 @@ class DrawingCanvasView: UIView {
         }
     }
     var onBeginDraw: (() -> Void)?
+    var lastTouchPoint: CGPoint = .zero
 
     private var offset: CGSize = .zero {
         didSet {
@@ -373,7 +429,9 @@ class DrawingCanvasView: UIView {
 
     private func setup() {
         isMultipleTouchEnabled = true
+        #if targetEnvironment(macCatalyst)
         addGestureRecognizer(pinchGesture)
+        #endif
         addGestureRecognizer(panGesture)
 
         gridView.frame = bounds
@@ -415,7 +473,7 @@ class DrawingCanvasView: UIView {
         indicator.frame = CGRect(x: point.x - size / 2, y: point.y - size / 2,
                                  width: size, height: size)
         indicator.cornerRadius = size / 2
-        indicator.backgroundColor = (model?.currentTool == .eraser ?
+        indicator.backgroundColor = (model.currentTool == .eraser ?
             UIColor.red.withAlphaComponent(0.25).cgColor :
             UIColor.black.withAlphaComponent(0.4).cgColor)
         hoverIndicator?.removeFromSuperlayer()
@@ -453,13 +511,16 @@ class DrawingCanvasView: UIView {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first, let model = model else { return }
+        lastTouchPoint = touch.location(in: self)
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+        guard touch.type == .pencil else { return }
+        #endif
 
         onBeginDraw?()
 
         if model.currentTool == .fill {
-            model.performFill(at: toCanvas(touch.location(in: self)))
+            model.beginFillLasso(at: toCanvas(touch.location(in: self)))
             strokeLayer.setNeedsDisplay()
-            gridView.setNeedsDisplay()
             return
         }
 
@@ -475,12 +536,36 @@ class DrawingCanvasView: UIView {
             return
         }
 
+        if model.currentTool == .laser {
+            let cp = toCanvas(touch.location(in: self))
+            model.laserTail = [(cp, Date())]
+            model.laserPointer = cp
+            model.laserTailFadeStart = nil
+            strokeLayer.setNeedsDisplay()
+            return
+        }
+
         model.beginStroke(at: toCanvas(touch.location(in: self)), isEraser: model.currentTool == .eraser)
         strokeLayer.setNeedsDisplay()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let touch = touches.first, let model = model else { return }
+        lastTouchPoint = touch.location(in: self)
+        #if os(iOS) && !targetEnvironment(macCatalyst)
+        guard touch.type == .pencil else { return }
+        #endif
+
+        if model.currentTool == .laser {
+            let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
+            for ct in coalesced {
+                let cp = toCanvas(ct.location(in: self))
+                model.laserPointer = cp
+                model.laserTail.append((cp, Date()))
+            }
+            strokeLayer.setNeedsDisplay()
+            return
+        }
 
         if model.currentTool == .select {
             if model.isMoving {
@@ -498,16 +583,34 @@ class DrawingCanvasView: UIView {
             return
         }
 
-        guard model.currentTool != .fill, model.currentStroke != nil else { return }
+        if model.currentTool == .fill {
+            let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
+            for ct in coalesced {
+                model.addFillLassoPoint(toCanvas(ct.location(in: self)))
+            }
+            strokeLayer.setNeedsDisplay()
+            return
+        }
+
+        guard model.currentStroke != nil else { return }
 
         let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
         for ct in coalesced {
             model.addPoint(toCanvas(ct.location(in: self)))
         }
+        // Update hover indicator for eraser
+        if model.currentTool == .eraser, let touchLoc = coalesced.last {
+            showHoverIndicator(at: touchLoc.location(in: self))
+        }
         strokeLayer.setNeedsDisplay()
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if model?.currentTool == .laser {
+            model?.laserTailFadeStart = Date()
+            strokeLayer.setNeedsDisplay()
+            return
+        }
         if model?.currentTool == .select {
             if model?.isMoving == true {
                 model?.commitMove()
@@ -517,8 +620,14 @@ class DrawingCanvasView: UIView {
             strokeLayer.setNeedsDisplay()
             return
         }
-        guard model?.currentTool != .fill else { return }
+        if model?.currentTool == .fill {
+            model?.endFillLasso()
+            strokeLayer.setNeedsDisplay()
+            gridView.setNeedsDisplay()
+            return
+        }
         model?.endStroke()
+        hideHoverIndicator()
         strokeLayer.setNeedsDisplay()
     }
 
@@ -528,7 +637,11 @@ class DrawingCanvasView: UIView {
             strokeLayer.setNeedsDisplay()
             return
         }
-        guard model?.currentTool != .fill else { return }
+        if model?.currentTool == .fill {
+            model?.fillLassoPoints = []
+            strokeLayer.setNeedsDisplay()
+            return
+        }
         model?.endStroke()
         strokeLayer.setNeedsDisplay()
     }
@@ -558,18 +671,28 @@ class DrawingCanvasView: UIView {
 
 @available(iOS 12.1, *)
 extension DrawingCanvasView: UIPencilInteractionDelegate {
+    static var lastPencilTap: Date = .distantPast
+
     func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
-        toggleTool()
+        guard let model = model else { return }
+        // Double-tap → toggle eraser / previous active tool
+        if model.currentTool == .eraser {
+            model.selectTool(model.previousTool)
+        } else {
+            model.previousTool = model.currentTool
+            model.selectTool(.eraser)
+        }
     }
 
     @available(iOS 17.5, *)
     func pencilInteractionDidSqueeze(_ interaction: UIPencilInteraction) {
-        toggleTool()
-    }
-
-    private func toggleTool() {
         guard let model = model else { return }
-        model.selectTool(model.currentTool == .pen ? .eraser : .pen)
+        if lastTouchPoint != .zero {
+            model.radialMenuCenter = lastTouchPoint
+        } else {
+            model.radialMenuCenter = CGPoint(x: bounds.midX, y: bounds.midY)
+        }
+        model.showRadialMenu = true
     }
 }
 
@@ -584,7 +707,6 @@ struct CanvasView: View {
     @State private var scale: CGFloat = 1.0
     @State private var pointCount: Int = 0
     @State private var hoverLocation: CGPoint?
-    @State private var didFill: Bool = false
 
     @State private var keyMonitor: Any?
     @State private var scrollMonitor: Any?
@@ -673,6 +795,22 @@ struct CanvasView: View {
                                   style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: macDashPhase))
                 }
 
+                // Fill lasso being drawn
+                if !model.fillLassoPoints.isEmpty {
+                    var fPath = Path()
+                    let fPts = model.fillLassoPoints
+                    fPath.move(to: fPts[0].applying(tf))
+                    var prev = fPts[0]
+                    for i in 1..<fPts.count {
+                        let pt = fPts[i]
+                        let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                        fPath.addQuadCurve(to: mid.applying(tf), control: prev.applying(tf))
+                        prev = pt
+                    }
+                    context.stroke(fPath, with: .color(.yellow.opacity(0.8)),
+                                  style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: macDashPhase))
+                }
+
                 // Selection boundary — retained lasso outline
                 if !model.selectionBoundary.isEmpty {
                     let pts = model.selectionBoundary
@@ -690,6 +828,44 @@ struct CanvasView: View {
                                   style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: macDashPhase))
                 }
 
+                // Laser tail — fades uniformly after pen is lifted
+                if model.currentTool == .laser, model.laserSettings.mode == .tail, !model.laserTail.isEmpty {
+                    let now = Date()
+                    let fade = model.laserSettings.tailFade
+                    let alpha = model.laserTailFadeStart.map { max(0, 1 - now.timeIntervalSince($0) / fade) } ?? 1
+                    if alpha <= 0 { model.laserTail.removeAll(); model.laserTailFadeStart = nil }
+                    let pts = model.laserTail
+                    if alpha > 0, pts.count >= 2 {
+                        var tailPath = Path()
+                        tailPath.move(to: CGPoint(x: pts[0].point.x * scale + offset.width, y: pts[0].point.y * scale + offset.height))
+                        var prev = pts[0].point
+                        for i in 1..<pts.count {
+                            let pt = pts[i].point
+                            let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                            tailPath.addQuadCurve(to: CGPoint(x: mid.x * scale + offset.width, y: mid.y * scale + offset.height),
+                                                  control: CGPoint(x: prev.x * scale + offset.width, y: prev.y * scale + offset.height))
+                            prev = pt
+                        }
+                        tailPath.addLine(to: CGPoint(x: pts.last!.point.x * scale + offset.width, y: pts.last!.point.y * scale + offset.height))
+                        context.stroke(tailPath, with: .color(model.laserSettings.color.opacity(Double(alpha) * 0.4)),
+                                      style: StrokeStyle(lineWidth: model.laserSettings.size / 2, lineCap: .round, lineJoin: .round))
+                    }
+                }
+
+                // Laser pointer dot
+                if model.currentTool == .laser, let lp = model.laserPointer {
+                    let ls = model.laserSettings.size
+                    let lc = model.laserSettings.color
+                    let cp = CGPoint(x: lp.x * scale + offset.width, y: lp.y * scale + offset.height)
+                    for i in (0...3).reversed() {
+                        let r = ls + CGFloat(i) * 4
+                        let dot = Path(ellipseIn: CGRect(x: cp.x - r, y: cp.y - r, width: r * 2, height: r * 2))
+                        context.fill(dot, with: .color(lc.opacity(0.08 - Double(i) * 0.02)))
+                    }
+                    let core = Path(ellipseIn: CGRect(x: cp.x - ls / 2, y: cp.y - ls / 2, width: ls, height: ls))
+                    context.fill(core, with: .color(lc))
+                }
+
                 if let loc = hoverLocation {
                     let dotSize: CGFloat = model.currentTool == .eraser ? model.eraserSettings.size : model.currentTool == .pen ? model.penSettings.thickness : 4
                     let dot = Path(ellipseIn: CGRect(
@@ -704,23 +880,21 @@ struct CanvasView: View {
                     .onChanged { value in
                         hoverLocation = value.location
                         onBeginDraw?()
+                        let cp = CGPoint(
+                            x: (value.location.x - offset.width) / scale,
+                            y: (value.location.y - offset.height) / scale
+                        )
 
                         if model.currentTool == .fill {
-                            guard !didFill else { return }
-                            didFill = true
-                            let cp = CGPoint(
-                                x: (value.location.x - offset.width) / scale,
-                                y: (value.location.y - offset.height) / scale
-                            )
-                            model.performFill(at: cp)
+                            if model.fillLassoPoints.isEmpty {
+                                model.beginFillLasso(at: cp)
+                            } else {
+                                model.addFillLassoPoint(cp)
+                            }
                             return
                         }
 
                         if model.currentTool == .select {
-                            let cp = CGPoint(
-                                x: (value.location.x - offset.width) / scale,
-                                y: (value.location.y - offset.height) / scale
-                            )
                             if model.isMoving {
                                 let offset = CGSize(width: cp.x - model.lastMovePoint.x, height: cp.y - model.lastMovePoint.y)
                                 model.moveSelected(by: offset)
@@ -735,10 +909,18 @@ struct CanvasView: View {
                             return
                         }
 
-                        let cp = CGPoint(
-                            x: (value.location.x - offset.width) / scale,
-                            y: (value.location.y - offset.height) / scale
-                        )
+                        if model.currentTool == .laser {
+                            if model.laserTail.isEmpty {
+                                model.laserTail = [(cp, Date())]
+                                model.laserTailFadeStart = nil
+                            } else {
+                                model.laserTail.append((cp, Date()))
+                            }
+                            model.laserPointer = cp
+                            pointCount += 1
+                            return
+                        }
+
                         if model.currentStroke == nil {
                             model.beginStroke(at: cp, isEraser: model.currentTool == .eraser)
                         } else {
@@ -748,12 +930,17 @@ struct CanvasView: View {
                     }
                     .onEnded { _ in
                         if model.currentTool == .fill {
-                            didFill = false
+                            model.endFillLasso()
                             return
                         }
                         if model.currentTool == .select {
                             if model.isMoving { model.commitMove() }
                             else { model.endLasso() }
+                            return
+                        }
+                        if model.currentTool == .laser {
+                            if model.laserTailFadeStart == nil { model.laserTailFadeStart = Date() }
+                            pointCount += 1
                             return
                         }
                         model.endStroke()
@@ -792,6 +979,7 @@ struct CanvasView: View {
                 case "h": model.selectTool(.highlighter)
                 case "s": model.selectTool(.select)
                 case "e": model.selectTool(.eraser)
+                case "l": model.selectTool(.laser)
                 case "1", "2", "3", "4", "5", "6", "7", "8":
                     if let c = char, let digit = Int(c) {
                         let idx = digit - 1
@@ -799,12 +987,15 @@ struct CanvasView: View {
                         case .pen where idx < model.penPresets.count:
                             model.penSettings.lightColor = model.penPresets[idx]
                             model.penSettings.darkColor = model.penPresets[idx]
+                            model.penPresetIndex = idx
                         case .highlighter where idx < model.hlPresets.count:
                             model.highlighterSettings.lightColor = model.hlPresets[idx]
                             model.highlighterSettings.darkColor = model.hlPresets[idx]
+                            model.hlPresetIndex = idx
                         case .fill where idx < model.fillPresets.count:
                             model.fillSettings.lightColor = model.fillPresets[idx]
                             model.fillSettings.darkColor = model.fillPresets[idx]
+                            model.fillPresetIndex = idx
                         default: break
                         }
                     }
@@ -899,22 +1090,6 @@ struct CanvasView: View {
         return path
     }
 
-    private func macThemeAdjusted(_ color: Color, _ isDark: Bool) -> Color {
-        guard let c = NSColor(color).usingColorSpace(.sRGB) else { return color }
-        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        let luminance = 0.299 * r + 0.587 * g + 0.114 * b
-        if isDark {
-            guard luminance < 0.5 else { return color }
-            let t = 1 - luminance
-            return Color(.sRGB, red: Double(r + (1 - r) * t), green: Double(g + (1 - g) * t), blue: Double(b + (1 - b) * t), opacity: Double(a))
-        } else {
-            guard luminance > 0.5 else { return color }
-            let t = luminance
-            return Color(.sRGB, red: Double(r * (1 - t)), green: Double(g * (1 - t)), blue: Double(b * (1 - t)), opacity: Double(a))
-        }
-    }
-
     private func centerOnContent(canvasSize: CGSize) {
         offset = .zero
         scale = 1.0
@@ -922,7 +1097,7 @@ struct CanvasView: View {
 
     private func drawFill(_ region: FillRegion, in context: inout GraphicsContext, transform: CGAffineTransform) {
         let path = Path(region.cgPath).applying(transform)
-        context.fill(path, with: .color(region.uiColor))
+        context.fill(path, with: .color(region.displayColor(for: model)))
     }
 
     private func drawStroke(_ stroke: Stroke, in context: inout GraphicsContext, transform: CGAffineTransform) {
@@ -945,7 +1120,7 @@ struct CanvasView: View {
                           style: StrokeStyle(lineWidth: model.eraserSettings.size, lineCap: .round, lineJoin: .round))
             context.blendMode = .normal
         } else {
-            context.stroke(path, with: .color(macThemeAdjusted(stroke.uiColor, model.appSettings.isDarkMode)),
+            context.stroke(path, with: .color(stroke.displayColor(for: model)),
                           style: StrokeStyle(lineWidth: stroke.lineWidth * scale,
                                            lineCap: .round, lineJoin: .round))
         }

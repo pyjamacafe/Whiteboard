@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var showImporter = false
     @State private var showingExporter = false
     @State private var showHelp = false
+    @State private var showSettingsSidebar = false
     @State private var exportFormat: ExportFormat = .wb
     @State private var exportData: Data?
     @State private var exportName = "Untitled"
@@ -21,93 +22,108 @@ struct ContentView: View {
     enum ExportFormat: String { case wb, png, pdf }
 
     var body: some View {
-        Group {
+        let content = Group {
             if model.showWelcome {
                 WelcomeView(model: model, onStart: { model.showWelcome = false })
             } else {
-            ZStack {
-            CanvasView(model: model, onBeginDraw: { settingsTool = nil; showSettings = false })
-                .ignoresSafeArea()
+                ZStack {
+                    CanvasView(model: model, onBeginDraw: { settingsTool = nil; showSettings = false })
+                        .ignoresSafeArea()
+                        .pencilSqueezeMenu(model: model)
 
-            VStack {
-                if model.isToolbarVisible { toolbar }
-                if model.isToolbarVisible, let tool = settingsTool, tool != .select {
-                    ToolSettingsView(model: model, tool: tool)
-                        .padding(.top, 4)
-                        .onTapGesture { }
+                    VStack {
+                        #if os(iOS) && !targetEnvironment(macCatalyst)
+                        if false { toolbar }
+                        #else
+                        if model.isToolbarVisible { toolbar }
+                        #endif
+                        if model.isToolbarVisible, let tool = settingsTool, tool != .select {
+                            ToolSettingsView(model: model, tool: tool)
+                                .padding(.top, 4)
+                                .onTapGesture { }
+                        }
+                        Spacer()
+                    }
+
+                    #if os(iOS) && !targetEnvironment(macCatalyst)
+                    if showSettingsSidebar {
+                        HStack(spacing: 0) {
+                            Color.black.opacity(0.001)
+                                .contentShape(Rectangle())
+                                .onTapGesture { showSettingsSidebar = false }
+                            settingsSidebarContent
+                                .frame(width: 300)
+                                .background(.thickMaterial)
+                        }
+                        .ignoresSafeArea()
+                        .transition(.move(edge: .trailing))
+                        .animation(.easeOut(duration: 0.25), value: showSettingsSidebar)
+                    }
+                    #endif
+
+                    if model.showRadialMenu {
+                        RadialMenuView(model: model, center: model.radialMenuCenter, onDismiss: { model.showRadialMenu = false }, onSettings: { model.showRadialMenu = false; showSettingsSidebar = true }, onExport: { fmt in
+                            if fmt == "wb" { exportFormat = .wb; exportAction() }
+                            else if fmt == "png" { exportFormat = .png; exportAction() }
+                            else if fmt == "pdf" { exportFormat = .pdf; exportAction() }
+                        }, onOpen: { showImporter = true }, onHelp: { showHelp = true })
+                            .ignoresSafeArea()
+                    }
                 }
-                Spacer()
             }
         }
+
+        return content
+            .onTapGesture { settingsTool = nil }
+            .onChange(of: model.pendingAction) { _, newValue in
+                guard let newValue else { return }
+                if newValue == .open { showImporter = true }
+                model.pendingAction = nil
+            }
+            .onChange(of: model.showRadialMenu) { _, newValue in
+                if newValue { showSettingsSidebar = false }
+            }
+            .background(shortcutButtons)
+            .fileExporter(isPresented: $showingExporter, document: ExportDocument(data: exportData ?? Data()), contentType: exportType, defaultFilename: exportName) { _ in }
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.init(filenameExtension: "wb")!, .data]) { result in
+                if case .success(let url) = result {
+                    let shouldStop = url.startAccessingSecurityScopedResource()
+                    defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
+                    if let data = try? Data(contentsOf: url) {
+                        model.loadData(data)
+                        model.openFileURL = url
+                    }
+                }
+            }
+            .sheet(isPresented: $showHelp) { HelpView() }
     }
-}
-        .onTapGesture { settingsTool = nil }
-        .onChange(of: model.pendingAction) { _, newValue in
-            guard let newValue else { return }
-            if newValue == .open { showImporter = true }
-            model.pendingAction = nil
-        }
-        .background(
+
+    private var shortcutButtons: some View {
+        VStack(spacing: 0) {
             Button("") { model.isToolbarVisible.toggle() }
                 .keyboardShortcut(.tab, modifiers: [])
-                .hidden()
-                .frame(width: 0, height: 0)
-        )
-        .background(
             Button("") { model.undo() }
                 .keyboardShortcut("z", modifiers: .command)
-                .hidden()
-                .frame(width: 0, height: 0)
-        )
-        .background(
             Button("") { model.redo() }
                 .keyboardShortcut("z", modifiers: [.command, .shift])
-                .hidden()
-                .frame(width: 0, height: 0)
-        )
-        .background(
             Button("") { model.deleteSelected() }
                 .keyboardShortcut(.delete, modifiers: [])
-                .hidden()
-                .frame(width: 0, height: 0)
-        )
-        .background(
             Button("") { model.save() }
                 .keyboardShortcut("s", modifiers: .command)
-                .hidden()
-                .frame(width: 0, height: 0)
-        )
-        .background(
             Button("") { showImporter = true }
                 .keyboardShortcut("o", modifiers: .command)
-                .hidden()
-                .frame(width: 0, height: 0)
-        )
-        .background(
             Button("") { model.closeBoard() }
                 .keyboardShortcut("w", modifiers: .command)
-                .hidden()
-                .frame(width: 0, height: 0)
-        )
-        .fileExporter(isPresented: $showingExporter, document: ExportDocument(data: exportData ?? Data()), contentType: exportType, defaultFilename: exportName) { _ in }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.init(filenameExtension: "wb")!, .data]) { result in
-            if case .success(let url) = result {
-                let shouldStop = url.startAccessingSecurityScopedResource()
-                defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
-                if let data = try? Data(contentsOf: url) {
-                    model.loadData(data)
-                    model.openFileURL = url
-                }
-            }
         }
-        .sheet(isPresented: $showHelp) { HelpView() }
+        .hidden()
+        .frame(width: 0, height: 0)
     }
-
     private func toolColor(_ tool: Tool) -> Color {
         switch tool {
         case .pen: return model.penColor
         case .highlighter: return model.hlColor
         case .fill: return model.fillColor
+        case .laser: return model.laserSettings.color
         default: return Color.accentColor
         }
     }
@@ -181,6 +197,11 @@ struct ContentView: View {
             Divider()
                 .frame(height: 24)
 
+            toolButton(systemName: "laser.burst", tool: .laser)
+
+            Divider()
+                .frame(height: 24)
+
             settingsMenu
         }
         .buttonStyle(.plain)
@@ -202,8 +223,125 @@ struct ContentView: View {
         }
     }
 
+    #if os(iOS) && !targetEnvironment(macCatalyst)
+    private var settingsSidebarContent: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    settingsGroup(title: nil, items: [
+                        ("arrow.uturn.backward", "Undo", { model.undo() }, !model.canUndo),
+                        ("arrow.uturn.forward", "Redo", { model.redo() }, !model.canRedo),
+                        ("trash", "Delete Selected", { model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty),
+                        ("viewfinder", "Center", { model.needsRecenter = true }, false),
+                        ("house", "Home", { model.showWelcome = true }, false),
+                    ])
+
+                    Divider().padding(.horizontal)
+
+                    settingsGroup(title: "Appearance", items: [])
+
+                    Toggle(isOn: $model.appSettings.isDarkMode) {
+                        Label(model.appSettings.isDarkMode ? "Dark Mode" : "Light Mode", systemImage: model.appSettings.isDarkMode ? "moon.fill" : "sun.max.fill")
+                            .onTapGesture { showSettingsSidebar = false }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+
+                    Picker("Background", selection: $model.appSettings.canvasBackground) {
+                        ForEach(CanvasBackground.allCases, id: \.self) { bg in
+                            Label(bg.rawValue.capitalized, systemImage: iconName(bg)).tag(bg)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+
+                    Divider().padding(.horizontal)
+
+                    settingsGroup(title: "Defaults", items: [
+                        ("bookmark", "Save Current as Defaults", { model.saveDefaults() }, false),
+                    ])
+                    if model.hasDefaults {
+                        settingsGroup(title: nil, items: [
+                            ("bookmark.fill", "Restore Defaults", { model.loadDefaults() }, false),
+                            ("arrow.counterclockwise", "Reset to Factory", { model.resetToFactory() }, false),
+                        ])
+                    }
+
+                    Divider().padding(.horizontal)
+
+                    settingsGroup(title: "Export", items: [
+                        ("square.and.arrow.down", "Save", { exportFormat = .wb; exportAction() }, false),
+                        ("photo", "Export PNG", { exportFormat = .png; exportAction() }, false),
+                        ("doc.richtext", "Export PDF", { exportFormat = .pdf; exportAction() }, false),
+                        ("folder", "Open", { showImporter = true }, false),
+                    ])
+
+                    Divider().padding(.horizontal)
+
+                    settingsGroup(title: nil, items: [
+                        ("questionmark.circle", "Help", { showHelp = true }, false),
+                    ])
+                }
+                .padding()
+            }
+            .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showSettingsSidebar = false }
+                }
+            }
+        }
+    }
+
+    private func settingsGroup(title: String?, items: [(icon: String, label: String, action: () -> Void, disabled: Bool)]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let title = title {
+                Text(title)
+                    .font(.caption).foregroundColor(.secondary)
+                    .textCase(.uppercase)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 16)
+                    .padding(.bottom, 4)
+            }
+            ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
+                Button(action: {
+                    item.action()
+                    hideSidebarOnAction(item.label)
+                }) {
+                    HStack {
+                        Image(systemName: item.icon)
+                            .frame(width: 24)
+                        Text(item.label)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 10)
+                }
+                .disabled(item.disabled)
+                .foregroundColor(item.disabled ? .secondary : .primary)
+                .buttonStyle(.borderless)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(0.06))
+                        .padding(.horizontal, 2)
+                        .opacity(0)
+                )
+            }
+        }
+    }
+
+    private func hideSidebarOnAction(_ label: String) {
+        // Don't hide for Undo/Redo/Delete since they don't change context
+        if label == "Home" || label.hasPrefix("Export") || label == "Save" || label == "Open" || label == "Help" || label == "Save Current as Defaults" || label == "Restore Defaults" || label == "Reset to Factory" || label == "Center" || label == "Dark Mode" {
+            showSettingsSidebar = false
+        }
+    }
+    #endif
+
     private var settingsMenu: some View {
-        Menu {
+        let content = Group {
             Section {
                 Button(action: { model.undo() }) { Label("Undo", systemImage: "arrow.uturn.backward") }
                     .disabled(!model.canUndo)
@@ -247,13 +385,14 @@ struct ContentView: View {
             Section {
                 Button(action: { showHelp = true }) { Label("Help", systemImage: "questionmark.circle") }
             }
-        } label: {
-            Image(systemName: "line.3.horizontal")
-                .font(.title3)
-                .frame(width: 32, height: 32)
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
+
+        let label = Image(systemName: "line.3.horizontal")
+            .font(.title3)
+            .frame(width: 32, height: 32)
+
+        return Menu(content: { content }, label: { label })
+            .fixedSize()
     }
 
     private func exportAction() {
@@ -300,5 +439,28 @@ struct ContentView: View {
             CGSize(width: maxX - minX + pad * 2, height: maxY - minY + pad * 2),
             CGPoint(x: minX - pad, y: minY - pad)
         )
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func pencilSqueezeMenu(model: DrawingModel) -> some View {
+        #if os(iOS)
+        if #available(iOS 17.5, *) {
+            self.onPencilSqueeze { phase in
+                if case .ended(let value) = phase {
+                    if value.hoverPose != nil {
+                        // Toggle the menu
+                        model.showRadialMenu.toggle()
+                        if model.showRadialMenu, let hoverPose = value.hoverPose {
+                            model.radialMenuCenter = hoverPose.location
+                        }
+                    }
+                }
+            }
+        } else { self }
+        #else
+        self
+        #endif
     }
 }

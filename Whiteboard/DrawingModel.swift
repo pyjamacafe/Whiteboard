@@ -1,6 +1,7 @@
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
+import os
 #if os(macOS)
 import AppKit
 typealias PlatformImage = NSImage
@@ -16,17 +17,45 @@ struct Stroke: Identifiable, Codable {
     let lineWidth: CGFloat
     let isEraser: Bool
     let isHighlighter: Bool
+    let presetIndex: Int  // -1 = absolute color, 0+ = preset index for theme lookup
 
-    init(id: UUID = UUID(), points: [CGPoint], color: Color, lineWidth: CGFloat, isEraser: Bool, isHighlighter: Bool) {
+    init(id: UUID = UUID(), points: [CGPoint], color: Color, lineWidth: CGFloat, isEraser: Bool, isHighlighter: Bool, presetIndex: Int = -1) {
         self.id = id
         self.points = points
         self.color = CodableColor(color)
         self.lineWidth = lineWidth
         self.isEraser = isEraser
         self.isHighlighter = isHighlighter
+        self.presetIndex = presetIndex
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, points, color, lineWidth, isEraser, isHighlighter, presetIndex
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        points = try c.decode([CGPoint].self, forKey: .points)
+        color = try c.decode(CodableColor.self, forKey: .color)
+        lineWidth = try c.decode(CGFloat.self, forKey: .lineWidth)
+        isEraser = try c.decode(Bool.self, forKey: .isEraser)
+        isHighlighter = try c.decode(Bool.self, forKey: .isHighlighter)
+        presetIndex = try c.decodeIfPresent(Int.self, forKey: .presetIndex) ?? -1
     }
 
     var uiColor: Color { color.color }
+
+    func displayColor(for model: DrawingModel) -> Color {
+        guard presetIndex >= 0 else { return color.color }  // absolute color, no theme lookup
+        if isHighlighter {
+            guard presetIndex < model.hlPresets.count else { return color.color }
+            return model.hlPresets[presetIndex]
+        } else {
+            guard presetIndex < model.penPresets.count else { return color.color }
+            return model.penPresets[presetIndex]
+        }
+    }
 }
 
 struct CodableColor: Codable {
@@ -57,15 +86,45 @@ struct FillRegion: Identifiable, Codable {
     var id = UUID()
     let path: CodablePath
     let color: CodableColor
+    let presetIndex: Int
 
-    init(id: UUID = UUID(), path: CGPath, color: Color) {
+    enum CodingKeys: String, CodingKey {
+        case id, path, color, presetIndex
+    }
+
+    init(id: UUID = UUID(), path: CGPath, color: Color, presetIndex: Int = -1) {
         self.id = id
         self.path = CodablePath(path)
         self.color = CodableColor(color)
+        self.presetIndex = presetIndex
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        path = try c.decode(CodablePath.self, forKey: .path)
+        color = try c.decode(CodableColor.self, forKey: .color)
+        presetIndex = try c.decodeIfPresent(Int.self, forKey: .presetIndex) ?? -1
     }
 
     var uiColor: Color { color.color }
     var cgPath: CGPath { path.cgPath }
+
+    func displayColor(for model: DrawingModel) -> Color {
+        guard presetIndex >= 0 else { return color.color }
+        guard presetIndex < model.fillPresets.count else { return color.color }
+        let preset = model.fillPresets[presetIndex]
+        let stored = color.color
+        #if os(iOS)
+        let c = UIColor(stored)
+        #else
+        let c = NSColor(stored).usingColorSpace(.sRGB) ?? NSColor.black
+        #endif
+        var a: CGFloat = 0
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
+        c.getRed(&r, green: &g, blue: &b, alpha: &a)
+        return preset.opacity(a)
+    }
 }
 
 struct CodablePath: Codable {
@@ -108,7 +167,19 @@ struct CodablePoint: Codable {
 }
 
 enum Tool: String, CaseIterable {
-    case pen, eraser, fill, select, highlighter
+    case pen, eraser, fill, select, highlighter, laser
+}
+
+enum LaserMode: String, CaseIterable {
+    case point = "Pointer Only"
+    case tail = "Pointer with Tail"
+}
+
+struct LaserSettings {
+    var mode: LaserMode = .point
+    var tailFade: Double = 1.0
+    var color: Color = .red
+    var size: CGFloat = 6
 }
 
 enum CanvasBackground: String, CaseIterable {
@@ -158,7 +229,7 @@ enum EraserMode: String, CaseIterable {
 }
 
 struct EraserSettings {
-    var mode: EraserMode = .partial
+    var mode: EraserMode = .full
     var size: CGFloat = 20
 }
 
@@ -181,10 +252,15 @@ class DrawingModel: ObservableObject {
     @Published var canRedo: Bool = false
 
     var currentStroke: Stroke?
+    var previousTool: Tool = .pen
+    @Published var penPresetIndex: Int = 0
+    @Published var fillPresetIndex: Int = 0
+    @Published var hlPresetIndex: Int = 0
     @Published var penSettings = PenSettings()
     @Published var fillSettings = FillSettings()
     @Published var eraserSettings = EraserSettings()
     @Published var highlighterSettings = HighlighterSettings()
+    @Published var laserSettings = LaserSettings()
     @Published var appSettings = AppSettings()
     var openFileURL: URL? {
         didSet {
@@ -292,6 +368,7 @@ class DrawingModel: ObservableObject {
         penSettings = PenSettings()
         fillSettings = FillSettings()
         highlighterSettings = HighlighterSettings()
+        laserSettings = LaserSettings()
         eraserSettings = EraserSettings()
         appSettings = AppSettings()
     }
@@ -544,6 +621,11 @@ class DrawingModel: ObservableObject {
     @Published var selectionBoundary: [CGPoint] = []
     @Published var selectedStrokeIds: Set<UUID> = []
     @Published var selectedFillIds: Set<UUID> = []
+    @Published var fillLassoPoints: [CGPoint] = []
+    var laserTail: [(point: CGPoint, time: Date)] = []
+    var laserPointer: CGPoint?
+    var laserTailFadeStart: Date?
+    var laserTailFading: Bool { laserTailFadeStart != nil }
 
     private var undoStack: [CanvasSnapshot] = []
     private var redoStack: [CanvasSnapshot] = []
@@ -563,12 +645,17 @@ class DrawingModel: ObservableObject {
 
     func beginStroke(at point: CGPoint, isEraser: Bool) {
         let isHighlight = currentTool == .highlighter
+        let pIdx: Int
+        if isEraser { pIdx = -1 }
+        else if isHighlight { pIdx = hlPresetIndex }
+        else { pIdx = penPresetIndex }
         currentStroke = Stroke(
             points: [point],
             color: isEraser ? .white : isHighlight ? hlColor : penColor,
             lineWidth: isEraser ? eraserSettings.size : isHighlight ? highlighterSettings.thickness : penSettings.thickness,
             isEraser: isEraser,
-            isHighlighter: isHighlight
+            isHighlighter: isHighlight,
+            presetIndex: pIdx
         )
     }
 
@@ -643,6 +730,63 @@ class DrawingModel: ObservableObject {
 
         selectionBoundary = selectionLasso
         selectionLasso = []
+        updateUndoRedo()
+    }
+
+    // MARK: - Fill Lasso
+
+    func beginFillLasso(at point: CGPoint) {
+        fillLassoPoints = [point]
+    }
+
+    func addFillLassoPoint(_ point: CGPoint) {
+        if let last = fillLassoPoints.last, last.distance(to: point) < 1 { return }
+        fillLassoPoints.append(point)
+    }
+
+    func endFillLasso() {
+        let pts = fillLassoPoints
+        fillLassoPoints = []
+        os_log("[fillLasso] endFillLasso pts=%d", type: .debug, pts.count)
+        guard !pts.isEmpty else { os_log("[fillLasso] empty pts", type: .debug); return }
+
+        if pts.count == 1 {
+            os_log("[fillLasso] single-point tap → performFill", type: .debug)
+            performFill(at: pts[0])
+            return
+        }
+
+        var totalDist: CGFloat = 0
+        for i in 1..<pts.count { totalDist += pts[i - 1].distance(to: pts[i]) }
+        os_log("[fillLasso] multi-point tap totalDist=%.2f", type: .debug, totalDist)
+
+        if totalDist < 15 {
+            os_log("[fillLasso] short motion treat as tap → performFill", type: .debug)
+            performFill(at: pts.last!)
+            return
+        }
+
+        os_log("[fillLasso] long stroke → closed-figure fill pts=%d totalDist=%.1f", type: .debug, pts.count, totalDist)
+        saveState()
+
+        // Build the lasso path
+        let lassoPath = CGMutablePath()
+        lassoPath.move(to: pts[0])
+        for i in 1..<pts.count { lassoPath.addLine(to: pts[i]) }
+        lassoPath.closeSubpath()
+
+        // Try to find a stroke-bounded enclosure within the lasso.
+        // Use the centroid of the lasso as the fill tap point.
+        let centroid = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        let center = CGPoint(x: centroid.x / CGFloat(pts.count), y: centroid.y / CGFloat(pts.count))
+        var fillPath: CGPath = lassoPath
+        if let enclosure = FloodFill.fillPath(at: center, strokes: strokes) {
+            // Use the DCEL-found enclosure (bounded by strokes)
+            fillPath = enclosure
+        }
+
+        let region = FillRegion(path: fillPath, color: fillColor.opacity(fillSettings.opacity), presetIndex: fillPresetIndex)
+        fillRegions.append(region)
         updateUndoRedo()
     }
 
@@ -782,21 +926,20 @@ class DrawingModel: ObservableObject {
             }
         }
 
-        DispatchQueue.main.async {
-            if self.eraserSettings.mode == .full {
-                self.strokes = oldStrokes.filter { $0.isEraser || !hitByEraser($0) }
-            } else {
-                var newStrokes: [Stroke] = []
-                for pen in oldStrokes where !pen.isEraser {
-                    var segment: [CGPoint] = []
-                    for pp in pen.points {
-                        let isErased = eraser.points.contains { ep in
-                            let dx = pp.x - ep.x, dy = pp.y - ep.y
-                            return sqrt(dx * dx + dy * dy) < threshold
-                        }
-                        if isErased {
-                            if segment.count >= 2 {
-                                newStrokes.append(Stroke(points: segment, color: pen.uiColor, lineWidth: pen.lineWidth, isEraser: false, isHighlighter: pen.isHighlighter))
+        if self.eraserSettings.mode == .full {
+            self.strokes = oldStrokes.filter { $0.isEraser || !hitByEraser($0) }
+        } else {
+            var newStrokes: [Stroke] = []
+            for pen in oldStrokes where !pen.isEraser {
+                var segment: [CGPoint] = []
+                for pp in pen.points {
+                    let isErased = eraser.points.contains { ep in
+                        let dx = pp.x - ep.x, dy = pp.y - ep.y
+                        return sqrt(dx * dx + dy * dy) < threshold
+                    }
+                    if isErased {
+                        if segment.count >= 2 {
+                            newStrokes.append(Stroke(points: segment, color: pen.uiColor, lineWidth: pen.lineWidth, isEraser: false, isHighlighter: pen.isHighlighter))
                         }
                         segment = []
                     } else {
@@ -804,32 +947,34 @@ class DrawingModel: ObservableObject {
                     }
                 }
                 if segment.count >= 2 {
-                        newStrokes.append(Stroke(points: segment, color: pen.uiColor, lineWidth: pen.lineWidth, isEraser: false, isHighlighter: pen.isHighlighter))
-                    }
+                    newStrokes.append(Stroke(points: segment, color: pen.uiColor, lineWidth: pen.lineWidth, isEraser: false, isHighlighter: pen.isHighlighter))
                 }
-                self.strokes = newStrokes
             }
-
-            self.fillRegions = oldFills.filter { region in
-                for ep in eraser.points {
-                    if region.cgPath.contains(ep) { return false }
-                }
-                return true
-            }
-            self.updateUndoRedo()
-            self.scheduleAutoSave()
+            self.strokes = newStrokes
         }
+
+        self.fillRegions = oldFills.filter { region in
+            for ep in eraser.points {
+                if region.cgPath.contains(ep) { return false }
+            }
+            return true
+        }
+        self.updateUndoRedo()
+        self.scheduleAutoSave()
     }
 
     // MARK: - Fill
 
     func performFill(at canvasPoint: CGPoint) {
+        os_log("[fillLasso] performFill at (%.1f, %.1f)", type: .debug, canvasPoint.x, canvasPoint.y)
         saveState()
         guard let path = FloodFill.fillPath(at: canvasPoint, strokes: strokes) else {
+            os_log("[fillLasso] performFill no path found", type: .debug)
             updateUndoRedo()
             return
         }
-        let region = FillRegion(path: path, color: fillColor.opacity(fillSettings.opacity))
+        os_log("[fillLasso] performFill got path area=%.1f", type: .debug, abs(path.boundingBox.width * path.boundingBox.height))
+        let region = FillRegion(path: path, color: fillColor.opacity(fillSettings.opacity), presetIndex: fillPresetIndex)
         fillRegions.append(region)
         updateUndoRedo()
     }
@@ -841,6 +986,11 @@ class DrawingModel: ObservableObject {
             selectedFillIds.removeAll()
             selectionBoundary.removeAll()
         }
+        if tool != .laser {
+            laserTail.removeAll()
+            laserPointer = nil
+        }
+        fillLassoPoints = []
     }
 
     func undo() {
@@ -926,6 +1076,8 @@ class DrawingModel: ObservableObject {
     @Published var showWelcome: Bool = true
     @Published var needsRecenter: Bool = false
     @Published var welcomeFolderName: String?
+    @Published var showRadialMenu: Bool = false
+    var radialMenuCenter: CGPoint = .zero
 
     func pngData(size: CGSize, offset: CGPoint = .zero, scale: CGFloat = 3) -> Data? {
         let w = Int(size.width * scale)
@@ -1037,6 +1189,12 @@ class DrawingModel: ObservableObject {
     // MARK: - Thumbnail
 
     func thumbnail(for boardId: String, size: CGSize = CGSize(width: 240, height: 320)) -> PlatformImage? {
+        // Use in-memory strokes if this is the current board
+        if boardId == currentBoardId {
+            guard !strokes.isEmpty || !fillRegions.isEmpty else { return nil }
+            return renderThumbnail(strokes: strokes, fillRegions: fillRegions, size: size)
+        }
+        // Otherwise load from disk
         let url = boardURL(for: boardId)
         guard let data = try? Data(contentsOf: url),
               let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return nil }
