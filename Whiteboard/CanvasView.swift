@@ -512,6 +512,22 @@ class DrawingCanvasView: UIView {
             interaction.delegate = self
             addInteraction(interaction)
         }
+
+        let fillDoubleTap = UITapGestureRecognizer(target: self, action: #selector(handleFillDoubleTap(_:)))
+        fillDoubleTap.numberOfTapsRequired = 2
+        fillDoubleTap.delaysTouchesBegan = false
+        fillDoubleTap.delaysTouchesEnded = false
+        addGestureRecognizer(fillDoubleTap)
+    }
+
+    @objc private func handleFillDoubleTap(_ gesture: UITapGestureRecognizer) {
+        guard let model = model, model.currentTool == .fill else { return }
+        if gesture.state == .recognized {
+            let loc = gesture.location(in: self)
+            model.performFill(at: toCanvas(loc))
+            strokeLayer.setNeedsDisplay()
+            gridView.setNeedsDisplay()
+        }
     }
 
     @objc private func handleHover(_ gesture: UIHoverGestureRecognizer) {

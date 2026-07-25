@@ -789,18 +789,25 @@ class DrawingModel: ObservableObject {
         let pts = fillLassoPoints
         fillLassoPoints = []
 
+        // Single-point or short motion: on macOS this is a click (tap),
+        // on iOS double-tap gesture handles bucket fill instead.
+        #if os(macOS)
         if pts.count == 1 {
             performFill(at: pts[0])
             return
         }
-
         var totalDist: CGFloat = 0
         for i in 1..<pts.count { totalDist += pts[i - 1].distance(to: pts[i]) }
-
         if totalDist < 15 {
             performFill(at: pts.last!)
             return
         }
+        #else
+        guard pts.count >= 2 else { return }
+        var totalDist: CGFloat = 0
+        for i in 1..<pts.count { totalDist += pts[i - 1].distance(to: pts[i]) }
+        guard totalDist >= 15 else { return }
+        #endif
 
         saveState()
 
