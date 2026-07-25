@@ -19,10 +19,11 @@ struct CanvasView: UIViewRepresentable {
     func updateUIView(_ uiView: DrawingCanvasView, context: Context) {
         uiView.model = model
         if model.needsDelete {
-            print("[sel] updateUIView processing needsDelete")
-            model.deleteSelected()
-            model.needsDelete = false
-            print("[sel] updateUIView after delete — strokes=\(model.strokes.count) fillRegions=\(model.fillRegions.count)")
+            let m = model
+            DispatchQueue.main.async {
+                m.deleteSelected()
+                m.needsDelete = false
+            }
         }
         uiView.refresh()
         uiView.onBeginDraw = onBeginDraw
@@ -357,7 +358,6 @@ class StrokeLayerView: UIView {
             ctx.restoreGState()
         }
 
-        ctx.restoreGState()
         ctx.restoreGState()
     }
 
