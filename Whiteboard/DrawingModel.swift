@@ -1,7 +1,6 @@
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
-import os
 #if os(macOS)
 import AppKit
 typealias PlatformImage = NSImage
@@ -188,6 +187,7 @@ enum CanvasBackground: String, CaseIterable {
 
 struct AppSettings {
     var canvasBackground: CanvasBackground = .grid
+    var revealSettingsOnSingleTap: Bool = true
     var isDarkMode: Bool = false {
         didSet {
             #if os(macOS)
@@ -200,8 +200,8 @@ struct AppSettings {
 struct PenSettings {
     var lightColor: Color = .black
     var darkColor: Color = .white
-    var thickness: CGFloat = 2
-    var smoothness: CGFloat = 1
+    var thickness: CGFloat = 3
+    var smoothness: CGFloat = 3
     var lightPresets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
     var darkPresets: [Color] = [
         Color(red: 0.96, green: 0.96, blue: 0.96),
@@ -318,6 +318,56 @@ class DrawingModel: ObservableObject {
         let eraserMode: String
         let canvasBg: String
         let isDarkMode: Bool
+        let revealSettingsOnSingleTap: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case penLightColor, penDarkColor, penThickness, penSmoothness,
+                 fillLightColor, fillDarkColor, fillOpacity,
+                 hlLightColor, hlDarkColor, hlThickness, hlOpacity,
+                 eraserSize, eraserMode, canvasBg, isDarkMode, revealSettingsOnSingleTap
+        }
+
+        init(penLightColor: CodableColor, penDarkColor: CodableColor, penThickness: CGFloat, penSmoothness: CGFloat,
+             fillLightColor: CodableColor, fillDarkColor: CodableColor, fillOpacity: Double,
+             hlLightColor: CodableColor, hlDarkColor: CodableColor, hlThickness: CGFloat, hlOpacity: Double,
+             eraserSize: CGFloat, eraserMode: String, canvasBg: String, isDarkMode: Bool, revealSettingsOnSingleTap: Bool) {
+            self.penLightColor = penLightColor
+            self.penDarkColor = penDarkColor
+            self.penThickness = penThickness
+            self.penSmoothness = penSmoothness
+            self.fillLightColor = fillLightColor
+            self.fillDarkColor = fillDarkColor
+            self.fillOpacity = fillOpacity
+            self.hlLightColor = hlLightColor
+            self.hlDarkColor = hlDarkColor
+            self.hlThickness = hlThickness
+            self.hlOpacity = hlOpacity
+            self.eraserSize = eraserSize
+            self.eraserMode = eraserMode
+            self.canvasBg = canvasBg
+            self.isDarkMode = isDarkMode
+            self.revealSettingsOnSingleTap = revealSettingsOnSingleTap
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            penLightColor = try c.decode(CodableColor.self, forKey: .penLightColor)
+            penDarkColor = try c.decode(CodableColor.self, forKey: .penDarkColor)
+            penThickness = try c.decode(CGFloat.self, forKey: .penThickness)
+            penSmoothness = try c.decode(CGFloat.self, forKey: .penSmoothness)
+            fillLightColor = try c.decode(CodableColor.self, forKey: .fillLightColor)
+            fillDarkColor = try c.decode(CodableColor.self, forKey: .fillDarkColor)
+            fillOpacity = try c.decode(Double.self, forKey: .fillOpacity)
+            hlLightColor = try c.decode(CodableColor.self, forKey: .hlLightColor)
+            hlDarkColor = try c.decode(CodableColor.self, forKey: .hlDarkColor)
+            hlThickness = try c.decode(CGFloat.self, forKey: .hlThickness)
+            hlOpacity = try c.decode(Double.self, forKey: .hlOpacity)
+            eraserSize = try c.decode(CGFloat.self, forKey: .eraserSize)
+            eraserMode = try c.decode(String.self, forKey: .eraserMode)
+            canvasBg = try c.decode(String.self, forKey: .canvasBg)
+            isDarkMode = try c.decode(Bool.self, forKey: .isDarkMode)
+            revealSettingsOnSingleTap = try c.decodeIfPresent(Bool.self, forKey: .revealSettingsOnSingleTap) ?? true
+        }
     }
 
     func saveDefaults() {
@@ -336,7 +386,8 @@ class DrawingModel: ObservableObject {
             eraserSize: eraserSettings.size,
             eraserMode: eraserSettings.mode.rawValue,
             canvasBg: appSettings.canvasBackground.rawValue,
-            isDarkMode: appSettings.isDarkMode
+            isDarkMode: appSettings.isDarkMode,
+            revealSettingsOnSingleTap: appSettings.revealSettingsOnSingleTap
         )
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
@@ -361,6 +412,7 @@ class DrawingModel: ObservableObject {
         eraserSettings.mode = EraserMode(rawValue: s.eraserMode) ?? .partial
         appSettings.canvasBackground = CanvasBackground(rawValue: s.canvasBg) ?? .grid
         appSettings.isDarkMode = s.isDarkMode
+        appSettings.revealSettingsOnSingleTap = s.revealSettingsOnSingleTap
     }
 
     func resetToFactory() {
@@ -747,26 +799,20 @@ class DrawingModel: ObservableObject {
     func endFillLasso() {
         let pts = fillLassoPoints
         fillLassoPoints = []
-        os_log("[fillLasso] endFillLasso pts=%d", type: .debug, pts.count)
-        guard !pts.isEmpty else { os_log("[fillLasso] empty pts", type: .debug); return }
 
         if pts.count == 1 {
-            os_log("[fillLasso] single-point tap → performFill", type: .debug)
             performFill(at: pts[0])
             return
         }
 
         var totalDist: CGFloat = 0
         for i in 1..<pts.count { totalDist += pts[i - 1].distance(to: pts[i]) }
-        os_log("[fillLasso] multi-point tap totalDist=%.2f", type: .debug, totalDist)
 
         if totalDist < 15 {
-            os_log("[fillLasso] short motion treat as tap → performFill", type: .debug)
             performFill(at: pts.last!)
             return
         }
 
-        os_log("[fillLasso] long stroke → closed-figure fill pts=%d totalDist=%.1f", type: .debug, pts.count, totalDist)
         saveState()
 
         // Build the lasso path
@@ -966,14 +1012,11 @@ class DrawingModel: ObservableObject {
     // MARK: - Fill
 
     func performFill(at canvasPoint: CGPoint) {
-        os_log("[fillLasso] performFill at (%.1f, %.1f)", type: .debug, canvasPoint.x, canvasPoint.y)
         saveState()
         guard let path = FloodFill.fillPath(at: canvasPoint, strokes: strokes) else {
-            os_log("[fillLasso] performFill no path found", type: .debug)
             updateUndoRedo()
             return
         }
-        os_log("[fillLasso] performFill got path area=%.1f", type: .debug, abs(path.boundingBox.width * path.boundingBox.height))
         let region = FillRegion(path: path, color: fillColor.opacity(fillSettings.opacity), presetIndex: fillPresetIndex)
         fillRegions.append(region)
         updateUndoRedo()
@@ -991,6 +1034,7 @@ class DrawingModel: ObservableObject {
             laserPointer = nil
         }
         fillLassoPoints = []
+        showDeleteMenu = false
     }
 
     func undo() {
@@ -1072,12 +1116,11 @@ class DrawingModel: ObservableObject {
 
     enum ExportFormat: String { case png, pdf }
     @Published var pendingAction: PendingAction?
+    @Published var showDeleteMenu: Bool = false
     @Published var isToolbarVisible: Bool = true
     @Published var showWelcome: Bool = true
     @Published var needsRecenter: Bool = false
     @Published var welcomeFolderName: String?
-    @Published var showRadialMenu: Bool = false
-    var radialMenuCenter: CGPoint = .zero
 
     func pngData(size: CGSize, offset: CGPoint = .zero, scale: CGFloat = 3) -> Data? {
         let w = Int(size.width * scale)

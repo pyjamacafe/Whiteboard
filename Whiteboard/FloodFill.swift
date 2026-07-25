@@ -1,18 +1,12 @@
 import SwiftUI
 import CoreGraphics
-import os
 
 // MARK: - Planar Straight-Line Graph (PSLG) Enclosure Detection
 
-private let log = OSLog(subsystem: "com.whiteboard", category: "floodfill")
-private var _fillId: UInt64 = 0
 
 enum FloodFill {
 
     static func fillPath(at canvasPoint: CGPoint, strokes: [Stroke]) -> CGPath? {
-        _fillId += 1
-        let fid = _fillId
-        os_log("[%llu] fillPath at (%.1f, %.1f) strokes=%d", log: log, type: .debug, fid, canvasPoint.x, canvasPoint.y, strokes.count)
 
         var segs: [(CGPoint, CGPoint)] = []
         for s in strokes where !s.isEraser {
@@ -26,21 +20,17 @@ enum FloodFill {
                 }
             }
         }
-        guard !segs.isEmpty else { os_log("[%llu] no segments", log: log, type: .debug, fid); return nil }
-        os_log("[%llu] total segments before filter: %d", log: log, type: .debug, fid, segs.count)
 
         let searchRadius: CGFloat = 500
         let tapRect = CGRect(x: canvasPoint.x - searchRadius, y: canvasPoint.y - searchRadius,
                              width: searchRadius * 2, height: searchRadius * 2)
         let nearSegs = segs.filter { segRect($0).intersects(tapRect) }
-        os_log("[%llu] nearSegs (within 500pt): %d", log: log, type: .debug, fid, nearSegs.count)
         let sortedSegs = nearSegs.sorted(by: { a, b in
             let da = min(a.0.distance(to: canvasPoint), a.1.distance(to: canvasPoint))
             let db = min(b.0.distance(to: canvasPoint), b.1.distance(to: canvasPoint))
             return da < db
         })
         let cappedSegs = sortedSegs.count > 2000 ? Array(sortedSegs.prefix(2000)) : sortedSegs
-        os_log("[%llu] cappedSegs: %d", log: log, type: .debug, fid, cappedSegs.count)
 
         // Bridge nearby stroke-endpoints so barely-touching strokes
         // form a connected graph for the DCEL.
@@ -80,17 +70,13 @@ enum FloodFill {
             }
         }
         if bridgeCount > 0 {
-            os_log("[%llu] added %d bridge segments, total: %d", log: log, type: .debug, fid, bridgeCount, bridged.count)
         }
 
-        let enclosures = EnclosureDetector.detect(from: bridged, fillId: fid)
-        os_log("[%llu] DCEL enclosures found: %d", log: log, type: .debug, fid, enclosures.count)
+        let enclosures = EnclosureDetector.detect(from: bridged)
 
         // If DCEL found nothing, try simple closed-stroke detection
         if enclosures.isEmpty {
-            os_log("[%llu] trying closedStrokeFill fallback", log: log, type: .debug, fid)
-            if let simple = closedStrokeFill(canvasPoint, strokes, fillId: fid) {
-                os_log("[%llu] closedStrokeFill returned a path", log: log, type: .debug, fid)
+            if let simple = closedStrokeFill(canvasPoint, strokes) {
                 return simple
             }
         }
@@ -98,18 +84,12 @@ enum FloodFill {
         var best: (path: CGPath, area: CGFloat)?
         for (idx, path) in enclosures.enumerated() {
             let box = path.boundingBox
-            guard !box.isNull else { os_log("[%llu] path[%d] null bbox", log: log, type: .debug, fid, idx); continue }
-            guard box.contains(canvasPoint) else { os_log("[%llu] path[%d] bbox doesn't contain tap", log: log, type: .debug, fid, idx); continue }
             let pts = pathPoints(path)
-            guard pointInPolygon(canvasPoint, pts) else { os_log("[%llu] path[%d] point not in polygon", log: log, type: .debug, fid, idx); continue }
             let area = abs(signedArea(pts))
-            os_log("[%llu] path[%d] valid, area=%.1f", log: log, type: .debug, fid, idx, area)
             if best == nil || area < best!.area {
                 best = (path, area)
             }
         }
-        if let b = best { os_log("[%llu] best area=%.1f", log: log, type: .debug, fid, b.area) }
-        else { os_log("[%llu] no valid enclosure matched tap point", log: log, type: .debug, fid) }
         return best?.path
     }
 
@@ -144,18 +124,15 @@ enum FloodFill {
         return inside
     }
 
-    private static func closedStrokeFill(_ point: CGPoint, _ strokes: [Stroke], fillId fid: UInt64) -> CGPath? {
+    private static func closedStrokeFill(_ point: CGPoint, _ strokes: [Stroke]) -> CGPath? {
         let threshold: CGFloat = 30
         var best: (path: CGMutablePath, area: CGFloat)?
         for (si, s) in strokes.enumerated() where !s.isEraser && s.points.count >= 3 {
             let d = s.points.first!.distance(to: s.points.last!)
             guard d < threshold else { continue }
-            os_log("[%llu] closedStrokeFill stroke[%d] start->end=%.1f", log: log, type: .debug, fid, si, d)
-            guard pointInPolygon(point, s.points) else { os_log("[%llu]   point not inside", log: log, type: .debug, fid); continue }
             let simplified = rdpSimplify(s.points, epsilon: 3)
             guard simplified.count >= 3 else { continue }
             let area = abs(signedArea(simplified))
-            os_log("[%llu]   area=%.1f pts=%d", log: log, type: .debug, fid, area, simplified.count)
             let path = CGMutablePath()
             path.move(to: simplified[0])
             for p in simplified.dropFirst() { path.addLine(to: p) }
@@ -232,13 +209,11 @@ private class HalfEdge: Hashable {
 private enum EnclosureDetector {
 
     /// Detect all enclosed cycles from a set of line segments.
-    static func detect(from segments: [(CGPoint, CGPoint)], fillId fid: UInt64) -> [CGPath] {
+    static func detect(from segments: [(CGPoint, CGPoint)]) -> [CGPath] {
         var split = segments
-        os_log("[%llu] detect: %d input segments", log: log, type: .debug, fid, split.count)
 
         // Phase 1: split segments at intersections
         var i = 0
-        var totalSplits = 0
         while i < split.count {
             var j = i + 1
             var advanced = false
@@ -248,8 +223,6 @@ private enum EnclosureDetector {
                     if let p = intersect(s1.0, s1.1, s2.0, s2.1) {
                         let on1 = !isEndpoint(p, s1.0, s1.1)
                         let on2 = !isEndpoint(p, s2.0, s2.1)
-                        if on1 { totalSplits += 1 }
-                        if on2 && !on1 { totalSplits += 1 }
                         if on1 {
                             split.remove(at: i)
                             split.insert((s1.0, p), at: i)
@@ -268,7 +241,6 @@ private enum EnclosureDetector {
             }
             if !advanced { i += 1 }
         }
-        os_log("[%llu] after intersection split: %d segments (%d splits)", log: log, type: .debug, fid, split.count, totalSplits)
 
         var adj = [Vertex: [HalfEdge]]()
         var allEdges = [HalfEdge]()
@@ -282,7 +254,6 @@ private enum EnclosureDetector {
             allEdges.append(e1)
             allEdges.append(e2)
         }
-        os_log("[%llu] adj vertices: %d, edges: %d", log: log, type: .debug, fid, adj.count, allEdges.count)
 
         // Sort edges around each vertex by angle (CCW) and link 'next' pointers
         for (v, edges) in adj {
@@ -311,7 +282,6 @@ private enum EnclosureDetector {
 
         // Phase 3: traverse cycles using left-hand turn rule
         var paths = [CGPath]()
-        var cycleCount = 0
         for start in allEdges where !start.visited {
             var pts = [CGPoint]()
             var cur: HalfEdge? = start
@@ -322,20 +292,16 @@ private enum EnclosureDetector {
             }
             if pts.count >= 3 {
                 let area = signedArea(pts)
-                cycleCount += 1
                 if area > 0 {
                     let path = CGMutablePath()
                     path.move(to: pts[0])
                     for k in 1..<pts.count { path.addLine(to: pts[k]) }
                     path.closeSubpath()
                     paths.append(path)
-                    os_log("[%llu]   cycle[%d] CCW pts=%d area=%.1f", log: log, type: .debug, fid, cycleCount, pts.count, area)
                 } else {
-                    os_log("[%llu]   cycle[%d] CW (hole) pts=%d area=%.1f — skipped", log: log, type: .debug, fid, cycleCount, pts.count, area)
                 }
             }
         }
-        os_log("[%llu] detect returning %d enclosures", log: log, type: .debug, fid, paths.count)
         return paths
     }
 

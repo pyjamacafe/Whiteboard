@@ -468,14 +468,27 @@ class DrawingCanvasView: UIView {
 
     private func showHoverIndicator(at point: CGPoint) {
         guard let model = model else { return }
-        let size: CGFloat = model.currentTool == .eraser ? model.eraserSettings.size : model.currentTool == .pen ? model.penSettings.thickness : 4
+        let size: CGFloat
+        var color: UIColor
+        switch model.currentTool {
+        case .eraser:
+            size = model.eraserSettings.size
+            color = UIColor.red.withAlphaComponent(0.25)
+        case .pen:
+            size = model.penSettings.thickness * 1.5
+            color = UIColor.black.withAlphaComponent(0.4)
+        case .highlighter:
+            size = model.highlighterSettings.thickness
+            color = UIColor(model.hlColor).withAlphaComponent(CGFloat(model.highlighterSettings.opacity))
+        default:
+            size = 4
+            color = UIColor.black.withAlphaComponent(0.4)
+        }
         let indicator = CALayer()
         indicator.frame = CGRect(x: point.x - size / 2, y: point.y - size / 2,
                                  width: size, height: size)
         indicator.cornerRadius = size / 2
-        indicator.backgroundColor = (model.currentTool == .eraser ?
-            UIColor.red.withAlphaComponent(0.25).cgColor :
-            UIColor.black.withAlphaComponent(0.4).cgColor)
+        indicator.backgroundColor = color.cgColor
         hoverIndicator?.removeFromSuperlayer()
         layer.addSublayer(indicator)
         hoverIndicator = indicator
@@ -526,6 +539,15 @@ class DrawingCanvasView: UIView {
 
         if model.currentTool == .select {
             if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
+                let now = Date()
+                if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
+                    Self.lastSelectTap = .distantPast
+                    model.showDeleteMenu = true
+                    strokeLayer.setNeedsDisplay()
+                    gridView.setNeedsDisplay()
+                    return
+                }
+                Self.lastSelectTap = now
                 let cp = toCanvas(touch.location(in: self))
                 model.beginMove(at: cp)
             } else {
@@ -672,6 +694,7 @@ class DrawingCanvasView: UIView {
 @available(iOS 12.1, *)
 extension DrawingCanvasView: UIPencilInteractionDelegate {
     static var lastPencilTap: Date = .distantPast
+    static var lastSelectTap: Date = .distantPast
 
     func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
         guard let model = model else { return }
@@ -685,15 +708,8 @@ extension DrawingCanvasView: UIPencilInteractionDelegate {
     }
 
     @available(iOS 17.5, *)
-    func pencilInteractionDidSqueeze(_ interaction: UIPencilInteraction) {
-        guard let model = model else { return }
-        if lastTouchPoint != .zero {
-            model.radialMenuCenter = lastTouchPoint
-        } else {
-            model.radialMenuCenter = CGPoint(x: bounds.midX, y: bounds.midY)
-        }
-        model.showRadialMenu = true
-    }
+    @available(iOS 17.5, *)
+    func pencilInteractionDidSqueeze(_ interaction: UIPencilInteraction) { }
 }
 
 // MARK: - macOS Canvas
@@ -707,6 +723,8 @@ struct CanvasView: View {
     @State private var scale: CGFloat = 1.0
     @State private var pointCount: Int = 0
     @State private var hoverLocation: CGPoint?
+
+    static var lastSelectTap: Date = .distantPast
 
     @State private var keyMonitor: Any?
     @State private var scrollMonitor: Any?
@@ -900,6 +918,13 @@ struct CanvasView: View {
                                 model.moveSelected(by: offset)
                                 model.lastMovePoint = cp
                             } else if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
+                                let now = Date()
+                                if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
+                                    Self.lastSelectTap = .distantPast
+                    model.showDeleteMenu = true
+                                    return
+                                }
+                                Self.lastSelectTap = now
                                 model.beginMove(at: cp)
                             } else if model.selectionLasso.isEmpty {
                                 model.beginLasso(at: cp)

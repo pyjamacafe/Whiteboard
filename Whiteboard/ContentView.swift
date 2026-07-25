@@ -29,14 +29,10 @@ struct ContentView: View {
                 ZStack {
                     CanvasView(model: model, onBeginDraw: { settingsTool = nil; showSettings = false })
                         .ignoresSafeArea()
-                        .pencilSqueezeMenu(model: model)
+                        .pencilSqueezeToolbar(model: model)
 
-                    VStack {
-                        #if os(iOS) && !targetEnvironment(macCatalyst)
-                        if false { toolbar }
-                        #else
+                    VStack(spacing: 0) {
                         if model.isToolbarVisible { toolbar }
-                        #endif
                         if model.isToolbarVisible, let tool = settingsTool, tool != .select {
                             ToolSettingsView(model: model, tool: tool)
                                 .padding(.top, 4)
@@ -60,15 +56,6 @@ struct ContentView: View {
                         .animation(.easeOut(duration: 0.25), value: showSettingsSidebar)
                     }
                     #endif
-
-                    if model.showRadialMenu {
-                        RadialMenuView(model: model, center: model.radialMenuCenter, onDismiss: { model.showRadialMenu = false }, onSettings: { model.showRadialMenu = false; showSettingsSidebar = true }, onExport: { fmt in
-                            if fmt == "wb" { exportFormat = .wb; exportAction() }
-                            else if fmt == "png" { exportFormat = .png; exportAction() }
-                            else if fmt == "pdf" { exportFormat = .pdf; exportAction() }
-                        }, onOpen: { showImporter = true }, onHelp: { showHelp = true })
-                            .ignoresSafeArea()
-                    }
                 }
             }
         }
@@ -79,9 +66,6 @@ struct ContentView: View {
                 guard let newValue else { return }
                 if newValue == .open { showImporter = true }
                 model.pendingAction = nil
-            }
-            .onChange(of: model.showRadialMenu) { _, newValue in
-                if newValue { showSettingsSidebar = false }
             }
             .background(shortcutButtons)
             .fileExporter(isPresented: $showingExporter, document: ExportDocument(data: exportData ?? Data()), contentType: exportType, defaultFilename: exportName) { _ in }
@@ -96,6 +80,34 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $showHelp) { HelpView() }
+            .overlay(alignment: .top) {
+                if model.showDeleteMenu {
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture { model.showDeleteMenu = false }
+                        .overlay(alignment: .top) {
+                            HStack(spacing: 0) {
+                                Button(role: .destructive) {
+                                    model.deleteSelected()
+                                    model.showDeleteMenu = false
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                        .font(.callout)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .background(.thickMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
+                            .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+                            .padding(.top, model.isToolbarVisible ? 90 : 12)
+                        }
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+            }
+            .animation(.easeOut(duration: 0.15), value: model.showDeleteMenu)
     }
 
     private var shortcutButtons: some View {
@@ -172,15 +184,29 @@ struct ContentView: View {
         .highPriorityGesture(
             TapGesture().onEnded {
                 let now = Date()
-                if now.timeIntervalSince(lastTapTime) < 0.3 {
-                    settingsTool = settingsTool == tool ? nil : tool
-                    showSettings = false
-                    lastTapTime = .distantPast
+                if model.appSettings.revealSettingsOnSingleTap {
+                    if now.timeIntervalSince(lastTapTime) < 0.3 {
+                        settingsTool = settingsTool == tool ? nil : tool
+                        showSettings = false
+                        lastTapTime = .distantPast
+                        model.selectTool(tool)
+                    } else {
+                        lastTapTime = now
+                        model.selectTool(tool)
+                        settingsTool = tool
+                        showSettings = false
+                    }
                 } else {
-                    lastTapTime = now
-                    model.selectTool(tool)
-                    settingsTool = nil
-                    showSettings = false
+                    if now.timeIntervalSince(lastTapTime) < 0.3 {
+                        settingsTool = settingsTool == tool ? nil : tool
+                        showSettings = false
+                        lastTapTime = .distantPast
+                    } else {
+                        lastTapTime = now
+                        model.selectTool(tool)
+                        settingsTool = nil
+                        showSettings = false
+                    }
                 }
             }
         )
@@ -247,6 +273,12 @@ struct ContentView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
 
+                    Toggle(isOn: $model.appSettings.revealSettingsOnSingleTap) {
+                        Label("Reveal Options on Single Tap", systemImage: model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+
                     Picker("Background", selection: $model.appSettings.canvasBackground) {
                         ForEach(CanvasBackground.allCases, id: \.self) { bg in
                             Label(bg.rawValue.capitalized, systemImage: iconName(bg)).tag(bg)
@@ -284,7 +316,9 @@ struct ContentView: View {
                     ])
                 }
                 .padding()
+                .padding(.bottom, 60)
             }
+            .scrollBounceBehavior(.basedOnSize)
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -358,6 +392,10 @@ struct ContentView: View {
             Section("Appearance") {
                 Toggle(isOn: $model.appSettings.isDarkMode) {
                     Label(model.appSettings.isDarkMode ? "Dark Mode" : "Light Mode", systemImage: model.appSettings.isDarkMode ? "moon.fill" : "sun.max.fill")
+                }
+
+                Toggle(isOn: $model.appSettings.revealSettingsOnSingleTap) {
+                    Label("Show Options on Single Tap", systemImage: model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap")
                 }
 
                 Picker("Background", selection: $model.appSettings.canvasBackground) {
@@ -444,18 +482,12 @@ struct ContentView: View {
 
 extension View {
     @ViewBuilder
-    func pencilSqueezeMenu(model: DrawingModel) -> some View {
+    func pencilSqueezeToolbar(model: DrawingModel) -> some View {
         #if os(iOS)
         if #available(iOS 17.5, *) {
             self.onPencilSqueeze { phase in
-                if case .ended(let value) = phase {
-                    if value.hoverPose != nil {
-                        // Toggle the menu
-                        model.showRadialMenu.toggle()
-                        if model.showRadialMenu, let hoverPose = value.hoverPose {
-                            model.radialMenuCenter = hoverPose.location
-                        }
-                    }
+                if case .ended = phase {
+                    model.isToolbarVisible.toggle()
                 }
             }
         } else { self }
@@ -464,3 +496,4 @@ extension View {
         #endif
     }
 }
+

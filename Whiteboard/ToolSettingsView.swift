@@ -5,7 +5,7 @@ struct ToolSettingsView: View {
     let tool: Tool
 
     var body: some View {
-        Group {
+        HStack(spacing: 8) {
             switch tool {
             case .pen: penSettings
             case .eraser: eraserSettings
@@ -15,29 +15,28 @@ struct ToolSettingsView: View {
             case .select: EmptyView()
             }
         }
-        .padding(12)
-        .background(.thickMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(5)
+        .background(model.appSettings.isDarkMode ? Color(red: 44/255, green: 44/255, blue: 46/255) : Color(.sRGB, red: 0.97, green: 0.97, blue: 0.97, opacity: 0.85))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
         .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
-        .frame(maxWidth: 280)
-        .transition(.opacity.combined(with: .scale(scale: 0.95)))
+        .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
+        .fixedSize()
     }
 
-    // MARK: - Preset row
-
-    private func presetRow(presets: Binding<[Color]>, selected: Binding<Color>, selectedIndex: Binding<Int>, lastTapIndex: Binding<Int?>) -> some View {
-        HStack(spacing: 6) {
+    private func compactPresetRow(presets: Binding<[Color]>, selected: Binding<Color>, selectedIndex: Binding<Int>, lastTapIndex: Binding<Int?>) -> some View {
+        HStack(spacing: 4) {
             ForEach(0..<8, id: \.self) { i in
                 let color = presets.wrappedValue[i]
                 ZStack {
                     Circle()
                         .fill(color)
-                        .frame(width: 26, height: 26)
+                        .frame(width: 20, height: 20)
                         .overlay(
                             color == selected.wrappedValue ?
-                            Circle().stroke(Color.primary, lineWidth: 2) : nil
+                            Circle().stroke(Color.primary, lineWidth: 1.5) : nil
                         )
-                        .shadow(color: .black.opacity(0.1), radius: 1)
+                        .shadow(color: .black.opacity(0.1), radius: 0.5)
                         .onTapGesture {
                             if lastTapIndex.wrappedValue == i {
                                 lastTapIndex.wrappedValue = nil
@@ -99,140 +98,101 @@ struct ToolSettingsView: View {
     // MARK: - Pen
 
     private var penSettings: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            presetRow(presets: model.appSettings.isDarkMode ? $model.penSettings.darkPresets : $model.penSettings.lightPresets,
-                     selected: model.appSettings.isDarkMode ? $model.penSettings.darkColor : $model.penSettings.lightColor,
-                     selectedIndex: $model.penPresetIndex,
-                     lastTapIndex: $lastPenTapIndex)
+        HStack(spacing: 12) {
+            compactPresetRow(presets: model.appSettings.isDarkMode ? $model.penSettings.darkPresets : $model.penSettings.lightPresets,
+                           selected: model.appSettings.isDarkMode ? $model.penSettings.darkColor : $model.penSettings.lightColor,
+                           selectedIndex: $model.penPresetIndex,
+                           lastTapIndex: $lastPenTapIndex)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Thickness").font(.caption)
-                    Spacer()
-                    Text("\(model.penSettings.thickness, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
-                }
-                Slider(value: $model.penSettings.thickness, in: 1...12, step: 1)
-            }
+            compactSlider(value: $model.penSettings.thickness, range: 1...12, label: "\(Int(model.penSettings.thickness))pt", width: 80)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Smoothness").font(.caption)
-                    Spacer()
-                    Text(smoothnessLabel).font(.caption).foregroundColor(.secondary)
-                }
-                Slider(value: $model.penSettings.smoothness, in: 1...9, step: 1)
-            }
+            compactSlider(value: $model.penSettings.smoothness, range: 1...9, label: smoothnessLabel, width: 80)
         }
     }
 
     private var smoothnessLabel: String {
         let v = Int(model.penSettings.smoothness)
-        return v == 1 ? "Off" : "Low \(v - 1)/8"
+        return v == 1 ? "Off" : "S\(v - 1)"
     }
 
     // MARK: - Fill
 
     private var fillSettings: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            presetRow(presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
-                     selected: model.appSettings.isDarkMode ? $model.fillSettings.darkColor : $model.fillSettings.lightColor,
-                     selectedIndex: $model.fillPresetIndex,
-                     lastTapIndex: $lastFillTapIndex)
+        HStack(spacing: 12) {
+            compactPresetRow(presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
+                           selected: model.appSettings.isDarkMode ? $model.fillSettings.darkColor : $model.fillSettings.lightColor,
+                           selectedIndex: $model.fillPresetIndex,
+                           lastTapIndex: $lastFillTapIndex)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Opacity").font(.caption)
-                    Spacer()
-                    Text("\(Int(model.fillSettings.opacity * 100))%").font(.caption).foregroundColor(.secondary)
-                }
-                Slider(value: $model.fillSettings.opacity, in: 0.1...1.0, step: 0.05)
-            }
+            compactSlider(value: $model.fillSettings.opacity, range: 0.1...1.0, label: "\(Int(model.fillSettings.opacity * 100))%", width: 80)
         }
     }
 
     // MARK: - Highlighter
 
     private var highlighterSettings: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            presetRow(presets: model.appSettings.isDarkMode ? $model.highlighterSettings.darkPresets : $model.highlighterSettings.lightPresets,
-                     selected: model.appSettings.isDarkMode ? $model.highlighterSettings.darkColor : $model.highlighterSettings.lightColor,
-                     selectedIndex: $model.hlPresetIndex,
-                     lastTapIndex: $lastHighlighterTapIndex)
+        HStack(spacing: 12) {
+            compactPresetRow(presets: model.appSettings.isDarkMode ? $model.highlighterSettings.darkPresets : $model.highlighterSettings.lightPresets,
+                           selected: model.appSettings.isDarkMode ? $model.highlighterSettings.darkColor : $model.highlighterSettings.lightColor,
+                           selectedIndex: $model.hlPresetIndex,
+                           lastTapIndex: $lastHighlighterTapIndex)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Thickness").font(.caption)
-                    Spacer()
-                    Text("\(model.highlighterSettings.thickness, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
-                }
-                Slider(value: $model.highlighterSettings.thickness, in: 5...30, step: 1)
-            }
+            compactSlider(value: $model.highlighterSettings.thickness, range: 5...30, label: "\(Int(model.highlighterSettings.thickness))pt", width: 80)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Opacity").font(.caption)
-                    Spacer()
-                    Text("\(Int(model.highlighterSettings.opacity * 100))%").font(.caption).foregroundColor(.secondary)
-                }
-                Slider(value: $model.highlighterSettings.opacity, in: 0.1...1.0, step: 0.05)
-            }
+            compactSlider(value: $model.highlighterSettings.opacity, range: 0.1...1.0, label: "\(Int(model.highlighterSettings.opacity * 100))%", width: 80)
         }
     }
 
     // MARK: - Eraser
 
     private var eraserSettings: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("Mode", selection: $model.eraserSettings.mode) {
+        HStack(spacing: 12) {
+            Picker("", selection: $model.eraserSettings.mode) {
                 ForEach(EraserMode.allCases, id: \.self) { mode in
                     Text(mode.rawValue).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
+            .frame(width: 160)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Size").font(.caption)
-                    Spacer()
-                    Text("\(model.eraserSettings.size, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
-                }
-                Slider(value: $model.eraserSettings.size, in: 5...60, step: 1)
-            }
+            compactSlider(value: $model.eraserSettings.size, range: 5...60, label: "\(Int(model.eraserSettings.size))pt", width: 80)
         }
     }
 
     // MARK: - Laser
 
     private var laserSettings: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker("Mode", selection: $model.laserSettings.mode) {
+        HStack(spacing: 12) {
+            Picker("", selection: $model.laserSettings.mode) {
                 ForEach(LaserMode.allCases, id: \.self) { mode in
                     Text(mode.rawValue).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
+            .frame(width: 180)
 
             if model.laserSettings.mode == .tail {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Tail Fade").font(.caption)
-                        Spacer()
-                        Text("\(model.laserSettings.tailFade, specifier: "%.1f")s").font(.caption).foregroundColor(.secondary)
-                    }
-                    Slider(value: $model.laserSettings.tailFade, in: 0.3...5.0, step: 0.1)
-                }
+                compactSlider(value: $model.laserSettings.tailFade, range: 0.3...5.0, label: String(format: "%.1fs", model.laserSettings.tailFade), width: 80)
             }
 
-            ColorPicker("Color", selection: $model.laserSettings.color)
+            ColorPicker("", selection: $model.laserSettings.color)
+                .labelsHidden()
+                .frame(width: 30)
 
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Size").font(.caption)
-                    Spacer()
-                    Text("\(model.laserSettings.size, specifier: "%.0f")pt").font(.caption).foregroundColor(.secondary)
-                }
-                Slider(value: $model.laserSettings.size, in: 2...20, step: 1)
-            }
+            compactSlider(value: $model.laserSettings.size, range: 2...20, label: "\(Int(model.laserSettings.size))pt", width: 80)
+        }
+    }
+
+    // MARK: - Compact Slider
+
+    private func compactSlider<V: BinaryFloatingPoint>(value: Binding<V>, range: ClosedRange<V>, label: String, width: CGFloat) -> some View where V.Stride: BinaryFloatingPoint, V: Sendable {
+        HStack(spacing: 4) {
+            Slider(value: value, in: range)
+                .frame(width: width - 36)
+            Text(label)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .frame(width: 32, alignment: .trailing)
         }
     }
 }
