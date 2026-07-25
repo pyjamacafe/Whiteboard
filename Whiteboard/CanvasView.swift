@@ -249,8 +249,37 @@ class StrokeLayerView: UIView {
             ctx.restoreGState()
         }
 
-        // Laser tail — fades uniformly after the pen is lifted
-        if model.currentTool == .laser, model.laserSettings.mode == .tail, !model.laserTail.isEmpty {
+        // Persistent laser strokes with glow
+        for strokePts in model.persistentLaserStrokes where strokePts.count >= 2 {
+            ctx.saveGState()
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            let ls = model.laserSettings.size / scale
+            let basePath = CGMutablePath()
+            basePath.move(to: strokePts[0])
+            var prev = strokePts[0]
+            for i in 1..<strokePts.count {
+                let pt = strokePts[i]
+                let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                basePath.addQuadCurve(to: mid, control: prev)
+                prev = pt
+            }
+            basePath.addLine(to: strokePts.last!)
+            // Glow (red shadow)
+            ctx.setLineWidth(ls * 3)
+            ctx.setStrokeColor(UIColor.red.withAlphaComponent(0.15).cgColor)
+            ctx.addPath(basePath)
+            ctx.strokePath()
+            ctx.setLineWidth(ls)
+            let isDark = model.appSettings.isDarkMode
+            ctx.setStrokeColor((isDark ? UIColor.white : UIColor.black).cgColor)
+            ctx.addPath(basePath)
+            ctx.strokePath()
+            ctx.restoreGState()
+        }
+
+        // Current laser tail
+        if !model.laserTail.isEmpty {
             let pts = model.laserTail
             let now = Date()
             let fade = model.laserSettings.tailFade
@@ -261,12 +290,11 @@ class StrokeLayerView: UIView {
                     self?.setNeedsDisplay()
                 }
             }
-            if alpha <= 0 || pts.count < 2 { /* skip */ } else {
+            if alpha > 0 && pts.count >= 2 {
                 ctx.saveGState()
                 ctx.setLineCap(.round)
                 ctx.setLineJoin(.round)
                 let ls = model.laserSettings.size / scale
-                ctx.setLineWidth(ls / 2)
                 let smoothPath = CGMutablePath()
                 smoothPath.move(to: pts[0].point)
                 var prev = pts[0].point
@@ -277,7 +305,8 @@ class StrokeLayerView: UIView {
                     prev = pt
                 }
                 smoothPath.addLine(to: pts.last!.point)
-                ctx.setStrokeColor(UIColor(model.laserSettings.color).withAlphaComponent(CGFloat(alpha) * 0.5).cgColor)
+                let isDark = model.appSettings.isDarkMode
+                ctx.setStrokeColor((isDark ? UIColor.white : UIColor.black).withAlphaComponent(CGFloat(alpha) * 0.5).cgColor)
                 ctx.addPath(smoothPath)
                 ctx.strokePath()
                 ctx.restoreGState()
@@ -289,11 +318,12 @@ class StrokeLayerView: UIView {
             ctx.saveGState()
             ctx.setBlendMode(.normal)
             let ls = model.laserSettings.size / scale
-            let lc = UIColor(model.laserSettings.color)
+            let isDark = model.appSettings.isDarkMode
+            let lc = isDark ? UIColor.white : UIColor.black
 
             for i in (0...3).reversed() {
                 let r = ls + CGFloat(i) * 4 / scale
-                ctx.setFillColor(lc.withAlphaComponent(0.08 - CGFloat(i) * 0.02).cgColor)
+                ctx.setFillColor(UIColor.red.withAlphaComponent(0.08 - CGFloat(i) * 0.02).cgColor)
                 ctx.addEllipse(in: CGRect(x: lp.x - r, y: lp.y - r, width: r * 2, height: r * 2))
                 ctx.fillPath()
             }
@@ -320,15 +350,45 @@ class StrokeLayerView: UIView {
         guard stroke.points.count >= 2 else { return }
 
         let path = CGMutablePath()
-        path.move(to: stroke.points[0])
-        var prev = stroke.points[0]
-        for i in 1..<stroke.points.count {
-            let pt = stroke.points[i]
-            let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
-            path.addQuadCurve(to: mid, control: prev)
-            prev = pt
+        if stroke.isCatmullRom {
+            let smoothed = model!.smoothCatmullRom(stroke.points)
+            guard smoothed.count >= 4 else {
+                // Fallback to raw points
+                path.move(to: stroke.points[0])
+                var prev = stroke.points[0]
+                for i in 1..<stroke.points.count {
+                    let pt = stroke.points[i]
+                    let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                    path.addQuadCurve(to: mid, control: prev)
+                    prev = pt
+                }
+                path.addLine(to: stroke.points.last!)
+                return
+            }
+            path.move(to: smoothed[0])
+            var i = 1
+            while i + 2 < smoothed.count {
+                let cp1 = smoothed[i]
+                let cp2 = smoothed[i + 1]
+                let on = smoothed[i + 2]
+                path.addCurve(to: on, control1: cp1, control2: cp2)
+                i += 3
+            }
+            while i < smoothed.count {
+                path.addLine(to: smoothed[i])
+                i += 1
+            }
+        } else {
+            path.move(to: stroke.points[0])
+            var prev = stroke.points[0]
+            for i in 1..<stroke.points.count {
+                let pt = stroke.points[i]
+                let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                path.addQuadCurve(to: mid, control: prev)
+                prev = pt
+            }
+            path.addLine(to: stroke.points.last!)
         }
-        path.addLine(to: stroke.points.last!)
 
         ctx.saveGState()
         ctx.setLineCap(.round)
@@ -629,7 +689,15 @@ class DrawingCanvasView: UIView {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         if model?.currentTool == .laser {
-            model?.laserTailFadeStart = Date()
+            if let model = model, !model.laserTail.isEmpty {
+                let strokePts = model.laserTail.map { $0.point }
+                model.persistentLaserStrokes.append(strokePts)
+                if !model.laserSettings.retainStrokes {
+                    model.laserTailFadeStart = Date()
+                } else {
+                    model.laserTail.removeAll()
+                }
+            }
             strokeLayer.setNeedsDisplay()
             return
         }
@@ -846,8 +914,26 @@ struct CanvasView: View {
                                   style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: macDashPhase))
                 }
 
-                // Laser tail — fades uniformly after pen is lifted
-                if model.currentTool == .laser, model.laserSettings.mode == .tail, !model.laserTail.isEmpty {
+                // Persistent laser strokes with glow (macOS)
+                for strokePts in model.persistentLaserStrokes where strokePts.count >= 2 {
+                    var basePath = Path()
+                    basePath.move(to: strokePts[0].applying(CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: offset.width, y: offset.height)))
+                    var prev = strokePts[0]
+                    for i in 1..<strokePts.count {
+                        let pt = strokePts[i]
+                        let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                        basePath.addQuadCurve(to: mid.applying(CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: offset.width, y: offset.height)), control: prev.applying(CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: offset.width, y: offset.height)))
+                        prev = pt
+                    }
+                    basePath.addLine(to: strokePts.last!.applying(CGAffineTransform(scaleX: scale, y: scale).translatedBy(x: offset.width, y: offset.height)))
+                    // Glow
+                    let ls = model.laserSettings.size
+                    context.stroke(basePath, with: .color(.red.opacity(0.15)), style: StrokeStyle(lineWidth: ls * 3, lineCap: .round, lineJoin: .round))
+                    context.stroke(basePath, with: .color(model.appSettings.isDarkMode ? .white : .black), style: StrokeStyle(lineWidth: ls, lineCap: .round, lineJoin: .round))
+                }
+
+                // Current laser tail
+                if !model.laserTail.isEmpty {
                     let now = Date()
                     let fade = model.laserSettings.tailFade
                     let alpha = model.laserTailFadeStart.map { max(0, 1 - now.timeIntervalSince($0) / fade) } ?? 1
@@ -865,7 +951,8 @@ struct CanvasView: View {
                             prev = pt
                         }
                         tailPath.addLine(to: CGPoint(x: pts.last!.point.x * scale + offset.width, y: pts.last!.point.y * scale + offset.height))
-                        context.stroke(tailPath, with: .color(model.laserSettings.color.opacity(Double(alpha) * 0.4)),
+                        let isDark = model.appSettings.isDarkMode
+                        context.stroke(tailPath, with: .color((isDark ? Color.white : Color.black).opacity(Double(alpha) * 0.5)),
                                       style: StrokeStyle(lineWidth: model.laserSettings.size / 2, lineCap: .round, lineJoin: .round))
                     }
                 }
@@ -873,12 +960,12 @@ struct CanvasView: View {
                 // Laser pointer dot
                 if model.currentTool == .laser, let lp = model.laserPointer {
                     let ls = model.laserSettings.size
-                    let lc = model.laserSettings.color
+                    let lc = model.appSettings.isDarkMode ? Color.white : Color.black
                     let cp = CGPoint(x: lp.x * scale + offset.width, y: lp.y * scale + offset.height)
                     for i in (0...3).reversed() {
                         let r = ls + CGFloat(i) * 4
                         let dot = Path(ellipseIn: CGRect(x: cp.x - r, y: cp.y - r, width: r * 2, height: r * 2))
-                        context.fill(dot, with: .color(lc.opacity(0.08 - Double(i) * 0.02)))
+                        context.fill(dot, with: .color(Color.red.opacity(0.08 - Double(i) * 0.02)))
                     }
                     let core = Path(ellipseIn: CGRect(x: cp.x - ls / 2, y: cp.y - ls / 2, width: ls, height: ls))
                     context.fill(core, with: .color(lc))
@@ -964,7 +1051,15 @@ struct CanvasView: View {
                             return
                         }
                         if model.currentTool == .laser {
-                            if model.laserTailFadeStart == nil { model.laserTailFadeStart = Date() }
+                            if !model.laserTail.isEmpty {
+                                let strokePts = model.laserTail.map { $0.point }
+                                model.persistentLaserStrokes.append(strokePts)
+                                if !model.laserSettings.retainStrokes {
+                                    model.laserTailFadeStart = Date()
+                                } else {
+                                    model.laserTail.removeAll()
+                                }
+                            }
                             pointCount += 1
                             return
                         }
@@ -1103,15 +1198,31 @@ struct CanvasView: View {
     private func makeSmoothPath(_ stroke: Stroke, transform: CGAffineTransform) -> Path? {
         guard stroke.points.count >= 2 else { return nil }
         var path = Path()
-        path.move(to: stroke.points[0].applying(transform))
-        var prev = stroke.points[0]
-        for i in 1..<stroke.points.count {
-            let pt = stroke.points[i]
-            let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
-            path.addQuadCurve(to: mid.applying(transform), control: prev.applying(transform))
-            prev = pt
+        if stroke.isCatmullRom {
+            path.move(to: stroke.points[0].applying(transform))
+            var i = 1
+            while i + 2 < stroke.points.count {
+                let cp1 = stroke.points[i].applying(transform)
+                let cp2 = stroke.points[i + 1].applying(transform)
+                let on = stroke.points[i + 2].applying(transform)
+                path.addCurve(to: on, control1: cp1, control2: cp2)
+                i += 3
+            }
+            while i < stroke.points.count {
+                path.addLine(to: stroke.points[i].applying(transform))
+                i += 1
+            }
+        } else {
+            path.move(to: stroke.points[0].applying(transform))
+            var prev = stroke.points[0]
+            for i in 1..<stroke.points.count {
+                let pt = stroke.points[i]
+                let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                path.addQuadCurve(to: mid.applying(transform), control: prev.applying(transform))
+                prev = pt
+            }
+            path.addLine(to: stroke.points.last!.applying(transform))
         }
-        path.addLine(to: stroke.points.last!.applying(transform))
         return path
     }
 
@@ -1128,16 +1239,41 @@ struct CanvasView: View {
     private func drawStroke(_ stroke: Stroke, in context: inout GraphicsContext, transform: CGAffineTransform) {
         guard stroke.points.count >= 2 else { return }
 
-        var path = Path()
-        path.move(to: stroke.points[0].applying(transform))
-        var prev = stroke.points[0]
-        for i in 1..<stroke.points.count {
-            let pt = stroke.points[i]
-            let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
-            path.addQuadCurve(to: mid.applying(transform), control: prev.applying(transform))
-            prev = pt
+        let path: Path
+        if stroke.isCatmullRom {
+            let smoothed = model.smoothCatmullRom(stroke.points)
+            if smoothed.count >= 4 {
+                var p = Path()
+                p.move(to: smoothed[0].applying(transform))
+                var i = 1
+                while i + 2 < smoothed.count {
+                    let cp1 = smoothed[i].applying(transform)
+                    let cp2 = smoothed[i + 1].applying(transform)
+                    let on = smoothed[i + 2].applying(transform)
+                    p.addCurve(to: on, control1: cp1, control2: cp2)
+                    i += 3
+                }
+                while i < smoothed.count {
+                    p.addLine(to: smoothed[i].applying(transform))
+                    i += 1
+                }
+                path = p
+            } else {
+                path = makeSmoothPath(stroke, transform: transform) ?? Path()
+            }
+        } else {
+            var p = Path()
+            p.move(to: stroke.points[0].applying(transform))
+            var prev = stroke.points[0]
+            for i in 1..<stroke.points.count {
+                let pt = stroke.points[i]
+                let mid = CGPoint(x: (prev.x + pt.x) / 2, y: (prev.y + pt.y) / 2)
+                p.addQuadCurve(to: mid.applying(transform), control: prev.applying(transform))
+                prev = pt
+            }
+            p.addLine(to: stroke.points.last!.applying(transform))
+            path = p
         }
-        path.addLine(to: stroke.points.last!.applying(transform))
 
         if stroke.isEraser {
             context.blendMode = .clear

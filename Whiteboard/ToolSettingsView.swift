@@ -24,17 +24,17 @@ struct ToolSettingsView: View {
         .fixedSize()
     }
 
-    private func compactPresetRow(presets: Binding<[Color]>, selected: Binding<Color>, selectedIndex: Binding<Int>, lastTapIndex: Binding<Int?>) -> some View {
+    private func squarePresetRow(presets: Binding<[Color]>, selected: Binding<Color>, selectedIndex: Binding<Int>, lastTapIndex: Binding<Int?>) -> some View {
         HStack(spacing: 4) {
             ForEach(0..<8, id: \.self) { i in
                 let color = presets.wrappedValue[i]
                 ZStack {
-                    Circle()
+                    RoundedRectangle(cornerRadius: 4)
                         .fill(color)
                         .frame(width: 20, height: 20)
                         .overlay(
                             color == selected.wrappedValue ?
-                            Circle().stroke(Color.primary, lineWidth: 1.5) : nil
+                            RoundedRectangle(cornerRadius: 4).stroke(Color.primary, lineWidth: 1.5) : nil
                         )
                         .shadow(color: .black.opacity(0.1), radius: 0.5)
                         .onTapGesture {
@@ -99,32 +99,51 @@ struct ToolSettingsView: View {
 
     private var penSettings: some View {
         HStack(spacing: 12) {
-            compactPresetRow(presets: model.appSettings.isDarkMode ? $model.penSettings.darkPresets : $model.penSettings.lightPresets,
+            squarePresetRow(presets: model.appSettings.isDarkMode ? $model.penSettings.darkPresets : $model.penSettings.lightPresets,
                            selected: model.appSettings.isDarkMode ? $model.penSettings.darkColor : $model.penSettings.lightColor,
                            selectedIndex: $model.penPresetIndex,
                            lastTapIndex: $lastPenTapIndex)
 
-            compactSlider(value: $model.penSettings.thickness, range: 1...12, label: "\(Int(model.penSettings.thickness))pt", width: 80)
-
-            compactSlider(value: $model.penSettings.smoothness, range: 1...9, label: smoothnessLabel, width: 80)
+            // Width picker: 2–8pt
+            HStack(spacing: 2) {
+                ForEach(model.penSettings.widthOptions, id: \.self) { w in
+                    Button(action: { model.penSettings.thickness = w }) {
+                        Text("\(Int(w))")
+                            .font(.caption2)
+                            .frame(width: 20, height: 20)
+                            .background(model.penSettings.thickness == w ? Color.accentColor : Color.clear)
+                            .foregroundColor(model.penSettings.thickness == w ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
-    }
-
-    private var smoothnessLabel: String {
-        let v = Int(model.penSettings.smoothness)
-        return v == 1 ? "Off" : "S\(v - 1)"
     }
 
     // MARK: - Fill
 
     private var fillSettings: some View {
         HStack(spacing: 12) {
-            compactPresetRow(presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
+            squarePresetRow(presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
                            selected: model.appSettings.isDarkMode ? $model.fillSettings.darkColor : $model.fillSettings.lightColor,
                            selectedIndex: $model.fillPresetIndex,
                            lastTapIndex: $lastFillTapIndex)
 
-            compactSlider(value: $model.fillSettings.opacity, range: 0.1...1.0, label: "\(Int(model.fillSettings.opacity * 100))%", width: 80)
+            // Opacity picker: 25%, 50%, 75%, 100%
+            HStack(spacing: 2) {
+                ForEach(model.fillSettings.opacityOptions, id: \.self) { op in
+                    Button(action: { model.fillSettings.opacity = op }) {
+                        Text("\(Int(op * 100))%")
+                            .font(.caption2)
+                            .frame(width: 32, height: 20)
+                            .background(model.fillSettings.opacity == op ? Color.accentColor : Color.clear)
+                            .foregroundColor(model.fillSettings.opacity == op ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 
@@ -132,14 +151,25 @@ struct ToolSettingsView: View {
 
     private var highlighterSettings: some View {
         HStack(spacing: 12) {
-            compactPresetRow(presets: model.appSettings.isDarkMode ? $model.highlighterSettings.darkPresets : $model.highlighterSettings.lightPresets,
+            squarePresetRow(presets: model.appSettings.isDarkMode ? $model.highlighterSettings.darkPresets : $model.highlighterSettings.lightPresets,
                            selected: model.appSettings.isDarkMode ? $model.highlighterSettings.darkColor : $model.highlighterSettings.lightColor,
                            selectedIndex: $model.hlPresetIndex,
                            lastTapIndex: $lastHighlighterTapIndex)
 
-            compactSlider(value: $model.highlighterSettings.thickness, range: 5...30, label: "\(Int(model.highlighterSettings.thickness))pt", width: 80)
-
-            compactSlider(value: $model.highlighterSettings.opacity, range: 0.1...1.0, label: "\(Int(model.highlighterSettings.opacity * 100))%", width: 80)
+            // Thickness picker
+            HStack(spacing: 2) {
+                ForEach(model.highlighterSettings.thicknessOptions, id: \.self) { t in
+                    Button(action: { model.highlighterSettings.thickness = t }) {
+                        Text("\(Int(t))")
+                            .font(.caption2)
+                            .frame(width: 24, height: 20)
+                            .background(model.highlighterSettings.thickness == t ? Color.accentColor : Color.clear)
+                            .foregroundColor(model.highlighterSettings.thickness == t ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 
@@ -155,7 +185,19 @@ struct ToolSettingsView: View {
             .pickerStyle(.segmented)
             .frame(width: 160)
 
-            compactSlider(value: $model.eraserSettings.size, range: 5...60, label: "\(Int(model.eraserSettings.size))pt", width: 80)
+            HStack(spacing: 2) {
+                ForEach([10, 20, 30, 40, 50, 60], id: \.self) { s in
+                    Button(action: { model.eraserSettings.size = CGFloat(s) }) {
+                        Text("\(s)")
+                            .font(.caption2)
+                            .frame(width: 24, height: 20)
+                            .background(Int(model.eraserSettings.size) == s ? Color.accentColor : Color.clear)
+                            .foregroundColor(Int(model.eraserSettings.size) == s ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 
@@ -163,36 +205,26 @@ struct ToolSettingsView: View {
 
     private var laserSettings: some View {
         HStack(spacing: 12) {
-            Picker("", selection: $model.laserSettings.mode) {
-                ForEach(LaserMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
+            Toggle(isOn: $model.laserSettings.retainStrokes) {
+                Text("Retain")
+                    .font(.caption2)
+            }
+            .toggleStyle(.switch)
+            .frame(width: 80)
+
+            HStack(spacing: 2) {
+                ForEach([2, 4, 6, 8, 10], id: \.self) { s in
+                    Button(action: { model.laserSettings.size = CGFloat(s) }) {
+                        Text("\(s)")
+                            .font(.caption2)
+                            .frame(width: 20, height: 20)
+                            .background(Int(model.laserSettings.size) == s ? Color.accentColor : Color.clear)
+                            .foregroundColor(Int(model.laserSettings.size) == s ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            .pickerStyle(.segmented)
-            .frame(width: 180)
-
-            if model.laserSettings.mode == .tail {
-                compactSlider(value: $model.laserSettings.tailFade, range: 0.3...5.0, label: String(format: "%.1fs", model.laserSettings.tailFade), width: 80)
-            }
-
-            ColorPicker("", selection: $model.laserSettings.color)
-                .labelsHidden()
-                .frame(width: 30)
-
-            compactSlider(value: $model.laserSettings.size, range: 2...20, label: "\(Int(model.laserSettings.size))pt", width: 80)
-        }
-    }
-
-    // MARK: - Compact Slider
-
-    private func compactSlider<V: BinaryFloatingPoint>(value: Binding<V>, range: ClosedRange<V>, label: String, width: CGFloat) -> some View where V.Stride: BinaryFloatingPoint, V: Sendable {
-        HStack(spacing: 4) {
-            Slider(value: value, in: range)
-                .frame(width: width - 36)
-            Text(label)
-                .font(.caption2)
-                .foregroundColor(.secondary)
-                .frame(width: 32, alignment: .trailing)
         }
     }
 }

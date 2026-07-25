@@ -135,7 +135,7 @@ struct ContentView: View {
         case .pen: return model.penColor
         case .highlighter: return model.hlColor
         case .fill: return model.fillColor
-        case .laser: return model.laserSettings.color
+        case .laser: return model.appSettings.isDarkMode ? Color.white : Color.black
         default: return Color.accentColor
         }
     }
@@ -257,7 +257,7 @@ struct ContentView: View {
                     settingsGroup(title: nil, items: [
                         ("arrow.uturn.backward", "Undo", { model.undo() }, !model.canUndo),
                         ("arrow.uturn.forward", "Redo", { model.redo() }, !model.canRedo),
-                        ("trash", "Delete Selected", { model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty),
+                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? "Clear Canvas" : "Delete", { model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty),
                         ("viewfinder", "Center", { model.needsRecenter = true }, false),
                         ("house", "Home", { model.showWelcome = true }, false),
                     ])
@@ -381,8 +381,10 @@ struct ContentView: View {
                     .disabled(!model.canUndo)
                 Button(action: { model.redo() }) { Label("Redo", systemImage: "arrow.uturn.forward") }
                     .disabled(!model.canRedo)
-                Button(action: { model.deleteSelected() }) { Label("Delete Selected", systemImage: "trash") }
-                    .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
+                Button(action: { model.deleteSelected() }) {
+                    Label(model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? "Clear Canvas" : "Delete", systemImage: "trash")
+                }
+                .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
                 Button(action: { model.needsRecenter = true }) { Label("Center", systemImage: "viewfinder") }
                 Button(action: { model.showWelcome = true }) { Label("Home", systemImage: "house") }
             }

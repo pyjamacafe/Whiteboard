@@ -16,9 +16,10 @@ struct Stroke: Identifiable, Codable {
     let lineWidth: CGFloat
     let isEraser: Bool
     let isHighlighter: Bool
-    let presetIndex: Int  // -1 = absolute color, 0+ = preset index for theme lookup
+    let presetIndex: Int
+    let isCatmullRom: Bool
 
-    init(id: UUID = UUID(), points: [CGPoint], color: Color, lineWidth: CGFloat, isEraser: Bool, isHighlighter: Bool, presetIndex: Int = -1) {
+    init(id: UUID = UUID(), points: [CGPoint], color: Color, lineWidth: CGFloat, isEraser: Bool, isHighlighter: Bool, presetIndex: Int = -1, isCatmullRom: Bool = false) {
         self.id = id
         self.points = points
         self.color = CodableColor(color)
@@ -26,10 +27,11 @@ struct Stroke: Identifiable, Codable {
         self.isEraser = isEraser
         self.isHighlighter = isHighlighter
         self.presetIndex = presetIndex
+        self.isCatmullRom = isCatmullRom
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, points, color, lineWidth, isEraser, isHighlighter, presetIndex
+        case id, points, color, lineWidth, isEraser, isHighlighter, presetIndex, isCatmullRom
     }
 
     init(from decoder: Decoder) throws {
@@ -41,19 +43,22 @@ struct Stroke: Identifiable, Codable {
         isEraser = try c.decode(Bool.self, forKey: .isEraser)
         isHighlighter = try c.decode(Bool.self, forKey: .isHighlighter)
         presetIndex = try c.decodeIfPresent(Int.self, forKey: .presetIndex) ?? -1
+        isCatmullRom = try c.decodeIfPresent(Bool.self, forKey: .isCatmullRom) ?? false
     }
 
     var uiColor: Color { color.color }
 
     func displayColor(for model: DrawingModel) -> Color {
-        guard presetIndex >= 0 else { return color.color }  // absolute color, no theme lookup
-        if isHighlighter {
-            guard presetIndex < model.hlPresets.count else { return color.color }
-            return model.hlPresets[presetIndex]
-        } else {
-            guard presetIndex < model.penPresets.count else { return color.color }
-            return model.penPresets[presetIndex]
+        if presetIndex >= 0 {
+            if isHighlighter {
+                guard presetIndex < model.hlPresets.count else { return color.color }
+                return model.hlPresets[presetIndex]
+            } else {
+                guard presetIndex < model.penPresets.count else { return color.color }
+                return model.penPresets[presetIndex]
+            }
         }
+        return color.color
     }
 }
 
@@ -169,18 +174,6 @@ enum Tool: String, CaseIterable {
     case pen, eraser, fill, select, highlighter, laser
 }
 
-enum LaserMode: String, CaseIterable {
-    case point = "Pointer Only"
-    case tail = "Pointer with Tail"
-}
-
-struct LaserSettings {
-    var mode: LaserMode = .point
-    var tailFade: Double = 1.0
-    var color: Color = .red
-    var size: CGFloat = 6
-}
-
 enum CanvasBackground: String, CaseIterable {
     case none, grid, dots, ruled
 }
@@ -201,7 +194,7 @@ struct PenSettings {
     var lightColor: Color = .black
     var darkColor: Color = .white
     var thickness: CGFloat = 3
-    var smoothness: CGFloat = 3
+    let widthOptions: [CGFloat] = [2, 3, 4, 5, 6, 7, 8]
     var lightPresets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
     var darkPresets: [Color] = [
         Color(red: 0.96, green: 0.96, blue: 0.96),
@@ -219,6 +212,7 @@ struct FillSettings {
     var lightColor: Color = .red
     var darkColor: Color = .red
     var opacity: Double = 0.25
+    let opacityOptions: [Double] = [0.25, 0.50, 0.75, 1.0]
     var lightPresets: [Color] = [.red, .orange, .yellow, .green, .blue, .purple, .pink, .mint]
     var darkPresets: [Color] = [.red, .orange, .yellow, .green, .cyan, .purple, .pink, .mint]
 }
@@ -237,9 +231,16 @@ struct HighlighterSettings {
     var lightColor: Color = .yellow
     var darkColor: Color = .yellow
     var thickness: CGFloat = 15
-    var opacity: Double = 0.3
+    let opacity: Double = 0.3
+    let thicknessOptions: [CGFloat] = [10, 15, 20, 25, 30]
     var lightPresets: [Color] = [.yellow, .green, .cyan, .orange, .pink, .purple, .red, .blue]
     var darkPresets: [Color] = [.yellow, .green, .cyan, .orange, .pink, .purple, .red, .blue]
+}
+
+struct LaserSettings {
+    var retainStrokes: Bool = false
+    let tailFade: Double = 5.0
+    var size: CGFloat = 6
 }
 
 typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>)
@@ -306,14 +307,12 @@ class DrawingModel: ObservableObject {
         let penLightColor: CodableColor
         let penDarkColor: CodableColor
         let penThickness: CGFloat
-        let penSmoothness: CGFloat
         let fillLightColor: CodableColor
         let fillDarkColor: CodableColor
         let fillOpacity: Double
         let hlLightColor: CodableColor
         let hlDarkColor: CodableColor
         let hlThickness: CGFloat
-        let hlOpacity: Double
         let eraserSize: CGFloat
         let eraserMode: String
         let canvasBg: String
@@ -321,27 +320,25 @@ class DrawingModel: ObservableObject {
         let revealSettingsOnSingleTap: Bool
 
         enum CodingKeys: String, CodingKey {
-            case penLightColor, penDarkColor, penThickness, penSmoothness,
+            case penLightColor, penDarkColor, penThickness,
                  fillLightColor, fillDarkColor, fillOpacity,
-                 hlLightColor, hlDarkColor, hlThickness, hlOpacity,
+                 hlLightColor, hlDarkColor, hlThickness,
                  eraserSize, eraserMode, canvasBg, isDarkMode, revealSettingsOnSingleTap
         }
 
-        init(penLightColor: CodableColor, penDarkColor: CodableColor, penThickness: CGFloat, penSmoothness: CGFloat,
+        init(penLightColor: CodableColor, penDarkColor: CodableColor, penThickness: CGFloat,
              fillLightColor: CodableColor, fillDarkColor: CodableColor, fillOpacity: Double,
-             hlLightColor: CodableColor, hlDarkColor: CodableColor, hlThickness: CGFloat, hlOpacity: Double,
+             hlLightColor: CodableColor, hlDarkColor: CodableColor, hlThickness: CGFloat,
              eraserSize: CGFloat, eraserMode: String, canvasBg: String, isDarkMode: Bool, revealSettingsOnSingleTap: Bool) {
             self.penLightColor = penLightColor
             self.penDarkColor = penDarkColor
             self.penThickness = penThickness
-            self.penSmoothness = penSmoothness
             self.fillLightColor = fillLightColor
             self.fillDarkColor = fillDarkColor
             self.fillOpacity = fillOpacity
             self.hlLightColor = hlLightColor
             self.hlDarkColor = hlDarkColor
             self.hlThickness = hlThickness
-            self.hlOpacity = hlOpacity
             self.eraserSize = eraserSize
             self.eraserMode = eraserMode
             self.canvasBg = canvasBg
@@ -354,14 +351,12 @@ class DrawingModel: ObservableObject {
             penLightColor = try c.decode(CodableColor.self, forKey: .penLightColor)
             penDarkColor = try c.decode(CodableColor.self, forKey: .penDarkColor)
             penThickness = try c.decode(CGFloat.self, forKey: .penThickness)
-            penSmoothness = try c.decode(CGFloat.self, forKey: .penSmoothness)
             fillLightColor = try c.decode(CodableColor.self, forKey: .fillLightColor)
             fillDarkColor = try c.decode(CodableColor.self, forKey: .fillDarkColor)
             fillOpacity = try c.decode(Double.self, forKey: .fillOpacity)
             hlLightColor = try c.decode(CodableColor.self, forKey: .hlLightColor)
             hlDarkColor = try c.decode(CodableColor.self, forKey: .hlDarkColor)
             hlThickness = try c.decode(CGFloat.self, forKey: .hlThickness)
-            hlOpacity = try c.decode(Double.self, forKey: .hlOpacity)
             eraserSize = try c.decode(CGFloat.self, forKey: .eraserSize)
             eraserMode = try c.decode(String.self, forKey: .eraserMode)
             canvasBg = try c.decode(String.self, forKey: .canvasBg)
@@ -375,14 +370,12 @@ class DrawingModel: ObservableObject {
             penLightColor: CodableColor(penSettings.lightColor),
             penDarkColor: CodableColor(penSettings.darkColor),
             penThickness: penSettings.thickness,
-            penSmoothness: penSettings.smoothness,
             fillLightColor: CodableColor(fillSettings.lightColor),
             fillDarkColor: CodableColor(fillSettings.darkColor),
             fillOpacity: fillSettings.opacity,
             hlLightColor: CodableColor(highlighterSettings.lightColor),
             hlDarkColor: CodableColor(highlighterSettings.darkColor),
             hlThickness: highlighterSettings.thickness,
-            hlOpacity: highlighterSettings.opacity,
             eraserSize: eraserSettings.size,
             eraserMode: eraserSettings.mode.rawValue,
             canvasBg: appSettings.canvasBackground.rawValue,
@@ -400,14 +393,12 @@ class DrawingModel: ObservableObject {
         penSettings.lightColor = s.penLightColor.color
         penSettings.darkColor = s.penDarkColor.color
         penSettings.thickness = s.penThickness
-        penSettings.smoothness = s.penSmoothness
         fillSettings.lightColor = s.fillLightColor.color
         fillSettings.darkColor = s.fillDarkColor.color
         fillSettings.opacity = s.fillOpacity
         highlighterSettings.lightColor = s.hlLightColor.color
         highlighterSettings.darkColor = s.hlDarkColor.color
         highlighterSettings.thickness = s.hlThickness
-        highlighterSettings.opacity = s.hlOpacity
         eraserSettings.size = s.eraserSize
         eraserSettings.mode = EraserMode(rawValue: s.eraserMode) ?? .partial
         appSettings.canvasBackground = CanvasBackground(rawValue: s.canvasBg) ?? .grid
@@ -677,6 +668,7 @@ class DrawingModel: ObservableObject {
     var laserTail: [(point: CGPoint, time: Date)] = []
     var laserPointer: CGPoint?
     var laserTailFadeStart: Date?
+    var persistentLaserStrokes: [[CGPoint]] = []
     var laserTailFading: Bool { laserTailFadeStart != nil }
 
     private var undoStack: [CanvasSnapshot] = []
@@ -725,13 +717,10 @@ class DrawingModel: ObservableObject {
             erase(stroke)
             return
         } else if stroke.points.count >= 2 {
+            // Apply Catmull-Rom smoothing to the raw input points
             var finalStroke = stroke
-            if penSettings.smoothness > 1 && !stroke.isEraser && stroke.lineWidth < 10 {
-                let eps = (penSettings.smoothness - 1) * 0.05
-                let simplified = simplify(stroke.points, epsilon: eps)
-                if simplified.count >= 2 {
-                    finalStroke = Stroke(id: stroke.id, points: simplified, color: stroke.uiColor, lineWidth: stroke.lineWidth, isEraser: false, isHighlighter: stroke.isHighlighter)
-                }
+            if !stroke.isEraser && stroke.lineWidth < 10 {
+                finalStroke = Stroke(id: stroke.id, points: stroke.points, color: stroke.uiColor, lineWidth: stroke.lineWidth, isEraser: false, isHighlighter: stroke.isHighlighter, presetIndex: stroke.presetIndex, isCatmullRom: true)
             }
             strokes.append(finalStroke)
         }
@@ -822,14 +811,21 @@ class DrawingModel: ObservableObject {
         lassoPath.closeSubpath()
 
         // Try to find a stroke-bounded enclosure within the lasso.
-        // Try multiple candidate points inside the lasso to handle
-        // asymmetric or concave lasso shapes.
+        // Try multiple candidate points inside the lasso.
+        // The last point is on the boundary — shift it toward the centroid
+        // to get a point guaranteed inside the lasso.
         let centroid = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
         let center = CGPoint(x: centroid.x / CGFloat(pts.count), y: centroid.y / CGFloat(pts.count))
+        let last = pts.last!
+        let dx = center.x - last.x, dy = center.y - last.y
+        let dist = sqrt(dx * dx + dy * dy)
+        let inward: CGPoint = dist > 0.1
+            ? CGPoint(x: last.x + dx / dist * 5, y: last.y + dy / dist * 5)
+            : center
         let lassoBox = lassoPath.boundingBox
         let boxCenter = CGPoint(x: lassoBox.midX, y: lassoBox.midY)
         var fillPath: CGPath = lassoPath
-        for candidate in [pts.last!, center, boxCenter] {
+        for candidate in [inward, center, boxCenter] {
             if let enclosure = FloodFill.fillPath(at: candidate, strokes: strokes) {
                 fillPath = enclosure
                 break
@@ -913,37 +909,44 @@ class DrawingModel: ObservableObject {
         return sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py))
     }
 
-    // MARK: - RDP simplification
+    func smoothCatmullRom(_ points: [CGPoint]) -> [CGPoint] {
+        guard points.count >= 3 else { return points }
 
-    func simplified(_ points: [CGPoint]) -> [CGPoint] {
-        guard penSettings.smoothness > 1 else { return points }
-        let eps = (penSettings.smoothness - 1) * 0.05
-        let result = simplify(points, epsilon: eps)
-        return result.count >= 2 ? result : points
-    }
-
-    private func simplify(_ points: [CGPoint], epsilon: CGFloat) -> [CGPoint] {
-        guard points.count > 2 else { return points }
-        var dmax: CGFloat = 0
-        var idx = 0
-        for i in 1..<points.count - 1 {
-            let d = perpDist(points[i], points[0], points[points.count - 1])
-            if d > dmax { dmax = d; idx = i }
+        // Gaussian-weighted moving average (window radius 2)
+        let gaussWeights: [CGFloat] = [0.061, 0.242, 0.394, 0.242, 0.061]
+        var smoothed = points
+        for i in 0..<points.count {
+            var sx: CGFloat = 0, sy: CGFloat = 0, sw: CGFloat = 0
+            for w in -2...2 {
+                let idx = i + w
+                guard idx >= 0, idx < points.count else { continue }
+                let weight = gaussWeights[w + 2]
+                sx += points[idx].x * weight
+                sy += points[idx].y * weight
+                sw += weight
+            }
+            if sw > 0 {
+                smoothed[i] = CGPoint(x: sx / sw, y: sy / sw)
+            }
         }
-        if dmax > epsilon {
-            return simplify(Array(points[0...idx]), epsilon: epsilon).dropLast()
-                + simplify(Array(points[idx..<points.count]), epsilon: epsilon)
-        }
-        return [points[0], points[points.count - 1]]
-    }
 
-    private func perpDist(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
-        let dx = b.x - a.x, dy = b.y - a.y
-        let lenSq = dx * dx + dy * dy
-        guard lenSq != 0 else { return sqrt((p.x - a.x) * (p.x - a.x) + (p.y - a.y) * (p.y - a.y)) }
-        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
-        let px = a.x + t * dx, py = a.y + t * dy
-        return sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py))
+        // Catmull-Rom to cubic Bezier
+        // For each segment [p1, p2] with neighbors p0, p3:
+        //   cp1 = p1 + (p2 - p0) / 6
+        //   cp2 = p2 - (p3 - p1) / 6
+        var result: [CGPoint] = [smoothed[0]]
+        for i in 0..<smoothed.count - 1 {
+            let p0 = i > 0 ? smoothed[i - 1] : smoothed[i]
+            let p1 = smoothed[i]
+            let p2 = smoothed[i + 1]
+            let p3 = i + 2 < smoothed.count ? smoothed[i + 2] : smoothed[i + 1]
+            let cp1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
+            let cp2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
+            result.append(cp1)
+            result.append(cp2)
+            result.append(p2)
+        }
+        return result
     }
 
     func deleteSelected() {
@@ -1017,13 +1020,16 @@ class DrawingModel: ObservableObject {
     // MARK: - Fill
 
     func performFill(at canvasPoint: CGPoint) {
+        let t0 = CFAbsoluteTimeGetCurrent()
         saveState()
         guard let path = FloodFill.fillPath(at: canvasPoint, strokes: strokes) else {
+            print("[fill] performFill: no path (total \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-t0)*1000))ms)")
             updateUndoRedo()
             return
         }
         let region = FillRegion(path: path, color: fillColor.opacity(fillSettings.opacity), presetIndex: fillPresetIndex)
         fillRegions.append(region)
+        print("[fill] performFill: fill region created (total \(String(format: "%.1f", (CFAbsoluteTimeGetCurrent()-t0)*1000))ms)")
         updateUndoRedo()
     }
 
@@ -1035,8 +1041,12 @@ class DrawingModel: ObservableObject {
             selectionBoundary.removeAll()
         }
         if tool != .laser {
+            if !laserSettings.retainStrokes {
+                persistentLaserStrokes.removeAll()
+            }
             laserTail.removeAll()
             laserPointer = nil
+            laserTailFadeStart = nil
         }
         fillLassoPoints = []
         showDeleteMenu = false
@@ -1095,7 +1105,40 @@ class DrawingModel: ObservableObject {
         saveState()
         strokes = save.strokes
         fillRegions = save.fillRegions
+        migratePresetIndices()
         updateUndoRedo()
+    }
+
+    private func migratePresetIndices() {
+        let penPresets = appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets
+        let hlPresets = appSettings.isDarkMode ? highlighterSettings.darkPresets : highlighterSettings.lightPresets
+        for i in strokes.indices where strokes[i].presetIndex == -1 && !strokes[i].isEraser {
+            let s = strokes[i]
+            let candidates = s.isHighlighter ? hlPresets : penPresets
+            #if os(iOS)
+            let target = UIColor(s.color.color)
+            #else
+            guard let target = NSColor(s.color.color).usingColorSpace(.sRGB) else { continue }
+            #endif
+            var tr: CGFloat = 0, tg: CGFloat = 0, tb: CGFloat = 0, ta: CGFloat = 0
+            target.getRed(&tr, green: &tg, blue: &tb, alpha: &ta)
+            var bestIdx = -1
+            var bestDist = CGFloat.infinity
+            for (j, c) in candidates.enumerated() {
+                #if os(iOS)
+                let pc = UIColor(c)
+                #else
+                guard let pc = NSColor(c).usingColorSpace(.sRGB) else { continue }
+                #endif
+                var pr: CGFloat = 0, pg: CGFloat = 0, pb: CGFloat = 0, pa: CGFloat = 0
+                pc.getRed(&pr, green: &pg, blue: &pb, alpha: &pa)
+                let d = (tr - pr) * (tr - pr) + (tg - pg) * (tg - pg) + (tb - pb) * (tb - pb)
+                if d < bestDist { bestDist = d; bestIdx = j }
+            }
+            if bestIdx >= 0 {
+                strokes[i] = Stroke(id: s.id, points: s.points, color: s.uiColor, lineWidth: s.lineWidth, isEraser: s.isEraser, isHighlighter: s.isHighlighter, presetIndex: bestIdx, isCatmullRom: s.isCatmullRom)
+            }
+        }
     }
 
     func save() {
