@@ -17,6 +17,13 @@ struct CanvasView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: DrawingCanvasView, context: Context) {
+        uiView.model = model
+        if model.needsDelete {
+            print("[sel] updateUIView processing needsDelete")
+            model.deleteSelected()
+            model.needsDelete = false
+            print("[sel] updateUIView after delete — strokes=\(model.strokes.count) fillRegions=\(model.fillRegions.count)")
+        }
         uiView.refresh()
         uiView.onBeginDraw = onBeginDraw
     }
@@ -609,6 +616,9 @@ class DrawingCanvasView: UIView {
             centerOnContent()
             model.needsRecenter = false
         }
+        // Force model to be up to date
+        strokeLayer.model = model
+        gridView.model = model
         gridView.setNeedsDisplay()
         strokeLayer.setNeedsDisplay()
     }
@@ -638,20 +648,34 @@ class DrawingCanvasView: UIView {
         }
 
         if model.currentTool == .select {
-            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
-                let now = Date()
-                if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
-                    Self.lastSelectTap = .distantPast
-                    model.showDeleteMenu = true
-                    strokeLayer.setNeedsDisplay()
-                    gridView.setNeedsDisplay()
-                    return
+            let cp = toCanvas(touch.location(in: self))
+            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
+                let onSelected = model.isPointOnSelectedItem(cp) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(cp))
+                print("[sel] touchesBegan select — selection exists, onSelected=\(onSelected)")
+                if onSelected {
+                    let now = Date()
+                    if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
+                        Self.lastSelectTap = .distantPast
+                        print("[sel] double-tap detected — showing delete menu, selections=\(model.selectedStrokeIds.count)/\(model.selectedFillIds.count) boundary=\(model.selectionBoundary.count)")
+                        model.showDeleteMenu = true
+                        let tapLoc = touch.location(in: self)
+                        model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
+                        strokeLayer.model = model
+                        gridView.model = model
+                        strokeLayer.setNeedsDisplay()
+                        gridView.setNeedsDisplay()
+                        return
+                    }
+                    Self.lastSelectTap = now
+                    model.beginMove(at: cp)
+                } else {
+                    // Tap outside selection — deselect
+                    model.selectedStrokeIds.removeAll()
+                    model.selectedFillIds.removeAll()
+                    model.selectionBoundary.removeAll()
                 }
-                Self.lastSelectTap = now
-                let cp = toCanvas(touch.location(in: self))
-                model.beginMove(at: cp)
             } else {
-                model.beginLasso(at: toCanvas(touch.location(in: self)))
+                model.beginLasso(at: cp)
                 startDashAnimation()
             }
             strokeLayer.setNeedsDisplay()
@@ -690,6 +714,7 @@ class DrawingCanvasView: UIView {
         }
 
         if model.currentTool == .select {
+            if model.showDeleteMenu { return }
             if model.isMoving {
                 let cur = toCanvas(touch.location(in: self))
                 let offset = CGSize(width: cur.x - model.lastMovePoint.x, height: cur.y - model.lastMovePoint.y)
@@ -740,6 +765,8 @@ class DrawingCanvasView: UIView {
             return
         }
         if model?.currentTool == .select {
+            if model?.showDeleteMenu == true { return }
+            print("[sel] touchesEnded select — isMoving=\(model?.isMoving == true) calling \(model?.isMoving == true ? "commitMove" : "endLasso")")
             if model?.isMoving == true {
                 model?.commitMove()
             } else {
@@ -1052,15 +1079,23 @@ struct CanvasView: View {
                                 let offset = CGSize(width: cp.x - model.lastMovePoint.x, height: cp.y - model.lastMovePoint.y)
                                 model.moveSelected(by: offset)
                                 model.lastMovePoint = cp
-                            } else if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
-                                let now = Date()
-                                if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
-                                    Self.lastSelectTap = .distantPast
+                            } else if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
+                                let onSelected = model.isPointOnSelectedItem(cp) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(cp))
+                                if onSelected {
+                                    let now = Date()
+                                    if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
+                                        Self.lastSelectTap = .distantPast
                     model.showDeleteMenu = true
-                                    return
+                    model.deleteMenuLocation = CGPoint(x: cp.x * scale + offset.width + 60, y: cp.y * scale + offset.height)
+                                        return
+                                    }
+                                    Self.lastSelectTap = now
+                                    model.beginMove(at: cp)
+                                } else {
+                                    model.selectedStrokeIds.removeAll()
+                                    model.selectedFillIds.removeAll()
+                                    model.selectionBoundary.removeAll()
                                 }
-                                Self.lastSelectTap = now
-                                model.beginMove(at: cp)
                             } else if model.selectionLasso.isEmpty {
                                 model.beginLasso(at: cp)
                             } else {

@@ -56,11 +56,39 @@ struct ContentView: View {
                         .animation(.easeOut(duration: 0.25), value: showSettingsSidebar)
                     }
                     #endif
+
+                    if model.showDeleteMenu {
+                        HStack(spacing: 0) {
+                            Button(role: .destructive) {
+                                model.needsDelete = true
+                                model.showDeleteMenu = false
+                                if model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty {
+                                    model.selectionBoundary.removeAll()
+                                }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                                    .font(.callout)
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 8)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .background(.thickMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
+                        .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+                        .position(model.deleteMenuLocation)
+                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        .onTapGesture { }  // prevent pass-through
+                    }
                 }
             }
         }
 
         return content
+            #if os(iOS) && !targetEnvironment(macCatalyst)
+            .statusBarHidden()
+            #endif
             .onChange(of: model.pendingAction) { _, newValue in
                 guard let newValue else { return }
                 if newValue == .open { showImporter = true }
@@ -79,33 +107,6 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $showHelp) { HelpView() }
-            .overlay(alignment: .top) {
-                if model.showDeleteMenu {
-                    Color.black.opacity(0.001)
-                        .contentShape(Rectangle())
-                        .onTapGesture { model.showDeleteMenu = false }
-                        .overlay(alignment: .top) {
-                            HStack(spacing: 0) {
-                                Button(role: .destructive) {
-                                    model.deleteSelected()
-                                    model.showDeleteMenu = false
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                        .font(.callout)
-                                        .padding(.horizontal, 16)
-                                        .padding(.vertical, 8)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .background(.thickMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
-                            .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
-                            .padding(.top, model.isToolbarVisible ? 90 : 12)
-                        }
-                        .transition(.opacity.combined(with: .scale(scale: 0.9)))
-                }
-            }
             .animation(.easeOut(duration: 0.15), value: model.showDeleteMenu)
             .confirmationDialog("Clear Canvas?", isPresented: $model.showClearConfirmation, titleVisibility: .visible) {
                 Button("Clear", role: .destructive) { model.clear() }
@@ -291,7 +292,7 @@ struct ContentView: View {
                     settingsGroup(title: nil, items: [
                         ("arrow.uturn.backward", "Undo", { model.undo() }, !model.canUndo),
                         ("arrow.uturn.forward", "Redo", { model.redo() }, !model.canRedo),
-                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? "Clear Canvas" : "Delete", { model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty),
+                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? "Clear Canvas" : "Delete", { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty),
                         ("viewfinder", "Center", { model.needsRecenter = true }, false),
                         ("house", "Home", { model.showWelcome = true }, false),
                     ])
@@ -415,7 +416,7 @@ struct ContentView: View {
                     .disabled(!model.canUndo)
                 Button(action: { model.redo() }) { Label("Redo", systemImage: "arrow.uturn.forward") }
                     .disabled(!model.canRedo)
-                Button(action: { model.deleteSelected() }) {
+                Button(action: { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }) {
                     Label(model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? "Clear Canvas" : "Delete", systemImage: "trash")
                 }
                 .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)

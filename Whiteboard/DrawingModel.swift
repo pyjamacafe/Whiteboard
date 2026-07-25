@@ -740,7 +740,7 @@ class DrawingModel: ObservableObject {
     }
 
     func endLasso() {
-        guard selectionLasso.count >= 3 else { selectionLasso = []; return }
+        guard selectionLasso.count >= 3 else { print("[sel] endLasso — selectionLasso.count=\(selectionLasso.count) < 3, returning"); selectionLasso = []; return }
 
         saveState()
 
@@ -773,6 +773,7 @@ class DrawingModel: ObservableObject {
 
         selectionBoundary = selectionLasso
         selectionLasso = []
+        print("[sel] endLasso — selected \(selectedStrokeIds.count) strokes, \(selectedFillIds.count) fills, boundary=\(selectionBoundary.count) pts")
         updateUndoRedo()
     }
 
@@ -866,7 +867,18 @@ class DrawingModel: ObservableObject {
         return false
     }
 
+    func isPointInSelectionBoundary(_ point: CGPoint) -> Bool {
+        pointInPolygon(point, selectionBoundary)
+    }
+
     func beginMove(at point: CGPoint) {
+        // If there's a selection boundary and the tap is inside it, treat as move
+        if !selectionBoundary.isEmpty && pointInPolygon(point, selectionBoundary) {
+            isMoving = true
+            lastMovePoint = point
+            moveDidChange = false
+            return
+        }
         guard isPointOnSelectedItem(point) else {
             selectedStrokeIds.removeAll()
             selectedFillIds.removeAll()
@@ -908,6 +920,21 @@ class DrawingModel: ObservableObject {
     }
 
     // MARK: - Delete Selected
+
+    func pointInPolygon(_ point: CGPoint, _ polygon: [CGPoint]) -> Bool {
+        guard polygon.count >= 3 else { return false }
+        var inside = false
+        var j = polygon.count - 1
+        for i in 0..<polygon.count {
+            let pi = polygon[i], pj = polygon[j]
+            if ((pi.y > point.y) != (pj.y > point.y)) &&
+                (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x) {
+                inside = !inside
+            }
+            j = i
+        }
+        return inside
+    }
 
     private func pointSegDist(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
         let dx = b.x - a.x, dy = b.y - a.y
@@ -959,16 +986,17 @@ class DrawingModel: ObservableObject {
     }
 
     func deleteSelected() {
-        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty else {
-            showClearConfirmation = true
-            return
-        }
+        print("[sel] deleteSelected called — selectedStrokeIds=\(selectedStrokeIds.count) selectedFillIds=\(selectedFillIds.count) boundary=\(selectionBoundary.count)")
         saveState()
-        strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
-        fillRegions = fillRegions.filter { !selectedFillIds.contains($0.id) }
-        selectedStrokeIds.removeAll()
-        selectedFillIds.removeAll()
+        if !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty {
+            print("[sel] deleting \(selectedStrokeIds.count) strokes and \(selectedFillIds.count) fills")
+            strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
+            fillRegions = fillRegions.filter { !selectedFillIds.contains($0.id) }
+            selectedStrokeIds.removeAll()
+            selectedFillIds.removeAll()
+        }
         selectionBoundary.removeAll()
+        print("[sel] after deleteSelected — strokes=\(strokes.count) fills=\(fillRegions.count) boundary=\(selectionBoundary.count)")
         updateUndoRedo()
         scheduleAutoSave()
     }
@@ -1060,6 +1088,7 @@ class DrawingModel: ObservableObject {
         fillLassoPoints = []
         showDeleteMenu = false
         showClearConfirmation = false
+        needsDelete = false
     }
 
     func undo() {
@@ -1178,6 +1207,8 @@ class DrawingModel: ObservableObject {
     enum ExportFormat: String { case png, pdf }
     @Published var pendingAction: PendingAction?
     @Published var showDeleteMenu: Bool = false
+    @Published var deleteMenuLocation: CGPoint = .zero
+    @Published var needsDelete: Bool = false
     @Published var showClearConfirmation: Bool = false
     @Published var isToolbarVisible: Bool = true
     @Published var showWelcome: Bool = true
