@@ -363,9 +363,17 @@ class StrokeLayerView: UIView {
 
     private func drawFill(_ region: FillRegion, in ctx: CGContext) {
         ctx.saveGState()
-        ctx.setBlendMode(.normal)
+        // STEP 1: Fill with theme canvas background (fully opaque) — hides grid, dots,
+        // rulers, strokes, and any previous fills underneath.
+        let path = region.cgPath
+        ctx.addPath(path)
+        let isDark = model?.appSettings.isDarkMode ?? false
+        let bg = isDark ? UIColor(red: 28/255, green: 28/255, blue: 30/255, alpha: 1) : UIColor.white
+        ctx.setFillColor(bg.cgColor)
+        ctx.fillPath()
+        // STEP 2: Fill with the fill color at the user's opacity on top of the solid base.
+        ctx.addPath(path)
         ctx.setFillColor(UIColor(region.displayColor(for: model!)).cgColor)
-        ctx.addPath(region.cgPath)
         ctx.fillPath()
         ctx.restoreGState()
     }
@@ -1314,6 +1322,11 @@ struct CanvasView: View {
 
     private func drawFill(_ region: FillRegion, in context: inout GraphicsContext, transform: CGAffineTransform) {
         let path = Path(region.cgPath).applying(transform)
+        // Fill with solid canvas background first to hide grid and previous fills
+        let isDark = model.appSettings.isDarkMode
+        let bg: Color = isDark ? Color(red: 28/255, green: 28/255, blue: 30/255) : .white
+        context.fill(path, with: .color(bg))
+        // Then fill with the fill color at the user's opacity
         context.fill(path, with: .color(region.displayColor(for: model)))
     }
 

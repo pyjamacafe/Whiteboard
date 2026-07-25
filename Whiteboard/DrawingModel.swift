@@ -193,7 +193,7 @@ struct AppSettings {
 struct PenSettings {
     var lightColor: Color = .black
     var darkColor: Color = .white
-    var thickness: CGFloat = 3
+    var thickness: CGFloat = 2
     let widthOptions: [CGFloat] = [2, 2.5, 3, 3.5, 4]
     var lightPresets: [Color] = [.black, .red, .orange, .yellow, .green, .blue, .purple, .brown]
     var darkPresets: [Color] = [
@@ -212,7 +212,7 @@ struct FillSettings {
     var lightColor: Color = .red
     var darkColor: Color = .red
     var opacity: Double = 0.25
-    let opacityOptions: [Double] = [0.25, 0.50, 0.75, 1.0]
+    let opacityOptions: [Double] = [0.10, 0.25, 0.50, 0.75, 1.0]
     var lightPresets: [Color] = [.red, .orange, .yellow, .green, .blue, .purple, .pink, .mint]
     var darkPresets: [Color] = [.red, .orange, .yellow, .green, .cyan, .purple, .pink, .mint]
 }
@@ -224,13 +224,13 @@ enum EraserMode: String, CaseIterable {
 
 struct EraserSettings {
     var mode: EraserMode = .full
-    var size: CGFloat = 20
+    var size: CGFloat = 10
 }
 
 struct HighlighterSettings {
     var lightColor: Color = .yellow
     var darkColor: Color = .yellow
-    var thickness: CGFloat = 15
+    var thickness: CGFloat = 10
     let opacity: Double = 0.3
     let thicknessOptions: [CGFloat] = [10, 15, 20, 25, 30]
     var lightPresets: [Color] = [.yellow, .green, .cyan, .orange, .pink, .purple, .red, .blue]
@@ -813,31 +813,32 @@ class DrawingModel: ObservableObject {
 
         saveState()
 
-        // Build the lasso path
+        // Build the lasso path and find stroke-bounded enclosures inside it.
         let lassoPath = CGMutablePath()
         lassoPath.move(to: pts[0])
         for i in 1..<pts.count { lassoPath.addLine(to: pts[i]) }
         lassoPath.closeSubpath()
 
-        // Try to find a stroke-bounded enclosure within the lasso.
-        // Try multiple candidate points inside the lasso.
-        // The last point is on the boundary — shift it toward the centroid
-        // to get a point guaranteed inside the lasso.
-        let centroid = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
-        let center = CGPoint(x: centroid.x / CGFloat(pts.count), y: centroid.y / CGFloat(pts.count))
-        let last = pts.last!
-        let dx = center.x - last.x, dy = center.y - last.y
-        let dist = sqrt(dx * dx + dy * dy)
-        let inward: CGPoint = dist > 0.1
-            ? CGPoint(x: last.x + dx / dist * 5, y: last.y + dy / dist * 5)
-            : center
+        // Get all DCEL enclosures, filter to those whose centroid is inside
+        // the lasso, and pick the smallest one.
         let lassoBox = lassoPath.boundingBox
-        let boxCenter = CGPoint(x: lassoBox.midX, y: lassoBox.midY)
+        let allEnclosures = FloodFill.detectEnclosures(canvasPoint: CGPoint(x: lassoBox.midX, y: lassoBox.midY), strokes: strokes)
         var fillPath: CGPath = lassoPath
-        for candidate in [inward, center, boxCenter] {
-            if let enclosure = FloodFill.fillPath(at: candidate, strokes: strokes) {
-                fillPath = enclosure
-                break
+        var bestArea: CGFloat = 0
+        for enc in allEnclosures {
+            let ebox = enc.boundingBox
+            guard !ebox.isNull else { continue }
+            guard lassoBox.intersects(ebox) else { continue }
+            let eCentroid = CGPoint(x: ebox.midX, y: ebox.midY)
+            #if os(iOS)
+            guard UIBezierPath(cgPath: lassoPath).contains(eCentroid) else { continue }
+            #else
+            guard lassoPath.contains(eCentroid, using: .winding) else { continue }
+            #endif
+            let area = abs(ebox.width * ebox.height)
+            if area > bestArea {
+                bestArea = area
+                fillPath = enc
             }
         }
 
@@ -884,6 +885,21 @@ class DrawingModel: ObservableObject {
             selectionBoundary.removeAll()
             beginLasso(at: point)
             return
+        }
+        // Automatically include fill regions whose bounding box overlaps
+        // with the selected strokes, so fills move with their boundary strokes.
+        if !selectedStrokeIds.isEmpty {
+            var strokeBox = CGRect.null
+            for s in strokes where selectedStrokeIds.contains(s.id) {
+                for p in s.points {
+                    strokeBox = strokeBox.isEmpty ? CGRect(origin: p, size: .zero) : strokeBox.union(CGRect(origin: p, size: .zero))
+                }
+            }
+            for r in fillRegions where !selectedFillIds.contains(r.id) {
+                if strokeBox.intersects(r.cgPath.boundingBox) {
+                    selectedFillIds.insert(r.id)
+                }
+            }
         }
         isMoving = true
         lastMovePoint = point
@@ -1213,7 +1229,7 @@ class DrawingModel: ObservableObject {
         let h = Int(size.height * scale)
         guard w > 0, h > 0, w <= 8192, h <= 8192 else { return nil }
 
-        var pixels = [UInt8](repeating: 255, count: w * h * 4)
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
         guard let ctx = CGContext(
             data: &pixels, width: w, height: h,
             bitsPerComponent: 8, bytesPerRow: w * 4,
@@ -1221,8 +1237,7 @@ class DrawingModel: ObservableObject {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        ctx.setFillColor(gray: 1, alpha: 1)
-        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        // No background fill — PNG exports with transparent background.
         // Map canvas (y-down) → bitmap (CG y-up) so content top-left is at output origin
         ctx.translateBy(x: -offset.x * scale, y: CGFloat(h) + offset.y * scale)
         ctx.scaleBy(x: scale, y: -scale)

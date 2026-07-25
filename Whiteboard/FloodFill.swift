@@ -7,78 +7,7 @@ import CoreGraphics
 enum FloodFill {
 
     static func fillPath(at canvasPoint: CGPoint, strokes: [Stroke]) -> CGPath? {
-
-        var segs: [(CGPoint, CGPoint)] = []
-        for s in strokes where !s.isEraser {
-            for i in 0..<s.points.count - 1 {
-                segs.append((s.points[i], s.points[i + 1]))
-            }
-            if s.points.count >= 3 {
-                let d = s.points.first!.distance(to: s.points.last!)
-                if d < 30 {
-                    segs.append((s.points.last!, s.points.first!))
-                }
-            }
-        }
-        guard !segs.isEmpty else { return nil }
-
-        let searchRadius: CGFloat = 500
-        let tapRect = CGRect(x: canvasPoint.x - searchRadius, y: canvasPoint.y - searchRadius,
-                             width: searchRadius * 2, height: searchRadius * 2)
-        let nearSegs = segs.filter { segRect($0).intersects(tapRect) }
-        let sortedSegs = nearSegs.sorted(by: { a, b in
-            let da = min(a.0.distance(to: canvasPoint), a.1.distance(to: canvasPoint))
-            let db = min(b.0.distance(to: canvasPoint), b.1.distance(to: canvasPoint))
-            return da < db
-        })
-        let cappedSegs = sortedSegs.count > 2000 ? Array(sortedSegs.prefix(2000)) : sortedSegs
-
-        // Bridge nearby stroke-endpoints so barely-touching strokes
-        // form a connected graph for the DCEL.
-        // Only bridge endpoints that appear once (true stroke ends)
-        // to avoid linking intermediate vertices.
-        var endpointCount = [CGPoint: Int]()
-        for seg in cappedSegs {
-            endpointCount[seg.0, default: 0] += 1
-            endpointCount[seg.1, default: 0] += 1
-        }
-        let bridgeThreshold: CGFloat = 3
-        var bridged = cappedSegs
-        var bridgeCount = 0
-        var bridgedPoints = Set<UInt64>()
-        func pointKey(_ p: CGPoint) -> UInt64 {
-            UInt64(bitPattern: Int64(p.x * 100)) << 32 | UInt64(bitPattern: Int64(p.y * 100))
-        }
-        for i in 0..<cappedSegs.count {
-            let a1 = cappedSegs[i].0, a2 = cappedSegs[i].1
-            let aHasLeaf = endpointCount[a1, default: 0] == 1 || endpointCount[a2, default: 0] == 1
-            guard aHasLeaf else { continue }
-            for j in (i + 1)..<cappedSegs.count {
-                let b1 = cappedSegs[j].0, b2 = cappedSegs[j].1
-                guard endpointCount[b1, default: 0] == 1 || endpointCount[b2, default: 0] == 1 else { continue }
-                let pairs: [(CGPoint, CGPoint)] = [
-                    (a1, b1), (a1, b2), (a2, b1), (a2, b2),
-                ]
-                for (p, q) in pairs where p != q {
-                    guard endpointCount[p, default: 0] == 1,
-                          endpointCount[q, default: 0] == 1 else { continue }
-                    guard !bridgedPoints.contains(pointKey(p)),
-                          !bridgedPoints.contains(pointKey(q)) else { continue }
-                    if p.distance(to: q) < bridgeThreshold {
-                        bridgedPoints.insert(pointKey(p))
-                        bridgedPoints.insert(pointKey(q))
-                        bridged.append((p, q))
-                        bridgeCount += 1
-                    }
-                }
-            }
-        }
-        if bridgeCount > 0 {
-        }
-
-        let enclosures = EnclosureDetector.detect(from: bridged)
-
-        // If DCEL found nothing, try simple closed-stroke detection
+        let enclosures = detectEnclosures(canvasPoint: canvasPoint, strokes: strokes)
         if enclosures.isEmpty {
             if let simple = closedStrokeFill(canvasPoint, strokes) {
                 return simple
@@ -98,6 +27,74 @@ enum FloodFill {
             }
         }
         return best?.path
+    }
+
+    /// Find all DCEL enclosures near the given point, using the same segment
+    /// collection, bridging, and detection pipeline as fillPath.
+    static func detectEnclosures(canvasPoint: CGPoint, strokes: [Stroke]) -> [CGPath] {
+        var segs: [(CGPoint, CGPoint)] = []
+        for s in strokes where !s.isEraser {
+            for i in 0..<s.points.count - 1 {
+                segs.append((s.points[i], s.points[i + 1]))
+            }
+            if s.points.count >= 3 {
+                let d = s.points.first!.distance(to: s.points.last!)
+                if d < 30 {
+                    segs.append((s.points.last!, s.points.first!))
+                }
+            }
+        }
+        guard !segs.isEmpty else { return [] }
+        let cappedSegs = filterAndCap(segs, near: canvasPoint)
+        let bridged = bridgeEndpoints(cappedSegs)
+        return EnclosureDetector.detect(from: bridged)
+    }
+
+    private static func filterAndCap(_ segs: [(CGPoint, CGPoint)], near point: CGPoint) -> [(CGPoint, CGPoint)] {
+        let searchRadius: CGFloat = 500
+        let tapRect = CGRect(x: point.x - searchRadius, y: point.y - searchRadius,
+                             width: searchRadius * 2, height: searchRadius * 2)
+        let nearSegs = segs.filter { segRect($0).intersects(tapRect) }
+        let sortedSegs = nearSegs.sorted(by: { a, b in
+            let da = min(a.0.distance(to: point), a.1.distance(to: point))
+            let db = min(b.0.distance(to: point), b.1.distance(to: point))
+            return da < db
+        })
+        return sortedSegs.count > 2000 ? Array(sortedSegs.prefix(2000)) : sortedSegs
+    }
+
+    private static func bridgeEndpoints(_ segs: [(CGPoint, CGPoint)]) -> [(CGPoint, CGPoint)] {
+        var endpointCount = [CGPoint: Int]()
+        for seg in segs {
+            endpointCount[seg.0, default: 0] += 1
+            endpointCount[seg.1, default: 0] += 1
+        }
+        let bridgeThreshold: CGFloat = 10
+        var bridged = segs
+        var bridgedPoints = Set<UInt64>()
+        func pointKey(_ p: CGPoint) -> UInt64 {
+            UInt64(bitPattern: Int64(p.x * 100)) << 32 | UInt64(bitPattern: Int64(p.y * 100))
+        }
+        for i in 0..<segs.count {
+            let a1 = segs[i].0, a2 = segs[i].1
+            let aHasLeaf = endpointCount[a1, default: 0] == 1 || endpointCount[a2, default: 0] == 1
+            guard aHasLeaf else { continue }
+            for j in (i + 1)..<segs.count {
+                let b1 = segs[j].0, b2 = segs[j].1
+                guard endpointCount[b1, default: 0] == 1 || endpointCount[b2, default: 0] == 1 else { continue }
+                let pairs: [(CGPoint, CGPoint)] = [(a1, b1), (a1, b2), (a2, b1), (a2, b2)]
+                for (p, q) in pairs where p != q {
+                    guard endpointCount[p, default: 0] == 1, endpointCount[q, default: 0] == 1 else { continue }
+                    guard !bridgedPoints.contains(pointKey(p)), !bridgedPoints.contains(pointKey(q)) else { continue }
+                    if p.distance(to: q) < bridgeThreshold {
+                        bridgedPoints.insert(pointKey(p))
+                        bridgedPoints.insert(pointKey(q))
+                        bridged.append((p, q))
+                    }
+                }
+            }
+        }
+        return bridged
     }
 
     private static func segRect(_ seg: (CGPoint, CGPoint)) -> CGRect {
