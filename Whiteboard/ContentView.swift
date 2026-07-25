@@ -27,7 +27,7 @@ struct ContentView: View {
                 WelcomeView(model: model, onStart: { model.showWelcome = false })
             } else {
                 ZStack {
-                    CanvasView(model: model, onBeginDraw: { settingsTool = nil; showSettings = false })
+                    CanvasView(model: model, onBeginDraw: { showSettings = false })
                         .ignoresSafeArea()
                         .pencilSqueezeToolbar(model: model)
 
