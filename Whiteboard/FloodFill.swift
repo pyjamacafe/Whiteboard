@@ -20,6 +20,7 @@ enum FloodFill {
                 }
             }
         }
+        guard !segs.isEmpty else { return nil }
 
         let searchRadius: CGFloat = 500
         let tapRect = CGRect(x: canvasPoint.x - searchRadius, y: canvasPoint.y - searchRadius,
@@ -82,9 +83,12 @@ enum FloodFill {
         }
 
         var best: (path: CGPath, area: CGFloat)?
-        for (idx, path) in enclosures.enumerated() {
+        for path in enclosures {
             let box = path.boundingBox
+            guard !box.isNull else { continue }
+            guard box.contains(canvasPoint) else { continue }
             let pts = pathPoints(path)
+            guard pointInPolygon(canvasPoint, pts) else { continue }
             let area = abs(signedArea(pts))
             if best == nil || area < best!.area {
                 best = (path, area)
@@ -130,6 +134,7 @@ enum FloodFill {
         for (si, s) in strokes.enumerated() where !s.isEraser && s.points.count >= 3 {
             let d = s.points.first!.distance(to: s.points.last!)
             guard d < threshold else { continue }
+            guard pointInPolygon(point, s.points) else { continue }
             let simplified = rdpSimplify(s.points, epsilon: 3)
             guard simplified.count >= 3 else { continue }
             let area = abs(signedArea(simplified))

@@ -822,13 +822,18 @@ class DrawingModel: ObservableObject {
         lassoPath.closeSubpath()
 
         // Try to find a stroke-bounded enclosure within the lasso.
-        // Use the centroid of the lasso as the fill tap point.
+        // Try multiple candidate points inside the lasso to handle
+        // asymmetric or concave lasso shapes.
         let centroid = pts.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
         let center = CGPoint(x: centroid.x / CGFloat(pts.count), y: centroid.y / CGFloat(pts.count))
+        let lassoBox = lassoPath.boundingBox
+        let boxCenter = CGPoint(x: lassoBox.midX, y: lassoBox.midY)
         var fillPath: CGPath = lassoPath
-        if let enclosure = FloodFill.fillPath(at: center, strokes: strokes) {
-            // Use the DCEL-found enclosure (bounded by strokes)
-            fillPath = enclosure
+        for candidate in [pts.last!, center, boxCenter] {
+            if let enclosure = FloodFill.fillPath(at: candidate, strokes: strokes) {
+                fillPath = enclosure
+                break
+            }
         }
 
         let region = FillRegion(path: fillPath, color: fillColor.opacity(fillSettings.opacity), presetIndex: fillPresetIndex)
