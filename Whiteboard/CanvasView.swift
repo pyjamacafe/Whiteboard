@@ -160,6 +160,27 @@ class StrokeLayerView: UIView {
         for region in model.fillRegions {
             drawFill(region, in: ctx)
         }
+        // Placed images
+        for img in model.placedImages {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            ctx.saveGState()
+            ctx.setBlendMode(.copy)
+            ctx.translateBy(x: rect.minX, y: rect.minY + rect.height)
+            ctx.scaleBy(x: 1, y: -1)
+            // Use cached UIImage for fast redraws
+            let uiImage: UIImage? = {
+                if let cached = model.imageCache[img.id] as? UIImage { return cached }
+                if let decoded = UIImage(data: img.imageData) {
+                    model.imageCache[img.id] = decoded
+                    return decoded
+                }
+                return nil
+            }()
+            if let cgImg = uiImage?.cgImage {
+                ctx.draw(cgImg, in: CGRect(origin: .zero, size: rect.size))
+            }
+            ctx.restoreGState()
+        }
         // Highlighter strokes composited as a group — overlapping areas don't darken
         ctx.saveGState()
         ctx.setAlpha(CGFloat(model.highlighterSettings.opacity))
@@ -254,6 +275,25 @@ class StrokeLayerView: UIView {
             bPath.closeSubpath()
             ctx.addPath(bPath)
             ctx.strokePath()
+            ctx.restoreGState()
+        }
+
+        // Selection rects for placed images
+        for img in model.placedImages where model.selectedImageIds.contains(img.id) {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            ctx.saveGState()
+            ctx.setStrokeColor(UIColor.systemBlue.cgColor)
+            ctx.setLineWidth(2 / scale)
+            ctx.setLineDash(phase: dashPhase / scale, lengths: [8 / scale, 5 / scale])
+            ctx.stroke(rect)
+            // Resize handles at corners
+            let handleSize: CGFloat = 10 / scale
+            for corner in [rect.origin, CGPoint(x: rect.maxX, y: rect.minY),
+                           CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.maxY)] {
+                let handle = CGRect(x: corner.x - handleSize / 2, y: corner.y - handleSize / 2, width: handleSize, height: handleSize)
+                ctx.setFillColor(UIColor.systemBlue.cgColor)
+                ctx.fill(handle)
+            }
             ctx.restoreGState()
         }
 
@@ -642,9 +682,12 @@ class DrawingCanvasView: UIView {
         guard let touch = touches.first, let model = model else { return }
         isTouchActive = true
         hideHoverIndicator()
+        // Dismiss delete menu on any canvas tap
+        model.showDeleteMenu = false
         lastTouchPoint = touch.location(in: self)
+        model.lastCanvasTapLocation = toCanvas(touch.location(in: self))
         #if os(iOS) && !targetEnvironment(macCatalyst)
-        guard touch.type == .pencil else { return }
+        guard touch.type == .pencil || model.currentTool == .select else { return }
         #endif
 
         onBeginDraw?()
@@ -657,11 +700,44 @@ class DrawingCanvasView: UIView {
 
         if model.currentTool == .select {
             let cp = toCanvas(touch.location(in: self))
-            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
+            // Check if tap is on an unselected image
+            if let imgId = model.hitTestImage(cp), !model.selectedImageIds.contains(imgId) {
+                // Tap on unselected image — select it, deselect everything else
+                model.selectedStrokeIds.removeAll()
+                model.selectedFillIds.removeAll()
+                model.selectedImageIds = [imgId]
+                model.selectionBoundary.removeAll()
+                strokeLayer.setNeedsDisplay()
+                gridView.setNeedsDisplay()
+                return
+            }
+            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectionBoundary.isEmpty {
+                // Check for resize handle hit first (handle is outside image rect)
+                if model.hitTestResizeHandle(cp) != nil {
+                    let now = Date()
+                    if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
+                        Self.lastSelectTap = .distantPast
+                        model.showDeleteMenu = true
+                        let tapLoc = touch.location(in: self)
+                        model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
+                        strokeLayer.model = model
+                        gridView.model = model
+                        strokeLayer.setNeedsDisplay()
+                        gridView.setNeedsDisplay()
+                        return
+                    }
+                    Self.lastSelectTap = now
+                    model.beginMove(at: cp)
+                    strokeLayer.model = model
+                    gridView.model = model
+                    strokeLayer.setNeedsDisplay()
+                    gridView.setNeedsDisplay()
+                    return
+                }
                 let onSelected = model.isPointOnSelectedItem(cp) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(cp))
                 if onSelected {
                     let now = Date()
-                    if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
+                    if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
                         Self.lastSelectTap = .distantPast
                         model.showDeleteMenu = true
                         let tapLoc = touch.location(in: self)
@@ -675,14 +751,33 @@ class DrawingCanvasView: UIView {
                     Self.lastSelectTap = now
                     model.beginMove(at: cp)
                 } else {
-                    // Tap outside selection — deselect
+                    // Tap outside selection — deselect, don't start new lasso
                     model.selectedStrokeIds.removeAll()
                     model.selectedFillIds.removeAll()
+                    model.selectedImageIds.removeAll()
                     model.selectionBoundary.removeAll()
+                    strokeLayer.model = model
+                    gridView.model = model
+                    strokeLayer.setNeedsDisplay()
+                    gridView.setNeedsDisplay()
+                    return
                 }
             } else {
+                // Nothing selected — check for double-tap to show paste menu
+                let now = Date()
+                if now.timeIntervalSince(Self.lastEmptyTap) < 0.4 {
+                    Self.lastEmptyTap = .distantPast
+                    model.showDeleteMenu = true
+                    let tapLoc = touch.location(in: self)
+                    model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
+                    strokeLayer.model = model
+                    gridView.model = model
+                    strokeLayer.setNeedsDisplay()
+                    gridView.setNeedsDisplay()
+                    return
+                }
+                Self.lastEmptyTap = now
                 model.beginLasso(at: cp)
-                startDashAnimation()
             }
             strokeLayer.setNeedsDisplay()
             return
@@ -721,11 +816,13 @@ class DrawingCanvasView: UIView {
 
         if model.currentTool == .select {
             if model.showDeleteMenu { return }
-            if model.isMoving {
+            if model.isMoving || model.isResizing {
                 let cur = toCanvas(touch.location(in: self))
                 let offset = CGSize(width: cur.x - model.lastMovePoint.x, height: cur.y - model.lastMovePoint.y)
                 model.moveSelected(by: offset)
                 model.lastMovePoint = cur
+            } else if !model.selectedImageIds.isEmpty {
+                // Image selected — ignore touch moves (avoids accidental lasso points)
             } else {
                 let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
                 for ct in coalesced {
@@ -772,7 +869,7 @@ class DrawingCanvasView: UIView {
         }
         if model?.currentTool == .select {
             if model?.showDeleteMenu == true { return }
-            if model?.isMoving == true {
+            if model?.isMoving == true || model?.isResizing == true {
                 model?.commitMove()
             } else {
                 model?.endLasso()
@@ -834,6 +931,7 @@ class DrawingCanvasView: UIView {
 extension DrawingCanvasView: UIPencilInteractionDelegate {
     static var lastPencilTap: Date = .distantPast
     static var lastSelectTap: Date = .distantPast
+    static var lastEmptyTap: Date = .distantPast
 
     func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
         guard let model = model else { return }
@@ -864,6 +962,7 @@ struct CanvasView: View {
     @State private var hoverLocation: CGPoint?
 
     static var lastSelectTap: Date = .distantPast
+    static var lastEmptyTap: Date = .distantPast
 
     @State private var keyMonitor: Any?
     @State private var scrollMonitor: Any?
@@ -909,6 +1008,29 @@ struct CanvasView: View {
 
                 for region in model.fillRegions {
                     drawFill(region, in: &context, transform: tf)
+                }
+                // Placed images
+                for img in model.placedImages {
+                    let rect = CGRect(origin: img.cgPosition, size: img.cgSize).applying(tf)
+                    // Use cached NSImage for fast redraws
+                    let nsImage: NSImage? = {
+                        if let cached = model.imageCache[img.id] as? NSImage { return cached }
+                        if let imgObj = NSImage(data: img.imageData) {
+                            model.imageCache[img.id] = imgObj
+                            return imgObj
+                        }
+                        return nil
+                    }()
+                    if let nsImg = nsImage {
+                        // Scale to rect size and draw with top-left anchor
+                        let resized = NSImage(size: rect.size)
+                        resized.lockFocus()
+                        nsImg.draw(in: NSRect(origin: .zero, size: rect.size),
+                                   from: NSRect(origin: .zero, size: nsImg.size),
+                                   operation: .copy, fraction: 1)
+                        resized.unlockFocus()
+                        context.draw(Image(nsImage: resized), at: rect.origin, anchor: .topLeading)
+                    }
                 }
                 // Highlighter strokes — composite all as a single layer at uniform opacity
                 let hlOpacity = model.highlighterSettings.opacity
@@ -983,6 +1105,19 @@ struct CanvasView: View {
                     bPath.closeSubpath()
                     context.stroke(bPath, with: .color(.blue),
                                   style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: macDashPhase))
+                }
+
+                // Selection rects for placed images (macOS)
+                for img in model.placedImages where model.selectedImageIds.contains(img.id) {
+                    let rect = CGRect(origin: img.cgPosition, size: img.cgSize).applying(tf)
+                    context.stroke(Path(roundedRect: rect, cornerRadius: 0), with: .color(.blue),
+                                  style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: macDashPhase))
+                    let hs: CGFloat = 8
+                    for corner in [rect.origin, CGPoint(x: rect.maxX, y: rect.minY),
+                                   CGPoint(x: rect.maxX, y: rect.maxY), CGPoint(x: rect.minX, y: rect.maxY)] {
+                        let handle = CGRect(x: corner.x - hs / 2, y: corner.y - hs / 2, width: hs, height: hs)
+                        context.fill(Path(ellipseIn: handle), with: .color(.blue))
+                    }
                 }
 
                 // Persistent laser strokes with glow (macOS)
@@ -1069,6 +1204,7 @@ struct CanvasView: View {
                             x: (value.location.x - offset.width) / scale,
                             y: (value.location.y - offset.height) / scale
                         )
+                        model.lastCanvasTapLocation = cp
 
                         if model.currentTool == .fill {
                             if model.fillLassoPoints.isEmpty {
@@ -1080,15 +1216,28 @@ struct CanvasView: View {
                         }
 
                         if model.currentTool == .select {
-                            if model.isMoving {
+                            // macOS: tap on unselected image selects it
+                            if let imgId = model.hitTestImage(cp), !model.selectedImageIds.contains(imgId) {
+                                model.selectedStrokeIds.removeAll()
+                                model.selectedFillIds.removeAll()
+                                model.selectedImageIds = [imgId]
+                                model.selectionBoundary.removeAll()
+                                return
+                            }
+                            if model.isMoving || model.isResizing {
                                 let offset = CGSize(width: cp.x - model.lastMovePoint.x, height: cp.y - model.lastMovePoint.y)
                                 model.moveSelected(by: offset)
                                 model.lastMovePoint = cp
-                            } else if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
+                            } else if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectionBoundary.isEmpty {
+                                // Check for resize handle hit first
+                                if model.hitTestResizeHandle(cp) != nil {
+                                    model.beginMove(at: cp)
+                                    return
+                                }
                                 let onSelected = model.isPointOnSelectedItem(cp) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(cp))
                                 if onSelected {
                                     let now = Date()
-                                    if now.timeIntervalSince(Self.lastSelectTap) < 0.3 {
+                                    if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
                                         Self.lastSelectTap = .distantPast
                     model.showDeleteMenu = true
                     model.deleteMenuLocation = CGPoint(x: cp.x * scale + offset.width + 60, y: cp.y * scale + offset.height)
@@ -1099,10 +1248,20 @@ struct CanvasView: View {
                                 } else {
                                     model.selectedStrokeIds.removeAll()
                                     model.selectedFillIds.removeAll()
+                                    model.selectedImageIds.removeAll()
                                     model.selectionBoundary.removeAll()
                                 }
-                            } else if model.selectionLasso.isEmpty {
-                                model.beginLasso(at: cp)
+                             } else if model.selectionLasso.isEmpty {
+                                 // Nothing selected — check for double-tap to show paste menu
+                                 let now = Date()
+                                 if now.timeIntervalSince(Self.lastEmptyTap) < 0.4 {
+                                     Self.lastEmptyTap = .distantPast
+                                     model.showDeleteMenu = true
+                                     model.deleteMenuLocation = CGPoint(x: cp.x * scale + offset.width + 60, y: cp.y * scale + offset.height)
+                                     return
+                                 }
+                                 Self.lastEmptyTap = now
+                                 model.beginLasso(at: cp)
                             } else {
                                 model.addLassoPoint(cp)
                             }
@@ -1135,6 +1294,7 @@ struct CanvasView: View {
                         }
                         if model.currentTool == .select {
                             if model.isMoving { model.commitMove() }
+                            else if model.isResizing { model.commitMove() }
                             else { model.endLasso() }
                             return
                         }
@@ -1214,6 +1374,11 @@ struct CanvasView: View {
                 if hasCmd && !hasShift && char == "z" { model.undo(); return nil }
                 if hasCmd && hasShift && char == "z" { model.redo(); return nil }
                 if hasCmd && char == "s" { model.save(); return nil }
+                if hasCmd && char == "c" { model.copySelected(); return nil }
+                if hasCmd && char == "v" { model.paste(); return nil }
+                if hasCmd && char == "i" { model.pendingAction = .importImage; return nil }
+                if hasCmd && char == "=" { model.resizeSelectedImages(by: 1.25); return nil }
+                if hasCmd && char == "-" { model.resizeSelectedImages(by: 0.8); return nil }
 
                 if char == "\u{7F}" || char == "\u{7B}" || event.keyCode == 51 || event.keyCode == 117 {
                     model.deleteSelected()

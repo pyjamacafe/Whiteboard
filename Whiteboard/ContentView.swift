@@ -58,20 +58,55 @@ struct ContentView: View {
                     #endif
 
                     if model.showDeleteMenu {
-                        HStack(spacing: 0) {
-                            Button(role: .destructive) {
-                                model.needsDelete = true
-                                model.showDeleteMenu = false
-                                if model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty {
-                                    model.selectionBoundary.removeAll()
+                        HStack(spacing: 4) {
+                            if model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty {
+                                // Nothing selected — offer Paste
+                                Button(action: { model.paste(); model.showDeleteMenu = false }) {
+                                    Label("Paste", systemImage: "doc.on.clipboard")
+                                        .font(.callout)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
                                 }
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                                    .font(.callout)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 8)
+                                .buttonStyle(.plain)
+                            } else {
+                                // Something selected — offer Copy and Delete
+                                Button(action: { model.copySelected(); model.showDeleteMenu = false }) {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                        .font(.callout)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
+                                if !model.selectedImageIds.isEmpty {
+                                    Button(action: { model.resizeSelectedImages(by: 0.8); model.showDeleteMenu = false }) {
+                                        Image(systemName: "minus.magnifyingglass")
+                                            .font(.callout)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 8)
+                                    }
+                                    .buttonStyle(.plain)
+                                    Button(action: { model.resizeSelectedImages(by: 1.25); model.showDeleteMenu = false }) {
+                                        Image(systemName: "plus.magnifyingglass")
+                                            .font(.callout)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 8)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                Button(role: .destructive) {
+                                    model.needsDelete = true
+                                    model.showDeleteMenu = false
+                                    if model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty {
+                                        model.selectionBoundary.removeAll()
+                                    }
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                        .font(.callout)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
                         }
                         .background(.thickMaterial)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -92,17 +127,24 @@ struct ContentView: View {
             .onChange(of: model.pendingAction) { _, newValue in
                 guard let newValue else { return }
                 if newValue == .open { showImporter = true }
+                if newValue == .importImage { showImporter = true }
                 model.pendingAction = nil
             }
             .background(shortcutButtons)
             .fileExporter(isPresented: $showingExporter, document: ExportDocument(data: exportData ?? Data()), contentType: exportType, defaultFilename: exportName) { _ in }
-            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.init(filenameExtension: "wb")!, .data]) { result in
+            .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
                 if case .success(let url) = result {
                     let shouldStop = url.startAccessingSecurityScopedResource()
                     defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
-                    if let data = try? Data(contentsOf: url) {
-                        model.loadData(data)
-                        model.openFileURL = url
+                    // Check if it's an image or a .wb file
+                    let ext = url.pathExtension.lowercased()
+                    if ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "heic" || ext == "gif" {
+                        model.addImage(url: url)
+                    } else {
+                        if let data = try? Data(contentsOf: url) {
+                            model.loadData(data)
+                            model.openFileURL = url
+                        }
                     }
                 }
             }
@@ -126,12 +168,18 @@ struct ContentView: View {
                 .keyboardShortcut("z", modifiers: [.command, .shift])
             Button("") { model.deleteSelected() }
                 .keyboardShortcut(.delete, modifiers: [])
+            Button("") { model.copySelected() }
+                .keyboardShortcut("c", modifiers: .command)
+            Button("") { model.paste() }
+                .keyboardShortcut("v", modifiers: .command)
             Button("") { model.save() }
                 .keyboardShortcut("s", modifiers: .command)
             Button("") { showImporter = true }
                 .keyboardShortcut("o", modifiers: .command)
             Button("") { model.closeBoard() }
                 .keyboardShortcut("w", modifiers: .command)
+            Button("") { showImporter = true }
+                .keyboardShortcut("i", modifiers: .command)
         }
         .hidden()
         .frame(width: 0, height: 0)
@@ -292,7 +340,10 @@ struct ContentView: View {
                     settingsGroup(title: nil, items: [
                         ("arrow.uturn.backward", "Undo", { model.undo() }, !model.canUndo),
                         ("arrow.uturn.forward", "Redo", { model.redo() }, !model.canRedo),
-                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? "Clear Canvas" : "Delete", { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty),
+                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty && model.placedImages.isEmpty),
+                        ("doc.on.doc", "Copy", { model.copySelected() }, model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty),
+                        ("doc.on.clipboard", "Paste", { model.paste() }, false),
+                        ("photo", "Import Image", { showImporter = true }, false),
                         ("viewfinder", "Center", { model.needsRecenter = true }, false),
                         ("house", "Home", { model.showWelcome = true }, false),
                     ])
@@ -416,10 +467,14 @@ struct ContentView: View {
                     .disabled(!model.canUndo)
                 Button(action: { model.redo() }) { Label("Redo", systemImage: "arrow.uturn.forward") }
                     .disabled(!model.canRedo)
-                Button(action: { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }) {
-                    Label(model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty ? "Clear Canvas" : "Delete", systemImage: "trash")
+                Button(action: { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }) {
+                    Label(model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", systemImage: "trash")
                 }
-                .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
+                .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty && model.placedImages.isEmpty)
+                Button(action: { model.copySelected() }) { Label("Copy", systemImage: "doc.on.doc") }
+                    .disabled(model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty)
+                Button(action: { model.paste() }) { Label("Paste", systemImage: "doc.on.clipboard") }
+                Button(action: { showImporter = true }) { Label("Import Image", systemImage: "photo") }
                 Button(action: { model.needsRecenter = true }) { Label("Center", systemImage: "viewfinder") }
                 Button(action: { model.showWelcome = true }) { Label("Home", systemImage: "house") }
             }

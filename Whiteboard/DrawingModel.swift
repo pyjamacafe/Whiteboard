@@ -86,6 +86,23 @@ struct CodableColor: Codable {
     var color: Color { Color(.sRGB, red: r, green: g, blue: b, opacity: a) }
 }
 
+struct PlacedImage: Identifiable, Codable {
+    var id = UUID()
+    var position: CodablePoint
+    var size: CodablePoint  // stored as (width, height)
+    let imageData: Data
+
+    init(id: UUID = UUID(), position: CGPoint, size: CGSize, imageData: Data) {
+        self.id = id
+        self.position = CodablePoint(position)
+        self.size = CodablePoint(CGPoint(x: size.width, y: size.height))
+        self.imageData = imageData
+    }
+
+    var cgPosition: CGPoint { position.cgPoint }
+    var cgSize: CGSize { CGSize(width: size.cgPoint.x, height: size.cgPoint.y) }
+}
+
 struct FillRegion: Identifiable, Codable {
     var id = UUID()
     let path: CodablePath
@@ -243,7 +260,7 @@ struct LaserSettings {
     var size: CGFloat = 1.5
 }
 
-typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>, laserStrokes: [(points: [CGPoint], time: Date, isRetained: Bool)])
+typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>, selectedImageIds: Set<UUID>, laserStrokes: [(points: [CGPoint], time: Date, isRetained: Bool)])
 
 class DrawingModel: ObservableObject {
     @Published var strokes: [Stroke] = []
@@ -626,6 +643,8 @@ class DrawingModel: ObservableObject {
         saveState()
         strokes = save.strokes
         fillRegions = save.fillRegions
+        placedImages = save.placedImages
+        imageCache.removeAll()
         currentBoardId = id
         openFileURL = url
         updateUndoRedo()
@@ -670,18 +689,22 @@ class DrawingModel: ObservableObject {
     @Published var selectionBoundary: [CGPoint] = []
     @Published var selectedStrokeIds: Set<UUID> = []
     @Published var selectedFillIds: Set<UUID> = []
+    @Published var selectedImageIds: Set<UUID> = []
+    @Published var placedImages: [PlacedImage] = []
+    var imageCache: [UUID: Any] = [:]  // UIImage on iOS, NSImage on macOS
     @Published var fillLassoPoints: [CGPoint] = []
     var laserTail: [(point: CGPoint, time: Date)] = []
     var laserPointer: CGPoint?
     var laserTailFadeStart: Date?
     var persistentLaserStrokes: [(points: [CGPoint], time: Date, isRetained: Bool)] = []
+    var lastCanvasTapLocation: CGPoint = .zero
     var laserTailFading: Bool { laserTailFadeStart != nil }
 
     private var undoStack: [CanvasSnapshot] = []
     private var redoStack: [CanvasSnapshot] = []
 
     private func saveState() {
-        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, persistentLaserStrokes))
+        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, selectedImageIds, persistentLaserStrokes))
         redoStack.removeAll()
         canUndo = true
         canRedo = false
@@ -736,6 +759,8 @@ class DrawingModel: ObservableObject {
     }
 
     func addLassoPoint(_ point: CGPoint) {
+        // Skip if too close to the last point (avoids accidental lassos from stationary taps)
+        if let last = selectionLasso.last, last.distance(to: point) < 5 { return }
         selectionLasso.append(point)
     }
 
@@ -753,6 +778,7 @@ class DrawingModel: ObservableObject {
 
         selectedStrokeIds.removeAll()
         selectedFillIds.removeAll()
+        selectedImageIds.removeAll()
 
         for stroke in strokes where !stroke.isEraser {
             for p in stroke.points {
@@ -768,6 +794,14 @@ class DrawingModel: ObservableObject {
             let center = CGPoint(x: box.midX, y: box.midY)
             if path.contains(center) || path.contains(box.origin) {
                 selectedFillIds.insert(region.id)
+            }
+        }
+
+        for img in placedImages {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            let center = CGPoint(x: rect.midX, y: rect.midY)
+            if path.contains(center) || path.contains(rect.origin) {
+                selectedImageIds.insert(img.id)
             }
         }
 
@@ -850,6 +884,10 @@ class DrawingModel: ObservableObject {
     // MARK: - Move Selection
 
     var isMoving: Bool = false
+    var isResizing: Bool = false
+    var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft
+    var resizeImageId: UUID?
+    var resizeStartRect: CGRect = .zero
     var lastMovePoint: CGPoint = .zero
     private var moveDidChange: Bool = false
 
@@ -864,14 +902,56 @@ class DrawingModel: ObservableObject {
         for r in fillRegions where selectedFillIds.contains(r.id) {
             if r.cgPath.contains(point) { return true }
         }
+        for img in placedImages where selectedImageIds.contains(img.id) {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            if rect.contains(point) { return true }
+        }
         return false
+    }
+
+    func hitTestImage(_ point: CGPoint) -> UUID? {
+        for img in placedImages {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            if rect.contains(point) { return img.id }
+        }
+        return nil
     }
 
     func isPointInSelectionBoundary(_ point: CGPoint) -> Bool {
         pointInPolygon(point, selectionBoundary)
     }
 
+    func hitTestResizeHandle(_ point: CGPoint) -> (imgId: UUID, corner: Int)? {
+        let handleSize: CGFloat = 20
+        for img in placedImages where selectedImageIds.contains(img.id) {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            let handles: [(CGPoint, Int)] = [
+                (CGPoint(x: rect.minX, y: rect.minY), 0),
+                (CGPoint(x: rect.maxX, y: rect.minY), 1),
+                (CGPoint(x: rect.maxX, y: rect.maxY), 2),
+                (CGPoint(x: rect.minX, y: rect.maxY), 3),
+            ]
+            for (pos, corner) in handles {
+                let hRect = CGRect(x: pos.x - handleSize / 2, y: pos.y - handleSize / 2, width: handleSize, height: handleSize)
+                if hRect.contains(point) { return (img.id, corner) }
+            }
+        }
+        return nil
+    }
+
     func beginMove(at point: CGPoint) {
+        // Check for resize handle hit on a selected image
+        if let hit = hitTestResizeHandle(point) {
+            isResizing = true
+            resizeCorner = hit.corner
+            resizeImageId = hit.imgId
+            lastMovePoint = point
+            moveDidChange = false
+            if let img = placedImages.first(where: { $0.id == hit.imgId }) {
+                resizeStartRect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            }
+            return
+        }
         // If there's a selection boundary and the tap is inside it, treat as move
         if !selectionBoundary.isEmpty && pointInPolygon(point, selectionBoundary) {
             isMoving = true
@@ -907,6 +987,14 @@ class DrawingModel: ObservableObject {
     }
 
     func commitMove() {
+        if isResizing {
+            isResizing = false
+            if moveDidChange {
+                saveState()
+                updateUndoRedo()
+            }
+            return
+        }
         guard isMoving else { return }
         isMoving = false
         if moveDidChange {
@@ -916,6 +1004,66 @@ class DrawingModel: ObservableObject {
     }
 
     func moveSelected(by offset: CGSize) {
+        if isResizing {
+            guard let imgId = resizeImageId, offset != .zero else { return }
+            moveDidChange = true
+            let start = resizeStartRect
+            let aspect = start.width / start.height
+            var newRect = start
+            // Lock aspect ratio: size changes driven by the larger drag axis
+            let dragX = abs(offset.width) >= abs(offset.height)
+            switch resizeCorner {
+            case 0: // top-left
+                if dragX {
+                    let newW = max(10, start.width - offset.width)
+                    let newH = newW / aspect
+                    newRect = CGRect(x: start.maxX - newW, y: start.maxY - newH, width: newW, height: newH)
+                } else {
+                    let newH = max(10, start.height - offset.height)
+                    let newW = newH * aspect
+                    newRect = CGRect(x: start.maxX - newW, y: start.maxY - newH, width: newW, height: newH)
+                }
+            case 1: // top-right
+                if dragX {
+                    let newW = max(10, start.width + offset.width)
+                    let newH = newW / aspect
+                    newRect = CGRect(x: start.minX, y: start.maxY - newH, width: newW, height: newH)
+                } else {
+                    let newH = max(10, start.height - offset.height)
+                    let newW = newH * aspect
+                    newRect = CGRect(x: start.minX, y: start.maxY - newH, width: newW, height: newH)
+                }
+            case 2: // bottom-right
+                if dragX {
+                    let newW = max(10, start.width + offset.width)
+                    let newH = newW / aspect
+                    newRect = CGRect(x: start.minX, y: start.minY, width: newW, height: newH)
+                } else {
+                    let newH = max(10, start.height + offset.height)
+                    let newW = newH * aspect
+                    newRect = CGRect(x: start.minX, y: start.minY, width: newW, height: newH)
+                }
+            case 3: // bottom-left
+                if dragX {
+                    let newW = max(10, start.width - offset.width)
+                    let newH = newW / aspect
+                    newRect = CGRect(x: start.maxX - newW, y: start.minY, width: newW, height: newH)
+                } else {
+                    let newH = max(10, start.height + offset.height)
+                    let newW = newH * aspect
+                    newRect = CGRect(x: start.maxX - newW, y: start.minY, width: newW, height: newH)
+                }
+            default: break
+            }
+            if newRect.width >= 10 && newRect.height >= 10 {
+                placedImages = placedImages.map { img in
+                    guard img.id == imgId else { return img }
+                    return PlacedImage(id: img.id, position: newRect.origin, size: newRect.size, imageData: img.imageData)
+                }
+                resizeStartRect = newRect
+            }
+            return
+        }
         guard isMoving, offset != .zero else { return }
         moveDidChange = true
         strokes = strokes.map { s in
@@ -928,6 +1076,10 @@ class DrawingModel: ObservableObject {
             var t = CGAffineTransform(translationX: offset.width, y: offset.height)
             let newPath = r.cgPath.copy(using: &t) ?? r.cgPath
             return FillRegion(id: r.id, path: newPath, color: r.uiColor)
+        }
+        placedImages = placedImages.map { img in
+            guard selectedImageIds.contains(img.id) else { return img }
+            return PlacedImage(id: img.id, position: CGPoint(x: img.cgPosition.x + offset.width, y: img.cgPosition.y + offset.height), size: img.cgSize, imageData: img.imageData)
         }
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) }
@@ -1002,11 +1154,14 @@ class DrawingModel: ObservableObject {
 
     func deleteSelected() {
         saveState()
-        if !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty {
+        if !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty || !selectedImageIds.isEmpty {
             strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
             fillRegions = fillRegions.filter { !selectedFillIds.contains($0.id) }
+            for id in selectedImageIds { imageCache.removeValue(forKey: id) }
+            placedImages = placedImages.filter { !selectedImageIds.contains($0.id) }
             selectedStrokeIds.removeAll()
             selectedFillIds.removeAll()
+            selectedImageIds.removeAll()
         }
         selectionBoundary.removeAll()
         updateUndoRedo()
@@ -1066,6 +1221,181 @@ class DrawingModel: ObservableObject {
         self.scheduleAutoSave()
     }
 
+    // MARK: - Copy / Paste
+
+    func copySelected() {
+        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty || !selectedImageIds.isEmpty else { return }
+        let copiedStrokes = try? JSONEncoder().encode(strokes.filter { selectedStrokeIds.contains($0.id) })
+        let copiedFills = try? JSONEncoder().encode(fillRegions.filter { selectedFillIds.contains($0.id) })
+        let copiedImages = try? JSONEncoder().encode(placedImages.filter { selectedImageIds.contains($0.id) })
+        let data: [String: Any] = [
+            "strokes": copiedStrokes ?? Data(),
+            "fills": copiedFills ?? Data(),
+            "images": copiedImages ?? Data(),
+            "boundary": (try? JSONEncoder().encode(selectionBoundary)) ?? Data(),
+        ]
+        #if os(iOS)
+        UIPasteboard.general.items = [data as [String: Any]]
+        #else
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        // Convert Data values to base64 strings for JSONSerialization compatibility
+        let stringData: [String: String] = [
+            "strokes": (copiedStrokes ?? Data()).base64EncodedString(),
+            "fills": (copiedFills ?? Data()).base64EncodedString(),
+            "images": (copiedImages ?? Data()).base64EncodedString(),
+            "boundary": ((try? JSONEncoder().encode(selectionBoundary)) ?? Data()).base64EncodedString(),
+        ]
+        if let json = try? JSONSerialization.data(withJSONObject: stringData, options: .fragmentsAllowed) {
+            pb.setData(json, forType: .string)
+        }
+        #endif
+    }
+
+    func paste() {
+        #if os(iOS)
+        guard let item = UIPasteboard.general.items.first else { return }
+        let strokesData = item["strokes"] as? Data ?? Data()
+        let fillsData = item["fills"] as? Data ?? Data()
+        let imagesData = item["images"] as? Data ?? Data()
+        let boundaryData = item["boundary"] as? Data ?? Data()
+        #else
+        guard let json = NSPasteboard.general.data(forType: .string),
+              let item = try? JSONSerialization.jsonObject(with: json) as? [String: String] else { return }
+        let strokesData = Data(base64Encoded: item["strokes"] ?? "") ?? Data()
+        let fillsData = Data(base64Encoded: item["fills"] ?? "") ?? Data()
+        let imagesData = Data(base64Encoded: item["images"] ?? "") ?? Data()
+        let boundaryData = Data(base64Encoded: item["boundary"] ?? "") ?? Data()
+        #endif
+
+        saveState()
+
+        // Compute offset to paste at the last tap location
+        let pasteOrigin = lastCanvasTapLocation == .zero ? CGPoint(x: 100, y: 100) : lastCanvasTapLocation
+
+        // Compute unified bounding box of all pasted content
+        var minX = CGFloat.infinity, minY = CGFloat.infinity
+        if let pastedStrokes2 = try? JSONDecoder().decode([Stroke].self, from: strokesData) {
+            for s in pastedStrokes2 {
+                for p in s.points {
+                    if p.x < minX { minX = p.x }
+                    if p.y < minY { minY = p.y }
+                }
+            }
+        }
+        if let pastedFills2 = try? JSONDecoder().decode([FillRegion].self, from: fillsData) {
+            for r in pastedFills2 {
+                let box = r.cgPath.boundingBox
+                if box.minX < minX { minX = box.minX }
+                if box.minY < minY { minY = box.minY }
+            }
+        }
+        if let pastedImages2 = try? JSONDecoder().decode([PlacedImage].self, from: imagesData) {
+            for img in pastedImages2 {
+                if img.cgPosition.x < minX { minX = img.cgPosition.x }
+                if img.cgPosition.y < minY { minY = img.cgPosition.y }
+            }
+        }
+        let dx = (minX == .infinity) ? 0 : pasteOrigin.x - minX
+        let dy = (minY == .infinity) ? 0 : pasteOrigin.y - minY
+
+        var pastedStrokeIds = Set<UUID>()
+        var pastedFillIds = Set<UUID>()
+        var pastedImageIds = Set<UUID>()
+
+        if let pastedStrokes = try? JSONDecoder().decode([Stroke].self, from: strokesData) {
+            for s in pastedStrokes {
+                let newPoints = s.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+                let newStroke = Stroke(points: newPoints, color: s.uiColor, lineWidth: s.lineWidth, isEraser: false, isHighlighter: s.isHighlighter, presetIndex: s.presetIndex, isCatmullRom: s.isCatmullRom)
+                pastedStrokeIds.insert(newStroke.id)
+                strokes.append(newStroke)
+            }
+        }
+        if let pastedFills = try? JSONDecoder().decode([FillRegion].self, from: fillsData) {
+            for r in pastedFills {
+                var t = CGAffineTransform(translationX: dx, y: dy)
+                let newPath = r.cgPath.copy(using: &t) ?? r.cgPath
+                let newFill = FillRegion(path: newPath, color: r.uiColor, presetIndex: r.presetIndex)
+                pastedFillIds.insert(newFill.id)
+                fillRegions.append(newFill)
+            }
+        }
+        if let pastedImages = try? JSONDecoder().decode([PlacedImage].self, from: imagesData) {
+            for img in pastedImages {
+                let newPos = CGPoint(x: img.cgPosition.x + dx, y: img.cgPosition.y + dy)
+                let newImg = PlacedImage(position: newPos, size: img.cgSize, imageData: img.imageData)
+                pastedImageIds.insert(newImg.id)
+                placedImages.append(newImg)
+            }
+        }
+        // Select pasted items so they can be moved immediately
+        selectedStrokeIds = pastedStrokeIds
+        selectedFillIds = pastedFillIds
+        selectedImageIds = pastedImageIds
+        // Restore selection boundary from copied boundary polygon
+        if let boundary = try? JSONDecoder().decode([CGPoint].self, from: boundaryData), !boundary.isEmpty {
+            selectionBoundary = boundary.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+        } else {
+            selectionBoundary.removeAll()
+        }
+    }
+
+    func addImage(url: URL) {
+        guard let data = try? Data(contentsOf: url) else { return }
+        #if os(iOS)
+        guard let uiImg = UIImage(data: data) else { return }
+        let originalSize = uiImg.size
+        #else
+        guard let nsImg = NSImage(data: data) else { return }
+        let originalSize = nsImg.size
+        #endif
+        let maxWidth: CGFloat = 400
+        let aspect = originalSize.height / originalSize.width
+        let finalSize = CGSize(width: min(originalSize.width, maxWidth), height: min(originalSize.width, maxWidth) * aspect)
+        // Resize image data to display size so rendering is fast
+        let resizedData: Data = {
+            #if os(iOS)
+            let s = UIScreen.main.scale
+            UIGraphicsBeginImageContextWithOptions(finalSize, false, s)
+            uiImg.draw(in: CGRect(origin: .zero, size: finalSize))
+            let resized = UIGraphicsGetImageFromCurrentImageContext()
+            UIGraphicsEndImageContext()
+            return resized?.pngData() ?? data
+            #else
+            let resized = NSImage(size: finalSize)
+            resized.lockFocus()
+            nsImg.draw(in: NSRect(origin: .zero, size: finalSize), from: NSRect(origin: .zero, size: nsImg.size), operation: .copy, fraction: 1)
+            resized.unlockFocus()
+            if let tiffData = resized.tiffRepresentation {
+                let bitmap = NSBitmapImageRep(data: tiffData)
+                if let pngData = bitmap?.representation(using: .png, properties: [:]) { return pngData }
+            }
+            return data
+            #endif
+        }()
+        let pos = lastCanvasTapLocation == .zero ? CGPoint(x: 100, y: 100) : lastCanvasTapLocation
+        saveState()
+        let img = PlacedImage(position: pos, size: finalSize, imageData: resizedData)
+        placedImages.append(img)
+        // Auto-select the newly imported image and switch to selection tool
+        selectTool(.select)
+        selectedImageIds = [img.id]
+        selectedStrokeIds.removeAll()
+        selectedFillIds.removeAll()
+        selectionBoundary.removeAll()
+        updateUndoRedo()
+    }
+
+    func resizeSelectedImages(by factor: CGFloat) {
+        guard !selectedImageIds.isEmpty else { return }
+        saveState()
+        placedImages = placedImages.map { img in
+            guard selectedImageIds.contains(img.id) else { return img }
+            return PlacedImage(id: img.id, position: img.cgPosition, size: CGSize(width: img.cgSize.width * factor, height: img.cgSize.height * factor), imageData: img.imageData)
+        }
+        updateUndoRedo()
+    }
+
     // MARK: - Fill
 
     func performFill(at canvasPoint: CGPoint) {
@@ -1084,6 +1414,7 @@ class DrawingModel: ObservableObject {
         if tool != .select {
             selectedStrokeIds.removeAll()
             selectedFillIds.removeAll()
+            selectedImageIds.removeAll()
             selectionBoundary.removeAll()
         }
         if tool != .laser {
@@ -1102,24 +1433,26 @@ class DrawingModel: ObservableObject {
 
     func undo() {
         guard !undoStack.isEmpty else { return }
-        redoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, persistentLaserStrokes))
+        redoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, selectedImageIds, persistentLaserStrokes))
         let prev = undoStack.removeLast()
         strokes = prev.strokes
         fillRegions = prev.fillRegions
         selectedStrokeIds = prev.selectedStrokeIds
         selectedFillIds = prev.selectedFillIds
+        selectedImageIds = prev.selectedImageIds
         persistentLaserStrokes = prev.laserStrokes
         updateUndoRedo()
     }
 
     func redo() {
         guard !redoStack.isEmpty else { return }
-        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, persistentLaserStrokes))
+        undoStack.append((strokes, fillRegions, selectedStrokeIds, selectedFillIds, selectedImageIds, persistentLaserStrokes))
         let next = redoStack.removeLast()
         strokes = next.strokes
         fillRegions = next.fillRegions
         selectedStrokeIds = next.selectedStrokeIds
         selectedFillIds = next.selectedFillIds
+        selectedImageIds = next.selectedImageIds
         persistentLaserStrokes = next.laserStrokes
         updateUndoRedo()
     }
@@ -1128,10 +1461,13 @@ class DrawingModel: ObservableObject {
         saveState()
         strokes.removeAll()
         fillRegions.removeAll()
+        placedImages.removeAll()
+        imageCache.removeAll()
         persistentLaserStrokes.removeAll()
         currentStroke = nil
         selectedStrokeIds.removeAll()
         selectedFillIds.removeAll()
+        selectedImageIds.removeAll()
         selectionLasso.removeAll()
         selectionBoundary.removeAll()
         undoStack.removeAll()
@@ -1144,20 +1480,44 @@ class DrawingModel: ObservableObject {
     private struct SaveData: Codable {
         let strokes: [Stroke]
         let fillRegions: [FillRegion]
+        let placedImages: [PlacedImage]
+
+        enum CodingKeys: String, CodingKey {
+            case strokes, fillRegions, placedImages
+        }
+
+        init(strokes: [Stroke], fillRegions: [FillRegion], placedImages: [PlacedImage]) {
+            self.strokes = strokes
+            self.fillRegions = fillRegions
+            self.placedImages = placedImages
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            strokes = try c.decode([Stroke].self, forKey: .strokes)
+            fillRegions = try c.decode([FillRegion].self, forKey: .fillRegions)
+            placedImages = try c.decodeIfPresent([PlacedImage].self, forKey: .placedImages) ?? []
+        }
     }
 
     func saveData() -> Data? {
-        let data = SaveData(strokes: strokes, fillRegions: fillRegions)
+        let data = SaveData(strokes: strokes, fillRegions: fillRegions, placedImages: placedImages)
         return try? JSONEncoder().encode(data)
     }
 
     func loadData(_ data: Data) {
-        guard let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return }
-        saveState()
-        strokes = save.strokes
-        fillRegions = save.fillRegions
-        migratePresetIndices()
-        updateUndoRedo()
+        do {
+            let save = try JSONDecoder().decode(SaveData.self, from: data)
+            saveState()
+            strokes = save.strokes
+            fillRegions = save.fillRegions
+            placedImages = save.placedImages
+            imageCache.removeAll()
+            migratePresetIndices()
+            updateUndoRedo()
+        } catch {
+            print("[loadData] error: \(error)")
+        }
     }
 
     private func migratePresetIndices() {
@@ -1211,6 +1571,7 @@ class DrawingModel: ObservableObject {
     enum PendingAction: Equatable {
         case open
         case export(ExportFormat)
+        case importImage
     }
 
     enum ExportFormat: String { case png, pdf }
@@ -1248,6 +1609,16 @@ class DrawingModel: ObservableObject {
             ctx.beginPath()
             ctx.addPath(r.cgPath)
             ctx.fillPath()
+        }
+
+        // Render placed images
+        for img in placedImages {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            #if os(iOS)
+            if let uiImg = UIImage(data: img.imageData) {
+                uiImg.draw(in: rect)
+            }
+            #endif
         }
 
         // Render highlighter strokes as a group with uniform opacity
