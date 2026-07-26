@@ -14,6 +14,11 @@ struct ContentView: View {
     @State private var showingExporter = false
     @State private var showHelp = false
     @State private var showSettingsSidebar = false
+    @State private var showRecordingPicker = false
+    @State private var showRecordingShare = false
+    @State private var showRecordingSave = false
+    @State private var recordingFileURL: URL?
+    @State private var recordingExportData: Data?
     @State private var exportFormat: ExportFormat = .wb
     @State private var exportData: Data?
     @State private var exportName = "Untitled"
@@ -153,6 +158,27 @@ struct ContentView: View {
             } message: {
                 Text("This will permanently delete all strokes, fills, and laser annotations.")
             }
+            .sheet(isPresented: $showRecordingShare) {
+                if let url = recordingFileURL {
+                    #if os(iOS)
+                    ShareSheet(items: [url])
+                    #else
+                    Text("Recording saved to \(url.lastPathComponent)")
+                        .padding()
+                    #endif
+                }
+            }
+            #if os(macOS)
+            .fileExporter(isPresented: $showRecordingSave, document: ExportDocument(data: recordingExportData ?? Data()), contentType: .mpeg4Movie, defaultFilename: "Doodles_Recording.mp4") { result in
+                if case .success = result {
+                    if let tempURL = recordingFileURL {
+                        try? FileManager.default.removeItem(at: tempURL)
+                    }
+                }
+                recordingFileURL = nil
+                recordingExportData = nil
+            }
+            #endif
     }
 
     private var shortcutButtons: some View {
@@ -333,6 +359,27 @@ struct ContentView: View {
                 .frame(height: 24)
 
             settingsMenu
+
+            Divider()
+                .frame(height: 24)
+
+            // Record button
+            Button(action: {
+                if model.isRecording {
+                    stopRecordingAndShare()
+                } else {
+                    showRecordingPicker = true
+                }
+            }) {
+                Image(systemName: model.isRecording ? "stop.circle.fill" : "record.circle")
+                    .font(.title3)
+                    .frame(width: 32, height: 32)
+                    .foregroundColor(model.isRecording ? .red : .primary)
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showRecordingPicker, arrowEdge: .bottom) {
+                recordingPickerContent
+            }
         }
         .buttonStyle(.plain)
         .padding(5)
@@ -600,7 +647,73 @@ struct ContentView: View {
             CGPoint(x: minX - pad, y: minY - pad)
         )
     }
+
+    // MARK: - Recording
+
+    private var recordingPickerContent: some View {
+        VStack(spacing: 12) {
+            Text("Record Canvas").font(.headline)
+
+            Picker("Format", selection: $model.recordingAspect) {
+                ForEach(DrawingModel.RecordingAspect.allCases, id: \.self) { aspect in
+                    Text(aspect.rawValue).tag(aspect)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Picker("Orientation", selection: $model.recordingOrientation) {
+                ForEach(DrawingModel.RecordingOrientation.allCases, id: \.self) { orient in
+                    Label(orient.rawValue, systemImage: orient == .landscape ? "rectangle" : "rectangle.split.1x2").tag(orient)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Button(action: startRecording) {
+                Label("Start Recording", systemImage: "record.circle")
+                    .font(.body)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+        }
+        .padding()
+        .frame(width: 260)
+    }
+
+    private func startRecording() {
+        showRecordingPicker = false
+        guard let url = model.startRecording() else { return }
+        recordingFileURL = url
+        // Find the CanvasView to start its display link
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // The CanvasView observes model.isRecording and starts its display link
+        }
+    }
+
+    func stopRecordingAndShare() {
+        model.stopRecording { [self] in
+            #if os(macOS)
+            if let url = recordingFileURL {
+                self.recordingExportData = try? Data(contentsOf: url)
+            }
+            self.showRecordingSave = true
+            #else
+            self.showRecordingShare = true
+            #endif
+        }
+    }
 }
+
+#if os(iOS)
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+#endif
 
 extension View {
     @ViewBuilder

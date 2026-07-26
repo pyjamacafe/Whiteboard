@@ -18,6 +18,11 @@ struct CanvasView: UIViewRepresentable {
 
     func updateUIView(_ uiView: DrawingCanvasView, context: Context) {
         uiView.model = model
+        if model.isRecording {
+            uiView.startRecordingDisplay()
+        } else {
+            uiView.stopRecordingDisplay()
+        }
         uiView.refresh()
         uiView.onBeginDraw = onBeginDraw
     }
@@ -391,6 +396,35 @@ class StrokeLayerView: UIView {
             ctx.restoreGState()
         }
 
+        // Recording guide overlay
+        if model.isRecording {
+            let viewW = bounds.width / scale
+            let viewH = bounds.height / scale
+            let recRect = model.recordingCanvasRect(viewportSize: bounds.size, viewScale: scale)
+
+            ctx.saveGState()
+            ctx.setStrokeColor(UIColor.red.cgColor)
+            ctx.setLineWidth(2 / scale)
+            ctx.setLineDash(phase: 0, lengths: [6 / scale, 4 / scale])
+            ctx.stroke(recRect.insetBy(dx: 1 / scale, dy: 1 / scale))
+            // Semi-transparent mask outside the recording area
+            ctx.setFillColor(UIColor.black.withAlphaComponent(0.2).cgColor)
+            if recRect.minY > 0 { ctx.fill(CGRect(x: 0, y: 0, width: viewW, height: recRect.minY)) }
+            if recRect.maxY < viewH { ctx.fill(CGRect(x: 0, y: recRect.maxY, width: viewW, height: viewH - recRect.maxY)) }
+            if recRect.minX > 0 { ctx.fill(CGRect(x: 0, y: recRect.minY, width: recRect.minX, height: recRect.height)) }
+            if recRect.maxX < viewW { ctx.fill(CGRect(x: recRect.maxX, y: recRect.minY, width: viewW - recRect.maxX, height: recRect.height)) }
+            ctx.restoreGState()
+
+            // Record indicator (red dot in top-right)
+            let dotSize: CGFloat = 10 / scale
+            let dotX = viewW - dotSize * 3
+            let dotY = dotSize * 2
+            ctx.saveGState()
+            ctx.setFillColor(UIColor.red.cgColor)
+            ctx.fillEllipse(in: CGRect(x: dotX, y: dotY, width: dotSize, height: dotSize))
+            ctx.restoreGState()
+        }
+
         ctx.restoreGState()
     }
 
@@ -505,6 +539,8 @@ class DrawingCanvasView: UIView {
     private let strokeLayer = StrokeLayerView()
     private var dashPhase: CGFloat = 0
     private var displayLink: CADisplayLink?
+    private var recordingLink: CADisplayLink?
+    private var recordingFrameSkip = 0
 
     private func startDashAnimation() {
         guard displayLink == nil else { return }
@@ -516,6 +552,28 @@ class DrawingCanvasView: UIView {
     private func stopDashAnimation() {
         displayLink?.invalidate()
         displayLink = nil
+    }
+
+    func startRecordingDisplay() {
+        guard let model = model, model.isRecording, recordingLink == nil else { return }
+        model.setupRecordingWriter(viewSize: bounds.size, viewScale: scale, screenScale: UIScreen.main.scale)
+        let link = CADisplayLink(target: self, selector: #selector(stepRecording(_:)))
+        link.preferredFramesPerSecond = 30
+        link.add(to: .main, forMode: .common)
+        recordingLink = link
+    }
+
+    func stopRecordingDisplay() {
+        recordingLink?.invalidate()
+        recordingLink = nil
+    }
+
+    @objc private func stepRecording(_ link: CADisplayLink) {
+        guard let model = model, model.isRecording else {
+            stopRecordingDisplay()
+            return
+        }
+        model.captureFrame(offset: offset, scale: scale)
     }
 
     @objc private func stepDash(_ link: CADisplayLink) {
@@ -1179,6 +1237,19 @@ struct CanvasView: View {
                     context.fill(core, with: .color(lc))
                 }
 
+                // Recording guide overlay (macOS)
+                if model.isRecording, let viewSize = viewSize {
+                    let recRect = model.recordingCanvasRect(viewportSize: viewSize, viewScale: scale)
+                    context.stroke(Path(recRect.insetBy(dx: 1, dy: 1)), with: .color(.red.opacity(0.8)),
+                                  style: StrokeStyle(lineWidth: 2 * scale, lineCap: .round, lineJoin: .round, dash: [6, 4], dashPhase: 0))
+                    if recRect.minY > 0 { context.fill(Path(CGRect(x: 0, y: 0, width: viewSize.width, height: recRect.minY)), with: .color(.black.opacity(0.15))) }
+                    if recRect.maxY < viewSize.height { context.fill(Path(CGRect(x: 0, y: recRect.maxY, width: viewSize.width, height: viewSize.height - recRect.maxY)), with: .color(.black.opacity(0.15))) }
+                    if recRect.minX > 0 { context.fill(Path(CGRect(x: 0, y: recRect.minY, width: recRect.minX, height: recRect.height)), with: .color(.black.opacity(0.15))) }
+                    if recRect.maxX < viewSize.width { context.fill(Path(CGRect(x: recRect.maxX, y: recRect.minY, width: viewSize.width - recRect.maxX, height: recRect.height)), with: .color(.black.opacity(0.15))) }
+                    let dotSize: CGFloat = 10 * scale
+                    context.fill(Path(ellipseIn: CGRect(x: viewSize.width - dotSize * 3, y: dotSize * 2, width: dotSize, height: dotSize)), with: .color(.red))
+                }
+
                 if let loc = hoverLocation {
                     let dotSize: CGFloat = model.currentTool == .eraser ? model.eraserSettings.size : model.currentTool == .pen ? model.penSettings.thickness : 4
                     let dot = Path(ellipseIn: CGRect(
@@ -1320,6 +1391,14 @@ struct CanvasView: View {
             .onReceive(Timer.publish(every: 1/30, on: .main, in: .common).autoconnect()) { _ in
                 if !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty {
                     macDashPhase += 1
+                }
+                // macOS recording frame capture
+                if model.isRecording {
+                    if let vs = viewSize, !model.isRecordingWriterReady {
+                        let ss = NSScreen.main?.backingScaleFactor ?? 2
+                        model.setupRecordingWriter(viewSize: vs, viewScale: scale, screenScale: ss)
+                    }
+                    model.captureFrame(offset: offset, scale: scale)
                 }
             }
             .onReceive(model.$needsRecenter) { needs in

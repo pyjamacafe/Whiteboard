@@ -1,6 +1,7 @@
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
+import AVFoundation
 #if os(macOS)
 import AppKit
 typealias PlatformImage = NSImage
@@ -263,6 +264,13 @@ struct LaserSettings {
 typealias CanvasSnapshot = (strokes: [Stroke], fillRegions: [FillRegion], selectedStrokeIds: Set<UUID>, selectedFillIds: Set<UUID>, selectedImageIds: Set<UUID>, laserStrokes: [(points: [CGPoint], time: Date, isRetained: Bool)])
 
 class DrawingModel: ObservableObject {
+    enum RecordingAspect: String, CaseIterable {
+        case widescreen = "16:9", square = "1:1", vertical = "9:16"
+    }
+    enum RecordingOrientation: String, CaseIterable {
+        case landscape = "Landscape", portrait = "Portrait"
+    }
+
     @Published var strokes: [Stroke] = []
     @Published var fillRegions: [FillRegion] = []
     @Published var currentTool: Tool = .pen
@@ -699,6 +707,44 @@ class DrawingModel: ObservableObject {
     var persistentLaserStrokes: [(points: [CGPoint], time: Date, isRetained: Bool)] = []
     var lastCanvasTapLocation: CGPoint = .zero
     var laserTailFading: Bool { laserTailFadeStart != nil }
+
+    @Published var isRecording = false
+    @Published var recordingAspect: RecordingAspect = .widescreen
+    @Published var recordingOrientation: RecordingOrientation = .landscape
+    var recordingViewSize: CGSize = .zero
+    private var recordingScale: CGFloat = 2
+    var isRecordingWriterReady: Bool { recordingAssetWriter != nil }
+    private var recordingAssetWriter: AVAssetWriter?
+    private var recordingInput: AVAssetWriterInput?
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var recordingURL: URL?
+    private var recordingFrameCount = 0
+
+    private var recordingAspectRatio: CGFloat {
+        switch recordingAspect {
+        case .widescreen: return 16.0 / 9.0
+        case .square: return 1.0
+        case .vertical: return 9.0 / 16.0
+        }
+    }
+
+    func recordingCanvasRect(viewportSize: CGSize, viewScale: CGFloat) -> CGRect {
+        let viewW = viewportSize.width / viewScale
+        let viewH = viewportSize.height / viewScale
+        let aspect = recordingOrientation == .landscape ? recordingAspectRatio : 1.0 / recordingAspectRatio
+        var rw = viewW
+        var rh = rw / aspect
+        if rh > viewH {
+            rh = viewH
+            rw = rh * aspect
+        }
+        return CGRect(x: (viewW - rw) / 2, y: (viewH - rh) / 2, width: rw, height: rh)
+    }
+
+    func recordingPixelSize(viewportSize: CGSize, viewScale: CGFloat, screenScale: CGFloat) -> CGSize {
+        let rect = recordingCanvasRect(viewportSize: viewportSize, viewScale: viewScale)
+        return CGSize(width: rect.width * viewScale * screenScale, height: rect.height * viewScale * screenScale)
+    }
 
     private var undoStack: [CanvasSnapshot] = []
     private var redoStack: [CanvasSnapshot] = []
@@ -1760,5 +1806,139 @@ class DrawingModel: ObservableObject {
         #else
         return UIImage(cgImage: cgImage)
         #endif
+    }
+
+    // MARK: - Screen Recording
+
+    func startRecording() -> URL? {
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileName = "Doodles_Recording_\(UUID().uuidString.prefix(8)).mp4"
+        let url = tempDir.appendingPathComponent(fileName)
+        recordingURL = url
+        isRecording = true
+        return url
+    }
+
+    func setupRecordingWriter(viewSize: CGSize, viewScale: CGFloat, screenScale: CGFloat) {
+        recordingViewSize = viewSize
+        recordingScale = screenScale
+        guard recordingAssetWriter == nil else { return }
+        // Use the current view scale to compute pixel dimensions at recording start.
+        // The resolution is locked once recording begins.
+        let pixSize = recordingPixelSize(viewportSize: viewSize, viewScale: viewScale, screenScale: screenScale)
+        let w = Int(pixSize.width), h = Int(pixSize.height)
+        guard w > 0, h > 0, let url = recordingURL else { return }
+        guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return }
+        recordingAssetWriter = writer
+
+        let outputSettings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: w,
+            AVVideoHeightKey: h,
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: outputSettings)
+        input.expectsMediaDataInRealTime = true
+        recordingInput = input
+
+        let sourceBufferAttrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: w,
+            kCVPixelBufferHeightKey as String: h,
+        ]
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: sourceBufferAttrs)
+        pixelBufferAdaptor = adaptor
+
+        guard writer.canAdd(input) else { recordingAssetWriter = nil; return }
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        recordingFrameCount = 0
+    }
+
+    func stopRecording(completion: @escaping () -> Void = {}) {
+        isRecording = false
+        recordingInput?.markAsFinished()
+        recordingAssetWriter?.finishWriting { [weak self] in
+            DispatchQueue.main.async {
+                self?.recordingAssetWriter = nil
+                self?.recordingInput = nil
+                self?.pixelBufferAdaptor = nil
+                completion()
+            }
+        }
+    }
+
+    func captureFrame(offset: CGSize, scale: CGFloat) {
+        guard isRecording, let input = recordingInput, let adaptor = pixelBufferAdaptor else { return }
+        guard input.isReadyForMoreMediaData else { return }
+
+        // Recording rect in canvas coordinates
+        let viewport = recordingViewSize
+        let canvasRect = recordingCanvasRect(viewportSize: viewport, viewScale: scale)
+        let pixSize = recordingPixelSize(viewportSize: viewport, viewScale: scale, screenScale: recordingScale)
+        let w = Int(pixSize.width), h = Int(pixSize.height)
+        guard w > 0, h > 0 else { return }
+
+        // Render to a temporary bitmap context
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        guard let renderCtx = CGContext(
+            data: &pixels, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return }
+
+        let isDark = appSettings.isDarkMode
+        renderCtx.setFillColor((isDark ? CGColor(red: 28/255, green: 28/255, blue: 30/255, alpha: 1) : CGColor(gray: 1, alpha: 1)))
+        renderCtx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+
+        // Map recording canvas rect to fill the pixel buffer
+        renderCtx.translateBy(x: -canvasRect.minX, y: CGFloat(h) + canvasRect.minY)
+        renderCtx.scaleBy(x: scale * recordingScale, y: -scale * recordingScale)
+
+        for r in fillRegions {
+            renderCtx.setFillColor(r.uiColor.cgColor ?? CGColor(gray: 0.5, alpha: 1))
+            renderCtx.beginPath(); renderCtx.addPath(r.cgPath); renderCtx.fillPath()
+        }
+        for img in placedImages {
+            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            #if os(iOS)
+            if let cgImg = UIImage(data: img.imageData)?.cgImage { renderCtx.draw(cgImg, in: rect) }
+            #endif
+        }
+        if strokes.contains(where: \.isHighlighter) {
+            renderCtx.saveGState()
+            renderCtx.setAlpha(CGFloat(highlighterSettings.opacity))
+            renderCtx.beginTransparencyLayer(auxiliaryInfo: nil)
+            for s in strokes where s.isHighlighter { renderStrokeForExport(s, ctx: renderCtx) }
+            renderCtx.endTransparencyLayer()
+            renderCtx.restoreGState()
+        }
+        for s in strokes where !s.isHighlighter { renderStrokeForExport(s, ctx: renderCtx) }
+
+        guard let cgImage = renderCtx.makeImage() else { return }
+
+        // Create pixel buffer and copy the CGImage
+        var pixelBuffer: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+        ]
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, w, h, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pixelBuffer)
+        guard status == kCVReturnSuccess, let buffer = pixelBuffer else { return }
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
+        let bpr = CVPixelBufferGetBytesPerRow(buffer)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let bmpInfo = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue
+        if let bmpCtx = CGContext(data: base, width: w, height: h, bitsPerComponent: 8, bytesPerRow: bpr, space: cs, bitmapInfo: bmpInfo) {
+            bmpCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+
+        let frameTime = CMTime(value: CMTimeValue(recordingFrameCount), timescale: 30)
+        adaptor.append(buffer, withPresentationTime: frameTime)
+        recordingFrameCount += 1
     }
 }
