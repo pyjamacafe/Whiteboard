@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import AVFoundation
 #if os(iOS)
 import UIKit
 #endif
@@ -157,6 +158,9 @@ struct ContentView: View {
                 Button("Cancel", role: .cancel) { }
             } message: {
                 Text("This will permanently delete all strokes, fills, and laser annotations.")
+            }
+            .popover(isPresented: $showRecordingPicker, arrowEdge: .bottom) {
+                recordingPickerContent
             }
             .sheet(isPresented: $showRecordingShare) {
                 if let url = recordingFileURL {
@@ -359,27 +363,6 @@ struct ContentView: View {
                 .frame(height: 24)
 
             settingsMenu
-
-            Divider()
-                .frame(height: 24)
-
-            // Record button
-            Button(action: {
-                if model.isRecording {
-                    stopRecordingAndShare()
-                } else {
-                    showRecordingPicker = true
-                }
-            }) {
-                Image(systemName: model.isRecording ? "stop.circle.fill" : "record.circle")
-                    .font(.title3)
-                    .frame(width: 32, height: 32)
-                    .foregroundColor(model.isRecording ? .red : .primary)
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showRecordingPicker, arrowEdge: .bottom) {
-                recordingPickerContent
-            }
         }
         .buttonStyle(.plain)
         .padding(5)
@@ -580,6 +563,19 @@ struct ContentView: View {
                 Button(action: { showImporter = true }) { Label("Open", systemImage: "folder") }
             }
 
+            Section("Record") {
+                if model.isRecording {
+                    Button(action: stopRecordingAndShare) {
+                        Label("Stop Recording", systemImage: "stop.circle.fill")
+                    }
+                    .foregroundColor(.red)
+                } else {
+                    Button(action: { showRecordingPicker = true }) {
+                        Label("Record Canvas", systemImage: "record.circle")
+                    }
+                }
+            }
+
             Section {
                 Button(action: { showHelp = true }) { Label("Help", systemImage: "questionmark.circle") }
             }
@@ -661,6 +657,28 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
+            if let mgr = model.captureManager {
+                if !mgr.availableCameras.isEmpty {
+                    Picker("Camera", selection: $model.selectedCamera) {
+                        Text("None").tag(nil as AVCaptureDevice?)
+                        ForEach(mgr.availableCameras, id: \.uniqueID) { cam in
+                            Text(cam.localizedName).tag(cam as AVCaptureDevice?)
+                        }
+                    }
+                }
+                if !mgr.availableMicrophones.isEmpty {
+                    Picker("Microphone", selection: $model.selectedMicrophone) {
+                        Text("None").tag(nil as AVCaptureDevice?)
+                        ForEach(mgr.availableMicrophones, id: \.uniqueID) { mic in
+                            Text(mic.localizedName).tag(mic as AVCaptureDevice?)
+                        }
+                    }
+                }
+            }
+
+            Text("Preview appears on canvas when camera is selected")
+                .font(.caption).foregroundColor(.secondary)
+
             Button(action: startRecording) {
                 Label("Start Recording", systemImage: "record.circle")
                     .font(.body)
@@ -671,7 +689,37 @@ struct ContentView: View {
             .tint(.red)
         }
         .padding()
-        .frame(width: 260)
+        .frame(width: 300)
+        .onAppear {
+            setupCamera()
+        }
+        .onDisappear {
+            if !model.isRecording {
+                model.isCameraPreviewVisible = false
+                model.captureManager?.stop()
+            }
+        }
+        .onChange(of: model.selectedCamera) { _ in
+            restartCapture()
+        }
+        .onChange(of: model.selectedMicrophone) { _ in
+            restartCapture()
+        }
+    }
+
+    private func setupCamera() {
+        if model.captureManager == nil {
+            model.captureManager = CaptureManager()
+        }
+        model.isCameraPreviewVisible = true
+        model.captureManager?.start(camera: model.selectedCamera, microphone: model.selectedMicrophone)
+        // Refresh cameras/mics list
+        model.captureManager?.refreshDeviceList()
+    }
+
+    private func restartCapture() {
+        model.captureManager?.stop()
+        model.captureManager?.start(camera: model.selectedCamera, microphone: model.selectedMicrophone)
     }
 
     private func startRecording() {
@@ -685,6 +733,8 @@ struct ContentView: View {
     }
 
     func stopRecordingAndShare() {
+        model.isCameraPreviewVisible = false
+        model.captureManager?.stop()
         model.stopRecording { [self] in
             #if os(macOS)
             if let url = recordingFileURL {

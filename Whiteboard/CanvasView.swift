@@ -1,5 +1,21 @@
 import SwiftUI
 import Combine
+import AVFoundation
+#if os(iOS)
+import UIKit
+
+extension UIInterfaceOrientation {
+    var videoOrientation: AVCaptureVideoOrientation {
+        switch self {
+        case .portrait: return .portrait
+        case .portraitUpsideDown: return .portraitUpsideDown
+        case .landscapeLeft: return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        default: return .portrait
+        }
+    }
+}
+#endif
 
 // MARK: - iOS Canvas
 
@@ -25,6 +41,7 @@ struct CanvasView: UIViewRepresentable {
         }
         uiView.refresh()
         uiView.onBeginDraw = onBeginDraw
+        uiView.updateCameraPreview()
     }
 }
 
@@ -549,7 +566,7 @@ class DrawingCanvasView: UIView {
 
     func startRecordingDisplay() {
         guard let model = model, model.isRecording, recordingLink == nil else { return }
-        model.setupRecordingWriter(viewSize: bounds.size, viewScale: scale, screenScale: UIScreen.main.scale)
+        model.setupRecordingWriter(viewSize: bounds.size, viewScale: scale, screenScale: UIScreen.main.scale, hasAudio: model.selectedMicrophone != nil)
         let link = CADisplayLink(target: self, selector: #selector(stepRecording(_:)))
         link.preferredFramesPerSecond = 60
         link.add(to: .main, forMode: .common)
@@ -566,7 +583,57 @@ class DrawingCanvasView: UIView {
             stopRecordingDisplay()
             return
         }
-        model.captureFrame(offset: offset, scale: scale)
+        model.captureFrame(offset: offset, scale: scale, linkTimestamp: link.timestamp)
+    }
+
+    // MARK: - Camera Preview
+
+    private var cameraPreviewContainer: CALayer?
+
+    func updateCameraPreview() {
+        guard let model = model else { return }
+
+        if model.isCameraPreviewVisible, let mgr = model.captureManager, mgr.isRunning {
+            let screenRect = model.recordingScreenRect(viewportSize: bounds.size)
+            let pip = model.pipRect(in: screenRect)
+
+            if cameraPreviewContainer == nil {
+                let container = CALayer()
+                container.shadowColor = UIColor.gray.cgColor
+                container.shadowOpacity = 0.3
+                container.shadowRadius = 4
+                container.shadowOffset = CGSize(width: 0, height: 2)
+                container.masksToBounds = false
+
+                let layer = mgr.previewLayer
+                layer.videoGravity = .resizeAspectFill
+                layer.cornerRadius = 12
+                layer.masksToBounds = true
+                container.addSublayer(layer)
+                cameraPreviewContainer = container
+            }
+
+            // Update orientation for both preview layer and captured frames
+            if let window = window, let orientation = window.windowScene?.interfaceOrientation {
+                let videoOrientation = orientation.videoOrientation
+                cameraPreviewContainer?.sublayers?.first.flatMap {
+                    ($0 as? AVCaptureVideoPreviewLayer)?.connection?.videoOrientation = videoOrientation
+                }
+                mgr.updateVideoOrientation(videoOrientation)
+            }
+
+            cameraPreviewContainer?.frame = pip
+            let shadowBezier = UIBezierPath(roundedRect: pip, cornerRadius: 12)
+            cameraPreviewContainer?.shadowPath = shadowBezier.cgPath
+            cameraPreviewContainer?.sublayers?.first?.frame = CGRect(origin: .zero, size: pip.size)
+            cameraPreviewContainer?.isHidden = false
+
+            if cameraPreviewContainer?.superlayer == nil {
+                layer.addSublayer(cameraPreviewContainer!)
+            }
+        } else {
+            cameraPreviewContainer?.isHidden = true
+        }
     }
 
     @objc private func stepDash(_ link: CADisplayLink) {
@@ -708,11 +775,11 @@ class DrawingCanvasView: UIView {
             centerOnContent()
             model.needsRecenter = false
         }
-        // Force model to be up to date
         strokeLayer.model = model
         gridView.model = model
         gridView.setNeedsDisplay()
         strokeLayer.setNeedsDisplay()
+        updateCameraPreview()
     }
 
     private func centerOnContent() {
@@ -1389,7 +1456,7 @@ struct CanvasView: View {
                 if model.isRecording {
                     if let vs = viewSize, !model.isRecordingWriterReady {
                         let ss = NSScreen.main?.backingScaleFactor ?? 2
-                        model.setupRecordingWriter(viewSize: vs, viewScale: scale, screenScale: ss)
+                        model.setupRecordingWriter(viewSize: vs, viewScale: scale, screenScale: ss, hasAudio: model.selectedMicrophone != nil)
                     }
                     model.captureFrame(offset: offset, scale: scale)
                 }
@@ -1399,6 +1466,14 @@ struct CanvasView: View {
                     centerOnContent(canvasSize: size)
                     model.needsRecenter = false
                 }
+            }
+            // Camera preview overlay
+            if model.isCameraPreviewVisible, let mgr = model.captureManager, mgr.isRunning, let vs = viewSize {
+                let screenRect = model.recordingScreenRect(viewportSize: vs)
+                let pip = model.pipRect(in: screenRect)
+                CameraPreviewView(session: mgr.session, pipRect: pip)
+                    .frame(width: pip.width, height: pip.height)
+                    .position(x: pip.midX, y: pip.midY)
             }
         }
         .onAppear {
@@ -1609,6 +1684,33 @@ struct CanvasView: View {
                           style: StrokeStyle(lineWidth: stroke.lineWidth * scale,
                                            lineCap: .round, lineJoin: .round))
         }
+    }
+}
+
+// MARK: - Camera Preview (macOS)
+
+struct CameraPreviewView: NSViewRepresentable {
+    let session: AVCaptureSession
+    let pipRect: CGRect
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        layer.cornerRadius = 12
+        layer.masksToBounds = true
+        view.layer?.addSublayer(layer)
+        let shadow = NSShadow()
+        shadow.shadowColor = .gray
+        shadow.shadowOffset = CGSize(width: 0, height: -2)
+        shadow.shadowBlurRadius = 4
+        view.shadow = shadow
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        view.layer?.sublayers?.first?.frame = CGRect(origin: .zero, size: pipRect.size)
     }
 }
 

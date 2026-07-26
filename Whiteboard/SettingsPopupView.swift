@@ -227,7 +227,7 @@ struct ExportDocument: FileDocument {
     let data: Data
 
     static var readableContentTypes: [UTType] { [.data] }
-    static var writableContentTypes: [UTType] { [.data, .png, .pdf, .init(filenameExtension: "wb")!] }
+    static var writableContentTypes: [UTType] { [.data, .png, .pdf, .mpeg4Movie, .init(filenameExtension: "wb")!] }
 
     init(data: Data) { self.data = data }
 
