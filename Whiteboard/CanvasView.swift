@@ -18,13 +18,6 @@ struct CanvasView: UIViewRepresentable {
 
     func updateUIView(_ uiView: DrawingCanvasView, context: Context) {
         uiView.model = model
-        if model.needsDelete {
-            let m = model
-            DispatchQueue.main.async {
-                m.deleteSelected()
-                m.needsDelete = false
-            }
-        }
         uiView.refresh()
         uiView.onBeginDraw = onBeginDraw
     }

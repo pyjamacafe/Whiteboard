@@ -1428,7 +1428,6 @@ class DrawingModel: ObservableObject {
         fillLassoPoints = []
         showDeleteMenu = false
         showClearConfirmation = false
-        needsDelete = false
     }
 
     func undo() {
@@ -1578,7 +1577,6 @@ class DrawingModel: ObservableObject {
     @Published var pendingAction: PendingAction?
     @Published var showDeleteMenu: Bool = false
     @Published var deleteMenuLocation: CGPoint = .zero
-    @Published var needsDelete: Bool = false
     @Published var showClearConfirmation: Bool = false
     @Published var isToolbarVisible: Bool = true
     @Published var showWelcome: Bool = true
