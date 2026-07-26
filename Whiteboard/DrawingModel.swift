@@ -267,9 +267,6 @@ class DrawingModel: ObservableObject {
     enum RecordingAspect: String, CaseIterable {
         case widescreen = "16:9", square = "1:1", vertical = "9:16"
     }
-    enum RecordingOrientation: String, CaseIterable {
-        case landscape = "Landscape", portrait = "Portrait"
-    }
 
     @Published var strokes: [Stroke] = []
     @Published var fillRegions: [FillRegion] = []
@@ -710,7 +707,6 @@ class DrawingModel: ObservableObject {
 
     @Published var isRecording = false
     @Published var recordingAspect: RecordingAspect = .widescreen
-    @Published var recordingOrientation: RecordingOrientation = .landscape
     var recordingViewSize: CGSize = .zero
     private var recordingScale: CGFloat = 2
     var isRecordingWriterReady: Bool { recordingAssetWriter != nil }
@@ -719,6 +715,7 @@ class DrawingModel: ObservableObject {
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var recordingURL: URL?
     private var recordingFrameCount = 0
+    private let recordingFPS: Int32 = 60
 
     private var recordingAspectRatio: CGFloat {
         switch recordingAspect {
@@ -731,7 +728,7 @@ class DrawingModel: ObservableObject {
     func recordingCanvasRect(viewportSize: CGSize, viewScale: CGFloat) -> CGRect {
         let viewW = viewportSize.width / viewScale
         let viewH = viewportSize.height / viewScale
-        let aspect = recordingOrientation == .landscape ? recordingAspectRatio : 1.0 / recordingAspectRatio
+        let aspect = recordingAspectRatio
         var rw = viewW
         var rh = rw / aspect
         if rh > viewH {
@@ -739,6 +736,17 @@ class DrawingModel: ObservableObject {
             rw = rh * aspect
         }
         return CGRect(x: (viewW - rw) / 2, y: (viewH - rh) / 2, width: rw, height: rh)
+    }
+
+    func recordingScreenRect(viewportSize: CGSize) -> CGRect {
+        let aspect = recordingAspectRatio
+        var rw = viewportSize.width
+        var rh = rw / aspect
+        if rh > viewportSize.height {
+            rh = viewportSize.height
+            rw = rh * aspect
+        }
+        return CGRect(x: (viewportSize.width - rw) / 2, y: (viewportSize.height - rh) / 2, width: rw, height: rh)
     }
 
     func recordingPixelSize(viewportSize: CGSize, viewScale: CGFloat, screenScale: CGFloat) -> CGSize {
@@ -1721,6 +1729,62 @@ class DrawingModel: ObservableObject {
         return cfData! as Data
     }
 
+    private func drawCanvasBackground(in ctx: CGContext, canvasRect: CGRect, scale: CGFloat) {
+        let isDark = appSettings.isDarkMode
+        ctx.setFillColor((isDark ? CGColor(red: 28/255, green: 28/255, blue: 30/255, alpha: 1) : CGColor(gray: 1, alpha: 1)))
+        ctx.fill(canvasRect)
+        let gray: CGFloat = isDark ? 56/255 : 0.85
+        let fg = CGColor(gray: gray, alpha: 1)
+        let spacing: CGFloat = 30
+        switch appSettings.canvasBackground {
+        case .none: break
+        case .grid:
+            ctx.setStrokeColor(fg)
+            ctx.setLineWidth(0.5 / scale)
+            let startX = (canvasRect.minX / spacing).rounded(.down) * spacing
+            let startY = (canvasRect.minY / spacing).rounded(.down) * spacing
+            var x = startX
+            while x <= canvasRect.maxX {
+                ctx.move(to: CGPoint(x: x, y: canvasRect.minY - spacing))
+                ctx.addLine(to: CGPoint(x: x, y: canvasRect.maxY + spacing))
+                x += spacing
+            }
+            var y = startY
+            while y <= canvasRect.maxY {
+                ctx.move(to: CGPoint(x: canvasRect.minX - spacing, y: y))
+                ctx.addLine(to: CGPoint(x: canvasRect.maxX + spacing, y: y))
+                y += spacing
+            }
+            ctx.strokePath()
+        case .dots:
+            ctx.setFillColor(fg)
+            let r = max(1.5 / scale, 1)
+            let startX = (canvasRect.minX / spacing).rounded(.down) * spacing
+            let startY = (canvasRect.minY / spacing).rounded(.down) * spacing
+            var x = startX
+            while x <= canvasRect.maxX {
+                var y = startY
+                while y <= canvasRect.maxY {
+                    ctx.addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+                    y += spacing
+                }
+                x += spacing
+            }
+            ctx.fillPath()
+        case .ruled:
+            ctx.setStrokeColor(fg)
+            ctx.setLineWidth(0.5 / scale)
+            let startY = (canvasRect.minY / spacing).rounded(.down) * spacing
+            var y = startY
+            while y <= canvasRect.maxY {
+                ctx.move(to: CGPoint(x: canvasRect.minX - spacing, y: y))
+                ctx.addLine(to: CGPoint(x: canvasRect.maxX + spacing, y: y))
+                y += spacing
+            }
+            ctx.strokePath()
+        }
+    }
+
     private func renderToContext(_ ctx: CGContext, size: CGSize, offset: CGPoint = .zero) {
         ctx.setFillColor(gray: 1, alpha: 1)
         ctx.fill(CGRect(origin: .zero, size: size))
@@ -1823,10 +1887,9 @@ class DrawingModel: ObservableObject {
         recordingViewSize = viewSize
         recordingScale = screenScale
         guard recordingAssetWriter == nil else { return }
-        // Use the current view scale to compute pixel dimensions at recording start.
-        // The resolution is locked once recording begins.
-        let pixSize = recordingPixelSize(viewportSize: viewSize, viewScale: viewScale, screenScale: screenScale)
-        let w = Int(pixSize.width), h = Int(pixSize.height)
+        // Pixel dimensions = screen-frame size × screen scale (locked at start)
+        let screenRect = recordingScreenRect(viewportSize: viewSize)
+        let w = Int(screenRect.width * screenScale), h = Int(screenRect.height * screenScale)
         guard w > 0, h > 0, let url = recordingURL else { return }
         guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mp4) else { return }
         recordingAssetWriter = writer
@@ -1872,14 +1935,21 @@ class DrawingModel: ObservableObject {
         guard isRecording, let input = recordingInput, let adaptor = pixelBufferAdaptor else { return }
         guard input.isReadyForMoreMediaData else { return }
 
-        // Recording rect in canvas coordinates
+        // Screen-fixed recording frame
         let viewport = recordingViewSize
-        let canvasRect = recordingCanvasRect(viewportSize: viewport, viewScale: scale)
-        let pixSize = recordingPixelSize(viewportSize: viewport, viewScale: scale, screenScale: recordingScale)
-        let w = Int(pixSize.width), h = Int(pixSize.height)
+        let screenRect = recordingScreenRect(viewportSize: viewport)
+        let w = Int(screenRect.width * recordingScale), h = Int(screenRect.height * recordingScale)
         guard w > 0, h > 0 else { return }
 
-        // Render to a temporary bitmap context
+        // Canvas content visible within the screen rect (inverse of view transform)
+        // screen → canvas: canvasPt = (screenPt - offset) / scale
+        let canvasRect = CGRect(
+            x: (screenRect.minX - offset.width) / scale,
+            y: (screenRect.minY - offset.height) / scale,
+            width: screenRect.width / scale,
+            height: screenRect.height / scale
+        )
+
         var pixels = [UInt8](repeating: 0, count: w * h * 4)
         guard let renderCtx = CGContext(
             data: &pixels, width: w, height: h,
@@ -1888,13 +1958,14 @@ class DrawingModel: ObservableObject {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return }
 
-        let isDark = appSettings.isDarkMode
-        renderCtx.setFillColor((isDark ? CGColor(red: 28/255, green: 28/255, blue: 30/255, alpha: 1) : CGColor(gray: 1, alpha: 1)))
-        renderCtx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        // Map canvas rect to fill the pixel buffer, then draw everything
+        let s = scale * recordingScale
+        renderCtx.translateBy(x: -canvasRect.minX * s, y: CGFloat(h) + canvasRect.minY * s)
+        renderCtx.scaleBy(x: s, y: -s)
 
-        // Map recording canvas rect to fill the pixel buffer
-        renderCtx.translateBy(x: -canvasRect.minX, y: CGFloat(h) + canvasRect.minY)
-        renderCtx.scaleBy(x: scale * recordingScale, y: -scale * recordingScale)
+        // Canvas background (fill + grid/dots/ruled) in canvas coordinates
+        let bgRect = canvasRect.insetBy(dx: -60, dy: -60)
+        drawCanvasBackground(in: renderCtx, canvasRect: bgRect, scale: scale)
 
         for r in fillRegions {
             renderCtx.setFillColor(r.uiColor.cgColor ?? CGColor(gray: 0.5, alpha: 1))
@@ -1915,10 +1986,10 @@ class DrawingModel: ObservableObject {
             renderCtx.restoreGState()
         }
         for s in strokes where !s.isHighlighter { renderStrokeForExport(s, ctx: renderCtx) }
+        if let current = currentStroke, !current.isHighlighter { renderStrokeForExport(current, ctx: renderCtx) }
 
         guard let cgImage = renderCtx.makeImage() else { return }
 
-        // Create pixel buffer and copy the CGImage
         var pixelBuffer: CVPixelBuffer?
         let attrs: [String: Any] = [
             kCVPixelBufferCGImageCompatibilityKey as String: true,
@@ -1937,7 +2008,7 @@ class DrawingModel: ObservableObject {
             bmpCtx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         }
 
-        let frameTime = CMTime(value: CMTimeValue(recordingFrameCount), timescale: 30)
+        let frameTime = CMTime(value: CMTimeValue(recordingFrameCount), timescale: recordingFPS)
         adaptor.append(buffer, withPresentationTime: frameTime)
         recordingFrameCount += 1
     }

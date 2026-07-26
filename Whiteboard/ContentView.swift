@@ -661,13 +661,6 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
 
-            Picker("Orientation", selection: $model.recordingOrientation) {
-                ForEach(DrawingModel.RecordingOrientation.allCases, id: \.self) { orient in
-                    Label(orient.rawValue, systemImage: orient == .landscape ? "rectangle" : "rectangle.split.1x2").tag(orient)
-                }
-            }
-            .pickerStyle(.segmented)
-
             Button(action: startRecording) {
                 Label("Start Recording", systemImage: "record.circle")
                     .font(.body)

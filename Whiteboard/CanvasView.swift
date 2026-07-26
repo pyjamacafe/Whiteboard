@@ -151,6 +151,28 @@ class StrokeLayerView: UIView {
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext(), let model = model else { return }
 
+        // Recording guide overlay in screen coordinates (before canvas transform)
+        if model.isRecording {
+            let screenRect = model.recordingScreenRect(viewportSize: bounds.size)
+            ctx.saveGState()
+            ctx.setStrokeColor(UIColor.red.cgColor)
+            ctx.setLineWidth(2)
+            ctx.setLineDash(phase: 0, lengths: [6, 4])
+            ctx.stroke(screenRect.insetBy(dx: 1, dy: 1))
+            ctx.setFillColor(UIColor.black.withAlphaComponent(0.2).cgColor)
+            if screenRect.minY > 0 { ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: screenRect.minY)) }
+            if screenRect.maxY < bounds.height { ctx.fill(CGRect(x: 0, y: screenRect.maxY, width: bounds.width, height: bounds.height - screenRect.maxY)) }
+            if screenRect.minX > 0 { ctx.fill(CGRect(x: 0, y: screenRect.minY, width: screenRect.minX, height: screenRect.height)) }
+            if screenRect.maxX < bounds.width { ctx.fill(CGRect(x: screenRect.maxX, y: screenRect.minY, width: bounds.width - screenRect.maxX, height: screenRect.height)) }
+            ctx.restoreGState()
+            // Record indicator (red dot in top-right of screen rect)
+            let dotSize: CGFloat = 10
+            ctx.saveGState()
+            ctx.setFillColor(UIColor.red.cgColor)
+            ctx.fillEllipse(in: CGRect(x: screenRect.maxX - dotSize * 3, y: screenRect.minY + dotSize * 2, width: dotSize, height: dotSize))
+            ctx.restoreGState()
+        }
+
         ctx.saveGState()
         ctx.translateBy(x: offset.width, y: offset.height)
         ctx.scaleBy(x: scale, y: scale)
@@ -396,35 +418,6 @@ class StrokeLayerView: UIView {
             ctx.restoreGState()
         }
 
-        // Recording guide overlay
-        if model.isRecording {
-            let viewW = bounds.width / scale
-            let viewH = bounds.height / scale
-            let recRect = model.recordingCanvasRect(viewportSize: bounds.size, viewScale: scale)
-
-            ctx.saveGState()
-            ctx.setStrokeColor(UIColor.red.cgColor)
-            ctx.setLineWidth(2 / scale)
-            ctx.setLineDash(phase: 0, lengths: [6 / scale, 4 / scale])
-            ctx.stroke(recRect.insetBy(dx: 1 / scale, dy: 1 / scale))
-            // Semi-transparent mask outside the recording area
-            ctx.setFillColor(UIColor.black.withAlphaComponent(0.2).cgColor)
-            if recRect.minY > 0 { ctx.fill(CGRect(x: 0, y: 0, width: viewW, height: recRect.minY)) }
-            if recRect.maxY < viewH { ctx.fill(CGRect(x: 0, y: recRect.maxY, width: viewW, height: viewH - recRect.maxY)) }
-            if recRect.minX > 0 { ctx.fill(CGRect(x: 0, y: recRect.minY, width: recRect.minX, height: recRect.height)) }
-            if recRect.maxX < viewW { ctx.fill(CGRect(x: recRect.maxX, y: recRect.minY, width: viewW - recRect.maxX, height: recRect.height)) }
-            ctx.restoreGState()
-
-            // Record indicator (red dot in top-right)
-            let dotSize: CGFloat = 10 / scale
-            let dotX = viewW - dotSize * 3
-            let dotY = dotSize * 2
-            ctx.saveGState()
-            ctx.setFillColor(UIColor.red.cgColor)
-            ctx.fillEllipse(in: CGRect(x: dotX, y: dotY, width: dotSize, height: dotSize))
-            ctx.restoreGState()
-        }
-
         ctx.restoreGState()
     }
 
@@ -558,7 +551,7 @@ class DrawingCanvasView: UIView {
         guard let model = model, model.isRecording, recordingLink == nil else { return }
         model.setupRecordingWriter(viewSize: bounds.size, viewScale: scale, screenScale: UIScreen.main.scale)
         let link = CADisplayLink(target: self, selector: #selector(stepRecording(_:)))
-        link.preferredFramesPerSecond = 30
+        link.preferredFramesPerSecond = 60
         link.add(to: .main, forMode: .common)
         recordingLink = link
     }
@@ -1054,6 +1047,19 @@ struct CanvasView: View {
                 let _ = pointCount
                 let _ = hoverLocation
 
+                // Recording guide overlay in screen coordinates
+                if model.isRecording {
+                    let screenRect = model.recordingScreenRect(viewportSize: size)
+                    context.stroke(Path(screenRect.insetBy(dx: 1, dy: 1)), with: .color(.red.opacity(0.8)),
+                                  style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [6, 4], dashPhase: 0))
+                    if screenRect.minY > 0 { context.fill(Path(CGRect(x: 0, y: 0, width: size.width, height: screenRect.minY)), with: .color(.black.opacity(0.15))) }
+                    if screenRect.maxY < size.height { context.fill(Path(CGRect(x: 0, y: screenRect.maxY, width: size.width, height: size.height - screenRect.maxY)), with: .color(.black.opacity(0.15))) }
+                    if screenRect.minX > 0 { context.fill(Path(CGRect(x: 0, y: screenRect.minY, width: screenRect.minX, height: screenRect.height)), with: .color(.black.opacity(0.15))) }
+                    if screenRect.maxX < size.width { context.fill(Path(CGRect(x: screenRect.maxX, y: screenRect.minY, width: size.width - screenRect.maxX, height: screenRect.height)), with: .color(.black.opacity(0.15))) }
+                    let dotSize: CGFloat = 10
+                    context.fill(Path(ellipseIn: CGRect(x: screenRect.maxX - dotSize * 3, y: screenRect.minY + dotSize * 2, width: dotSize, height: dotSize)), with: .color(.red))
+                }
+
                 let tf = CGAffineTransform(translationX: offset.width, y: offset.height)
                     .scaledBy(x: scale, y: scale)
 
@@ -1237,19 +1243,6 @@ struct CanvasView: View {
                     context.fill(core, with: .color(lc))
                 }
 
-                // Recording guide overlay (macOS)
-                if model.isRecording, let viewSize = viewSize {
-                    let recRect = model.recordingCanvasRect(viewportSize: viewSize, viewScale: scale)
-                    context.stroke(Path(recRect.insetBy(dx: 1, dy: 1)), with: .color(.red.opacity(0.8)),
-                                  style: StrokeStyle(lineWidth: 2 * scale, lineCap: .round, lineJoin: .round, dash: [6, 4], dashPhase: 0))
-                    if recRect.minY > 0 { context.fill(Path(CGRect(x: 0, y: 0, width: viewSize.width, height: recRect.minY)), with: .color(.black.opacity(0.15))) }
-                    if recRect.maxY < viewSize.height { context.fill(Path(CGRect(x: 0, y: recRect.maxY, width: viewSize.width, height: viewSize.height - recRect.maxY)), with: .color(.black.opacity(0.15))) }
-                    if recRect.minX > 0 { context.fill(Path(CGRect(x: 0, y: recRect.minY, width: recRect.minX, height: recRect.height)), with: .color(.black.opacity(0.15))) }
-                    if recRect.maxX < viewSize.width { context.fill(Path(CGRect(x: recRect.maxX, y: recRect.minY, width: viewSize.width - recRect.maxX, height: recRect.height)), with: .color(.black.opacity(0.15))) }
-                    let dotSize: CGFloat = 10 * scale
-                    context.fill(Path(ellipseIn: CGRect(x: viewSize.width - dotSize * 3, y: dotSize * 2, width: dotSize, height: dotSize)), with: .color(.red))
-                }
-
                 if let loc = hoverLocation {
                     let dotSize: CGFloat = model.currentTool == .eraser ? model.eraserSettings.size : model.currentTool == .pen ? model.penSettings.thickness : 4
                     let dot = Path(ellipseIn: CGRect(
@@ -1388,7 +1381,7 @@ struct CanvasView: View {
                     hoverLocation = nil
                 }
             }
-            .onReceive(Timer.publish(every: 1/30, on: .main, in: .common).autoconnect()) { _ in
+            .onReceive(Timer.publish(every: 1/60.0, on: .main, in: .common).autoconnect()) { _ in
                 if !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty {
                     macDashPhase += 1
                 }
