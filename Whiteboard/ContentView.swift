@@ -94,11 +94,8 @@ struct ContentView: View {
                                     .buttonStyle(.plain)
                                 }
                                 Button(role: .destructive) {
-                                    model.needsDelete = true
+                                    model.deleteSelected()
                                     model.showDeleteMenu = false
-                                    if model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty {
-                                        model.selectionBoundary.removeAll()
-                                    }
                                 } label: {
                                     Label("Delete", systemImage: "trash")
                                         .font(.callout)
@@ -286,27 +283,51 @@ struct ContentView: View {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.title3)
                     .frame(width: 32, height: 32)
+                    .background(hoveredTool == "undo" ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(model.canUndo ? .primary : .secondary)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
             .disabled(!model.canUndo)
+            .onHover { hovering in
+                hoveredTool = hovering ? "undo" : nil
+                #if os(macOS)
+                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                #endif
+            }
 
             Button(action: { model.redo() }) {
                 Image(systemName: "arrow.uturn.forward")
                     .font(.title3)
                     .frame(width: 32, height: 32)
+                    .background(hoveredTool == "redo" ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(model.canRedo ? .primary : .secondary)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
             .disabled(!model.canRedo)
+            .onHover { hovering in
+                hoveredTool = hovering ? "redo" : nil
+                #if os(macOS)
+                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                #endif
+            }
 
             Button(action: { model.showWelcome = true }) {
                 Image(systemName: "house")
                     .font(.title3)
                     .frame(width: 32, height: 32)
+                    .background(hoveredTool == "home" ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
             }
             .buttonStyle(.plain)
+            .onHover { hovering in
+                hoveredTool = hovering ? "home" : nil
+                #if os(macOS)
+                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                #endif
+            }
 
             Divider()
                 .frame(height: 24)
@@ -520,6 +541,15 @@ struct ContentView: View {
         let label = Image(systemName: "line.3.horizontal")
             .font(.title3)
             .frame(width: 32, height: 32)
+            .background(hoveredTool == "settings" ? Color.primary.opacity(0.12) : .clear)
+            .foregroundColor(.primary)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .onHover { hovering in
+                hoveredTool = hovering ? "settings" : nil
+                #if os(macOS)
+                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+                #endif
+            }
 
         return Menu(content: { content }, label: { label })
             .fixedSize()
