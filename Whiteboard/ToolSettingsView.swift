@@ -8,10 +8,8 @@ struct ToolSettingsView: View {
         HStack(spacing: 8) {
             switch tool {
             case .pen: penSettings
+            case .sharpie: sharpieSettings
             case .eraser: eraserSettings
-            case .fill: fillSettings
-            case .highlighter: highlighterSettings
-            case .laser: laserSettings
             case .select: EmptyView()
             }
         }
@@ -92,8 +90,7 @@ struct ToolSettingsView: View {
     }
 
     @State private var lastPenTapIndex: Int?
-    @State private var lastFillTapIndex: Int?
-    @State private var lastHighlighterTapIndex: Int?
+    @State private var lastSharpieTapIndex: Int?
 
     // MARK: - Pen
 
@@ -122,51 +119,24 @@ struct ToolSettingsView: View {
         }
     }
 
-    // MARK: - Fill
+    // MARK: - Sharpie
 
-    private var fillSettings: some View {
+    private var sharpieSettings: some View {
         HStack(spacing: 12) {
-            squarePresetRow(presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
-                           selected: model.appSettings.isDarkMode ? $model.fillSettings.darkColor : $model.fillSettings.lightColor,
-                           selectedIndex: $model.fillPresetIndex,
-                           lastTapIndex: $lastFillTapIndex)
+            squarePresetRow(presets: model.appSettings.isDarkMode ? $model.sharpieSettings.darkPresets : $model.sharpieSettings.lightPresets,
+                           selected: model.appSettings.isDarkMode ? $model.sharpieSettings.darkColor : $model.sharpieSettings.lightColor,
+                           selectedIndex: $model.sharpiePresetIndex,
+                           lastTapIndex: $lastSharpieTapIndex)
 
-            // Opacity circles showing the selected fill color at each level
-            HStack(spacing: 6) {
-                ForEach(model.fillSettings.opacityOptions, id: \.self) { op in
-                    Button(action: { model.fillSettings.opacity = op }) {
+            // Width picker: dots of varying size (4–10pt)
+            HStack(spacing: 8) {
+                ForEach(model.sharpieSettings.widthOptions, id: \.self) { w in
+                    Button(action: { model.sharpieSettings.thickness = w }) {
                         Circle()
-                            .fill(model.fillColor.opacity(op))
-                            .frame(width: 18, height: 18)
+                            .fill(model.sharpieSettings.thickness == w ? Color.accentColor : Color.primary.opacity(0.4))
+                            .frame(width: 4 + w * 2, height: 4 + w * 2)
                             .overlay(
-                                model.fillSettings.opacity == op ?
-                                Circle().stroke(Color.primary, lineWidth: 1.5) : nil
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    // MARK: - Highlighter
-
-    private var highlighterSettings: some View {
-        HStack(spacing: 12) {
-            squarePresetRow(presets: model.appSettings.isDarkMode ? $model.highlighterSettings.darkPresets : $model.highlighterSettings.lightPresets,
-                           selected: model.appSettings.isDarkMode ? $model.highlighterSettings.darkColor : $model.highlighterSettings.lightColor,
-                           selectedIndex: $model.hlPresetIndex,
-                           lastTapIndex: $lastHighlighterTapIndex)
-
-            // Thickness dots
-            HStack(spacing: 6) {
-                ForEach(model.highlighterSettings.thicknessOptions, id: \.self) { t in
-                    Button(action: { model.highlighterSettings.thickness = t }) {
-                        Circle()
-                            .fill(model.highlighterSettings.thickness == t ? Color.accentColor : Color.primary.opacity(0.4))
-                            .frame(width: t * 0.5 + 4, height: t * 0.5 + 4)
-                            .overlay(
-                                model.highlighterSettings.thickness == t ?
+                                model.sharpieSettings.thickness == w ?
                                 Circle().stroke(Color.primary, lineWidth: 1) : nil
                             )
                     }
@@ -195,6 +165,26 @@ struct ToolSettingsView: View {
                 }
             }
 
+            Divider().frame(height: 24)
+
+            // Target picker: All / Pen / Sharpie
+            HStack(spacing: 4) {
+                ForEach(EraseTarget.allCases, id: \.self) { target in
+                    Button(action: { model.eraserSettings.eraseTarget = target }) {
+                        Text(target.rawValue)
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .frame(height: 32)
+                            .background(model.eraserSettings.eraseTarget == target ? Color.accentColor : Color.clear)
+                            .foregroundColor(model.eraserSettings.eraseTarget == target ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider().frame(height: 24)
+
             // Size dots
             HStack(spacing: 6) {
                 ForEach([10, 20, 30, 40, 50, 60], id: \.self) { s in
@@ -204,38 +194,6 @@ struct ToolSettingsView: View {
                             .frame(width: CGFloat(s) * 0.4 + 4, height: CGFloat(s) * 0.4 + 4)
                             .overlay(
                                 Int(model.eraserSettings.size) == s ?
-                                Circle().stroke(Color.primary, lineWidth: 1) : nil
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    // MARK: - Laser
-
-    private var laserSettings: some View {
-        HStack(spacing: 12) {
-            Button(action: { model.laserSettings.retainStrokes.toggle() }) {
-                Image(systemName: model.laserSettings.retainStrokes ? "pin.fill" : "pin")
-                    .font(.body)
-                    .frame(width: 28, height: 28)
-                    .background(model.laserSettings.retainStrokes ? Color.accentColor : Color.clear)
-                    .foregroundColor(model.laserSettings.retainStrokes ? .white : .primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-            }
-            .buttonStyle(.plain)
-
-            // Size dots
-            HStack(spacing: 6) {
-                ForEach([1.5, 2.5, 4, 6, 8], id: \.self) { s in
-                    Button(action: { model.laserSettings.size = s }) {
-                        Circle()
-                            .fill(abs(model.laserSettings.size - s) < 0.01 ? Color.accentColor : Color.primary.opacity(0.4))
-                            .frame(width: s * 1.5 + 4, height: s * 1.5 + 4)
-                            .overlay(
-                                abs(model.laserSettings.size - s) < 0.01 ?
                                 Circle().stroke(Color.primary, lineWidth: 1) : nil
                             )
                     }

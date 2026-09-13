@@ -27,7 +27,7 @@ struct SettingsPopupView: View {
                 Button(action: { model.redo() }) { Image(systemName: "arrow.uturn.forward").font(.title3).frame(width: 32, height: 32) }
                     .disabled(!model.canRedo)
                 Button(action: { model.deleteSelected() }) { Image(systemName: "trash").font(.title3).frame(width: 32, height: 32) }
-                    .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
+                    .disabled(model.strokes.isEmpty)
                 Button(action: { model.needsRecenter = true }) { Image(systemName: "viewfinder").font(.title3).frame(width: 32, height: 32) }
                 Divider().frame(height: 24)
                 Button(action: { model.showWelcome = true }) { Image(systemName: "house").font(.title3).frame(width: 32, height: 32) }
@@ -121,7 +121,7 @@ struct SettingsPopupView: View {
                     }
                     .help("Export PDF")
                 }
-                .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty)
+                .disabled(model.strokes.isEmpty)
                 .buttonStyle(.plain)
 
                 Spacer()
@@ -194,14 +194,6 @@ struct SettingsPopupView: View {
             for p in s.points {
                 minX = min(minX, p.x); maxX = max(maxX, p.x)
                 minY = min(minY, p.y); maxY = max(maxY, p.y)
-                hasContent = true
-            }
-        }
-        for r in model.fillRegions {
-            let box = r.cgPath.boundingBox
-            if !box.isNull {
-                minX = min(minX, box.minX); maxX = max(maxX, box.maxX)
-                minY = min(minY, box.minY); maxY = max(maxY, box.maxY)
                 hasContent = true
             }
         }

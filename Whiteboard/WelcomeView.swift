@@ -37,9 +37,9 @@ struct WelcomeView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         #if os(macOS)
-        .background(model.appSettings.isDarkMode ? Color(red: 28/255, green: 28/255, blue: 30/255) : Color(.windowBackgroundColor))
+        .background(model.appSettings.isDarkMode ? Color.black : Color(.windowBackgroundColor))
         #else
-        .background(model.appSettings.isDarkMode ? Color(red: 28/255, green: 28/255, blue: 30/255) : Color(.systemBackground))
+        .background(model.appSettings.isDarkMode ? Color.black : Color(.systemBackground))
         #endif
         .foregroundColor(model.appSettings.isDarkMode ? .white : .primary)
         .colorScheme(model.appSettings.isDarkMode ? .dark : .light)

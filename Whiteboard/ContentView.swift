@@ -1,6 +1,5 @@
 import SwiftUI
 import UniformTypeIdentifiers
-import AVFoundation
 #if os(iOS)
 import UIKit
 #endif
@@ -15,11 +14,6 @@ struct ContentView: View {
     @State private var showingExporter = false
     @State private var showHelp = false
     @State private var showSettingsSidebar = false
-    @State private var showRecordingPicker = false
-    @State private var showRecordingShare = false
-    @State private var showRecordingSave = false
-    @State private var recordingFileURL: URL?
-    @State private var recordingExportData: Data?
     @State private var exportFormat: ExportFormat = .wb
     @State private var exportData: Data?
     @State private var exportName = "Untitled"
@@ -35,7 +29,6 @@ struct ContentView: View {
                 ZStack {
                     CanvasView(model: model, onBeginDraw: { showSettings = false })
                         .ignoresSafeArea()
-                        .pencilSqueezeToolbar(model: model)
 
                     VStack(spacing: 0) {
                         if model.isToolbarVisible { toolbar }
@@ -65,7 +58,7 @@ struct ContentView: View {
 
                     if model.showDeleteMenu {
                         HStack(spacing: 4) {
-                            if model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty {
+                            if model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty {
                                 // Nothing selected — offer Paste
                                 Button(action: { model.paste(); model.showDeleteMenu = false }) {
                                     Label("Paste", systemImage: "doc.on.clipboard")
@@ -157,32 +150,8 @@ struct ContentView: View {
                 Button("Clear", role: .destructive) { model.clear() }
                 Button("Cancel", role: .cancel) { }
             } message: {
-                Text("This will permanently delete all strokes, fills, and laser annotations.")
+                Text("This will permanently delete all strokes and images.")
             }
-            .popover(isPresented: $showRecordingPicker, arrowEdge: .bottom) {
-                recordingPickerContent
-            }
-            .sheet(isPresented: $showRecordingShare) {
-                if let url = recordingFileURL {
-                    #if os(iOS)
-                    ShareSheet(items: [url])
-                    #else
-                    Text("Recording saved to \(url.lastPathComponent)")
-                        .padding()
-                    #endif
-                }
-            }
-            #if os(macOS)
-            .fileExporter(isPresented: $showRecordingSave, document: ExportDocument(data: recordingExportData ?? Data()), contentType: .mpeg4Movie, defaultFilename: "Doodles_Recording.mp4") { result in
-                if case .success = result {
-                    if let tempURL = recordingFileURL {
-                        try? FileManager.default.removeItem(at: tempURL)
-                    }
-                }
-                recordingFileURL = nil
-                recordingExportData = nil
-            }
-            #endif
     }
 
     private var shortcutButtons: some View {
@@ -214,9 +183,7 @@ struct ContentView: View {
     private func toolColor(_ tool: Tool) -> Color {
         switch tool {
         case .pen: return model.penColor
-        case .highlighter: return model.hlColor
-        case .fill: return model.fillColor
-        case .laser: return model.appSettings.isDarkMode ? Color.white : Color.black
+        case .sharpie: return model.sharpieColor
         default: return Color.accentColor
         }
     }
@@ -296,15 +263,9 @@ struct ContentView: View {
     private var toolbar: some View {
         HStack(spacing: 8) {
             toolButton(systemName: "pencil.tip", tool: .pen)
+            toolButton(systemName: "pencil", tool: .sharpie)
             toolButton(systemName: "eraser", tool: .eraser)
-            toolButton(systemName: "drop.fill", tool: .fill)
-            toolButton(systemName: "highlighter", tool: .highlighter)
             toolButton(systemName: "cursorarrow.click", tool: .select)
-
-            Divider()
-                .frame(height: 24)
-
-            toolButton(systemName: "laser.burst", tool: .laser)
 
             Divider()
                 .frame(height: 24)
@@ -391,8 +352,8 @@ struct ContentView: View {
                     settingsGroup(title: nil, items: [
                         ("arrow.uturn.backward", "Undo", { model.undo() }, !model.canUndo),
                         ("arrow.uturn.forward", "Redo", { model.redo() }, !model.canRedo),
-                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }, model.strokes.isEmpty && model.fillRegions.isEmpty && model.placedImages.isEmpty),
-                        ("doc.on.doc", "Copy", { model.copySelected() }, model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty),
+                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", { model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }, model.strokes.isEmpty && model.placedImages.isEmpty),
+                        ("doc.on.doc", "Copy", { model.copySelected() }, model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty),
                         ("doc.on.clipboard", "Paste", { model.paste() }, false),
                         ("photo", "Import Image", { showImporter = true }, false),
                         ("viewfinder", "Center", { model.needsRecenter = true }, false),
@@ -518,12 +479,12 @@ struct ContentView: View {
                     .disabled(!model.canUndo)
                 Button(action: { model.redo() }) { Label("Redo", systemImage: "arrow.uturn.forward") }
                     .disabled(!model.canRedo)
-                Button(action: { model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }) {
-                    Label(model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", systemImage: "trash")
+                Button(action: { model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }) {
+                    Label(model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", systemImage: "trash")
                 }
-                .disabled(model.strokes.isEmpty && model.fillRegions.isEmpty && model.placedImages.isEmpty)
+                .disabled(model.strokes.isEmpty && model.placedImages.isEmpty)
                 Button(action: { model.copySelected() }) { Label("Copy", systemImage: "doc.on.doc") }
-                    .disabled(model.selectedStrokeIds.isEmpty && model.selectedFillIds.isEmpty && model.selectedImageIds.isEmpty)
+                    .disabled(model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty)
                 Button(action: { model.paste() }) { Label("Paste", systemImage: "doc.on.clipboard") }
                 Button(action: { showImporter = true }) { Label("Import Image", systemImage: "photo") }
                 Button(action: { model.needsRecenter = true }) { Label("Center", systemImage: "viewfinder") }
@@ -561,19 +522,6 @@ struct ContentView: View {
                 Button(action: { exportFormat = .png; exportAction() }) { Label("Export PNG", systemImage: "photo") }
                 Button(action: { exportFormat = .pdf; exportAction() }) { Label("Export PDF", systemImage: "doc.richtext") }
                 Button(action: { showImporter = true }) { Label("Open", systemImage: "folder") }
-            }
-
-            Section("Record") {
-                if model.isRecording {
-                    Button(action: stopRecordingAndShare) {
-                        Label("Stop Recording", systemImage: "stop.circle.fill")
-                    }
-                    .foregroundColor(.red)
-                } else {
-                    Button(action: { showRecordingPicker = true }) {
-                        Label("Record Canvas", systemImage: "record.circle")
-                    }
-                }
             }
 
             Section {
@@ -628,150 +576,12 @@ struct ContentView: View {
                 hasContent = true
             }
         }
-        for r in model.fillRegions {
-            let box = r.cgPath.boundingBox
-            if !box.isNull {
-                minX = min(minX, box.minX); maxX = max(maxX, box.maxX)
-                minY = min(minY, box.minY); maxY = max(maxY, box.maxY)
-                hasContent = true
-            }
-        }
         guard hasContent else { return (CGSize(width: 1000, height: 1000), .zero) }
         let pad: CGFloat = 40
         return (
             CGSize(width: maxX - minX + pad * 2, height: maxY - minY + pad * 2),
             CGPoint(x: minX - pad, y: minY - pad)
         )
-    }
-
-    // MARK: - Recording
-
-    private var recordingPickerContent: some View {
-        VStack(spacing: 12) {
-            Text("Record Canvas").font(.headline)
-
-            Picker("Format", selection: $model.recordingAspect) {
-                ForEach(DrawingModel.RecordingAspect.allCases, id: \.self) { aspect in
-                    Text(aspect.rawValue).tag(aspect)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            if let mgr = model.captureManager {
-                if !mgr.availableCameras.isEmpty {
-                    Picker("Camera", selection: $model.selectedCamera) {
-                        Text("None").tag(nil as AVCaptureDevice?)
-                        ForEach(mgr.availableCameras, id: \.uniqueID) { cam in
-                            Text(cam.localizedName).tag(cam as AVCaptureDevice?)
-                        }
-                    }
-                }
-                if !mgr.availableMicrophones.isEmpty {
-                    Picker("Microphone", selection: $model.selectedMicrophone) {
-                        Text("None").tag(nil as AVCaptureDevice?)
-                        ForEach(mgr.availableMicrophones, id: \.uniqueID) { mic in
-                            Text(mic.localizedName).tag(mic as AVCaptureDevice?)
-                        }
-                    }
-                }
-            }
-
-            Text("Preview appears on canvas when camera is selected")
-                .font(.caption).foregroundColor(.secondary)
-
-            Button(action: startRecording) {
-                Label("Start Recording", systemImage: "record.circle")
-                    .font(.body)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-        }
-        .padding()
-        .frame(width: 300)
-        .onAppear {
-            setupCamera()
-        }
-        .onDisappear {
-            if !model.isRecording {
-                model.isCameraPreviewVisible = false
-                model.captureManager?.stop()
-            }
-        }
-        .onChange(of: model.selectedCamera) { _ in
-            restartCapture()
-        }
-        .onChange(of: model.selectedMicrophone) { _ in
-            restartCapture()
-        }
-    }
-
-    private func setupCamera() {
-        if model.captureManager == nil {
-            model.captureManager = CaptureManager()
-        }
-        model.isCameraPreviewVisible = true
-        model.captureManager?.start(camera: model.selectedCamera, microphone: model.selectedMicrophone)
-        // Refresh cameras/mics list
-        model.captureManager?.refreshDeviceList()
-    }
-
-    private func restartCapture() {
-        model.captureManager?.stop()
-        model.captureManager?.start(camera: model.selectedCamera, microphone: model.selectedMicrophone)
-    }
-
-    private func startRecording() {
-        showRecordingPicker = false
-        guard let url = model.startRecording() else { return }
-        recordingFileURL = url
-        // Find the CanvasView to start its display link
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            // The CanvasView observes model.isRecording and starts its display link
-        }
-    }
-
-    func stopRecordingAndShare() {
-        model.isCameraPreviewVisible = false
-        model.captureManager?.stop()
-        model.stopRecording { [self] in
-            #if os(macOS)
-            if let url = recordingFileURL {
-                self.recordingExportData = try? Data(contentsOf: url)
-            }
-            self.showRecordingSave = true
-            #else
-            self.showRecordingShare = true
-            #endif
-        }
-    }
-}
-
-#if os(iOS)
-struct ShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
-}
-#endif
-
-extension View {
-    @ViewBuilder
-    func pencilSqueezeToolbar(model: DrawingModel) -> some View {
-        #if os(iOS)
-        if #available(iOS 17.5, *) {
-            self.onPencilSqueeze { phase in
-                if case .ended = phase {
-                    model.isToolbarVisible.toggle()
-                }
-            }
-        } else { self }
-        #else
-        self
-        #endif
     }
 }
 

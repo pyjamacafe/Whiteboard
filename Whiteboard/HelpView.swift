@@ -9,8 +9,6 @@ struct HelpView: View {
                 Section("Tools") {
                     ShortcutRow("Pen", key: "P")
                     ShortcutRow("Eraser", key: "E")
-                    ShortcutRow("Fill", key: "F")
-                    ShortcutRow("Highlighter", key: "H")
                     ShortcutRow("Selection", key: "S")
                     ShortcutRow("Pen color 1–8", key: "1 – 8")
                 }
@@ -36,13 +34,11 @@ struct HelpView: View {
                 Section("Canvas") {
                     FeatureRow("Pen", "Draw with configurable color, thickness and smoothness. Double-tap the pen button for settings.")
                     FeatureRow("Eraser", "Two modes: Partial (splits strokes) and Full Stroke (removes entire stroke). Size adjustable.")
-                    FeatureRow("Fill", "Flood-fills enclosed areas with configurable color and opacity (10–100%).")
-                    FeatureRow("Highlighter", "Translucent stroke that renders behind pen strokes. Opacity and thickness adjustable.")
-                    FeatureRow("Selection", "Draw a lasso to select strokes and fills. Drag to move, delete with ⌫.")
+                    FeatureRow("Selection", "Draw a lasso to select strokes. Drag to move, delete with ⌫.")
                 }
 
                 Section("Export") {
-                    FeatureRow(".wb format", "Saves all strokes and fills as JSON. Open via File → Open or the welcome screen.")
+                    FeatureRow(".wb format", "Saves all strokes as JSON. Open via File → Open or the welcome screen.")
                     FeatureRow("PNG / PDF", "Export the canvas as a high-resolution image or vector PDF. Cropped to content.")
                 }
 

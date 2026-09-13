@@ -11,11 +11,9 @@ struct RadialMenuView: View {
 
     private let tools: [(Tool, String)] = [
         (.pen, "pencil.tip"),
+        (.sharpie, "pencil"),
         (.eraser, "eraser"),
-        (.highlighter, "highlighter"),
-        (.fill, "drop.fill"),
         (.select, "cursorarrow.click"),
-        (.laser, "laser.burst"),
     ]
 
     var body: some View {

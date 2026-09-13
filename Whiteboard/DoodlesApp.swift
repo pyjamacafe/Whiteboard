@@ -32,16 +32,12 @@ struct DoodlesApp: App {
             CommandMenu("Tools") {
                 Button("Pen") { model.selectTool(.pen) }
                     .keyboardShortcut("p", modifiers: [])
-                Button("Highlighter") { model.selectTool(.highlighter) }
-                    .keyboardShortcut("h", modifiers: [])
-                Button("Fill") { model.selectTool(.fill) }
-                    .keyboardShortcut("f", modifiers: [])
+                Button("Sharpie") { model.selectTool(.sharpie) }
+                    .keyboardShortcut("s", modifiers: [])
                 Button("Eraser") { model.selectTool(.eraser) }
                     .keyboardShortcut("e", modifiers: [])
                 Button("Selection") { model.selectTool(.select) }
-                    .keyboardShortcut("s", modifiers: [])
-                Button("Laser") { model.selectTool(.laser) }
-                    .keyboardShortcut("l", modifiers: [])
+                    .keyboardShortcut("s", modifiers: [.shift])
                 Divider()
                 Button(model.isToolbarVisible ? "Hide Toolbar" : "Show Toolbar") {
                     model.isToolbarVisible.toggle()
