@@ -605,6 +605,7 @@ class DrawingModel: ObservableObject {
     private func performAutoSave() {
         guard let id = currentBoardId, let data = saveData() else { return }
         try? data.write(to: boardURL(for: id), options: .atomic)
+        invalidateThumbnail(for: id)
         if let idx = boards.firstIndex(where: { $0.id == id }) {
             boards[idx].modified = Date()
             saveBoards()
@@ -622,6 +623,7 @@ class DrawingModel: ObservableObject {
     @Published var selectedImageIds: Set<UUID> = []
     @Published var placedImages: [PlacedImage] = []
     var imageCache: [UUID: Any] = [:]  // UIImage on iOS, NSImage on macOS
+    private var thumbnailCache: [String: PlatformImage] = [:]  // key: "boardId|isDark"
     var lastCanvasTapLocation: CGPoint = .zero
 
     private var undoStack: [CanvasSnapshot] = []
@@ -1388,6 +1390,49 @@ class DrawingModel: ObservableObject {
         return cfData! as Data
     }
 
+    /// Renders an arbitrary board (loaded from disk) to PNG data, used by the
+    /// homescreen's bulk-export action.
+    func pngData(forBoardId id: String) -> Data? {
+        let url = boardURL(for: id)
+        guard let data = try? Data(contentsOf: url),
+              let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return nil }
+        let strokes = save.strokes
+
+        var minX: CGFloat = .greatestFiniteMagnitude, maxX: CGFloat = -.greatestFiniteMagnitude
+        var minY: CGFloat = .greatestFiniteMagnitude, maxY: CGFloat = -.greatestFiniteMagnitude
+        for s in strokes { for p in s.points {
+            minX = min(minX, p.x); maxX = max(maxX, p.x)
+            minY = min(minY, p.y); maxY = max(maxY, p.y)
+        } }
+        guard maxX > minX, maxY > minY else { return nil }
+
+        let pad: CGFloat = 40
+        let size = CGSize(width: maxX - minX + pad * 2, height: maxY - minY + pad * 2)
+        let offset = CGPoint(x: minX - pad, y: minY - pad)
+        let scale: CGFloat = 3
+        let w = Int(size.width * scale), h = Int(size.height * scale)
+        guard w > 0, h > 0, w <= 8192, h <= 8192 else { return nil }
+
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(
+            data: &pixels, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        ctx.translateBy(x: -offset.x * scale, y: CGFloat(h) + offset.y * scale)
+        ctx.scaleBy(x: scale, y: -scale)
+        renderStrokesForExport(strokes, ctx: ctx)
+
+        guard let image = ctx.makeImage() else { return nil }
+        let cfData = CFDataCreateMutable(nil, 0)
+        guard let dest = CGImageDestinationCreateWithData(cfData!, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return cfData! as Data
+    }
+
     private func renderStrokesForExport(_ strokes: [Stroke], ctx: CGContext) {
         for s in strokes { renderStrokeForExport(s, ctx: ctx) }
     }
@@ -1491,16 +1536,30 @@ class DrawingModel: ObservableObject {
     // MARK: - Thumbnail
 
     func thumbnail(for boardId: String, size: CGSize = CGSize(width: 240, height: 320)) -> PlatformImage? {
-        // Use in-memory strokes if this is the current board
+        // Cache per board + theme + size so thumbnails aren't re-decoded/re-rendered on
+        // every view update (hover, selection, etc.).
+        let key = "\(boardId)|\(appSettings.isDarkMode ? 1 : 0)|\(Int(size.width))x\(Int(size.height))"
+        if let cached = thumbnailCache[key] { return cached }
+
+        let image: PlatformImage?
         if boardId == currentBoardId {
-            guard !strokes.isEmpty else { return nil }
-            return renderThumbnail(strokes: strokes, size: size)
+            image = strokes.isEmpty ? nil : renderThumbnail(strokes: strokes, size: size)
+        } else {
+            let url = boardURL(for: boardId)
+            if let data = try? Data(contentsOf: url),
+               let save = try? JSONDecoder().decode(SaveData.self, from: data) {
+                image = renderThumbnail(strokes: save.strokes, size: size)
+            } else {
+                image = nil
+            }
         }
-        // Otherwise load from disk
-        let url = boardURL(for: boardId)
-        guard let data = try? Data(contentsOf: url),
-              let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return nil }
-        return renderThumbnail(strokes: save.strokes, size: size)
+        if let image { thumbnailCache[key] = image } else { thumbnailCache.removeValue(forKey: key) }
+        return image
+    }
+
+    func invalidateThumbnail(for boardId: String) {
+        let prefix = "\(boardId)|"
+        thumbnailCache = thumbnailCache.filter { !$0.key.hasPrefix(prefix) }
     }
 
     private func renderThumbnail(strokes: [Stroke], size: CGSize) -> PlatformImage? {
