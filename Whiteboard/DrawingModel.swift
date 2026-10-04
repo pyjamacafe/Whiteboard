@@ -227,9 +227,19 @@ class DrawingModel: ObservableObject {
     private let recentKey = "recentFiles"
     private let maxRecent = 5
 
+    /// Coalesces settings changes and persists them automatically so tool,
+    /// theme, and canvas preferences survive relaunch.
+    private var settingsSaveSubscription: AnyCancellable?
+
     init() {
+        loadDefaults()
         loadRecents()
         loadBoards()
+        settingsSaveSubscription = objectWillChange
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+            .sink { [weak self] in
+                self?.saveDefaults()
+            }
     }
 
     private func loadRecents() {
@@ -269,16 +279,17 @@ class DrawingModel: ObservableObject {
         let canvasBg: String
         let isDarkMode: Bool
         let revealSettingsOnSingleTap: Bool
+        let currentTool: String
 
         enum CodingKeys: String, CodingKey {
             case penLightColor, penDarkColor, penThickness,
                  sharpieLightColor, sharpieDarkColor, sharpieThickness,
-                 eraserSize, eraserMode, eraseTarget, canvasBg, isDarkMode, revealSettingsOnSingleTap
+                 eraserSize, eraserMode, eraseTarget, canvasBg, isDarkMode, revealSettingsOnSingleTap, currentTool
         }
 
         init(penLightColor: CodableColor, penDarkColor: CodableColor, penThickness: CGFloat,
              sharpieLightColor: CodableColor?, sharpieDarkColor: CodableColor?, sharpieThickness: CGFloat?,
-             eraserSize: CGFloat, eraserMode: String, eraseTarget: String?, canvasBg: String, isDarkMode: Bool, revealSettingsOnSingleTap: Bool) {
+             eraserSize: CGFloat, eraserMode: String, eraseTarget: String?, canvasBg: String, isDarkMode: Bool, revealSettingsOnSingleTap: Bool, currentTool: String) {
             self.penLightColor = penLightColor
             self.penDarkColor = penDarkColor
             self.penThickness = penThickness
@@ -291,6 +302,7 @@ class DrawingModel: ObservableObject {
             self.canvasBg = canvasBg
             self.isDarkMode = isDarkMode
             self.revealSettingsOnSingleTap = revealSettingsOnSingleTap
+            self.currentTool = currentTool
         }
 
         init(from decoder: Decoder) throws {
@@ -307,6 +319,7 @@ class DrawingModel: ObservableObject {
             canvasBg = try c.decode(String.self, forKey: .canvasBg)
             isDarkMode = try c.decode(Bool.self, forKey: .isDarkMode)
             revealSettingsOnSingleTap = try c.decodeIfPresent(Bool.self, forKey: .revealSettingsOnSingleTap) ?? true
+            currentTool = try c.decodeIfPresent(String.self, forKey: .currentTool) ?? Tool.pen.rawValue
         }
     }
 
@@ -323,7 +336,8 @@ class DrawingModel: ObservableObject {
             eraseTarget: eraserSettings.eraseTarget.rawValue,
             canvasBg: appSettings.canvasBackground.rawValue,
             isDarkMode: appSettings.isDarkMode,
-            revealSettingsOnSingleTap: appSettings.revealSettingsOnSingleTap
+            revealSettingsOnSingleTap: appSettings.revealSettingsOnSingleTap,
+            currentTool: currentTool.rawValue
         )
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: defaultsKey)
@@ -345,6 +359,7 @@ class DrawingModel: ObservableObject {
         appSettings.canvasBackground = CanvasBackground(rawValue: s.canvasBg) ?? .grid
         appSettings.isDarkMode = s.isDarkMode
         appSettings.revealSettingsOnSingleTap = s.revealSettingsOnSingleTap
+        currentTool = Tool(rawValue: s.currentTool) ?? .pen
     }
 
     func resetToFactory() {
@@ -353,6 +368,10 @@ class DrawingModel: ObservableObject {
         sharpieSettings = SharpieSettings()
         eraserSettings = EraserSettings()
         appSettings = AppSettings()
+        currentTool = .pen
+        previousTool = .pen
+        penPresetIndex = 0
+        sharpiePresetIndex = 0
     }
 
     var hasDefaults: Bool {

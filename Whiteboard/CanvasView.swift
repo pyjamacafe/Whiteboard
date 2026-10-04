@@ -742,6 +742,17 @@ struct CanvasView: View {
     @State private var dashTimer: Timer?
     @State private var viewSize: CGSize?
 
+    private var pointerHandler: CanvasPointerHandler {
+        CanvasPointerHandler(
+            model: model,
+            offset: offset,
+            scale: scale,
+            onHover: { hoverLocation = $0 },
+            onPoint: { pointCount = $0 },
+            onBeginDraw: onBeginDraw
+        )
+    }
+
     var body: some View {
         ZStack {
             GeometryReader { geo in
@@ -863,94 +874,7 @@ struct CanvasView: View {
                     context.fill(dot, with: .color(model.currentTool == .eraser ? .red.opacity(0.25) : .black.opacity(0.4)))
                 }
             }
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        hoverLocation = value.location
-                        onBeginDraw?()
-                        let cp = CGPoint(
-                            x: (value.location.x - offset.width) / scale,
-                            y: (value.location.y - offset.height) / scale
-                        )
-                        model.lastCanvasTapLocation = cp
-
-                        if model.currentTool == .select {
-                            // macOS: tap on unselected image selects it
-                            if let imgId = model.hitTestImage(cp), !model.selectedImageIds.contains(imgId) {
-                                model.selectedStrokeIds.removeAll()
-                                model.selectedImageIds = [imgId]
-                                model.selectionBoundary.removeAll()
-                                return
-                            }
-                            if model.isMoving || model.isResizing {
-                                let offset = CGSize(width: cp.x - model.lastMovePoint.x, height: cp.y - model.lastMovePoint.y)
-                                model.moveSelected(by: offset)
-                                model.lastMovePoint = cp
-                            } else if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectionBoundary.isEmpty {
-                                // Check for resize handle hit first
-                                if model.hitTestResizeHandle(cp) != nil {
-                                    model.beginMove(at: cp)
-                                    return
-                                }
-                                let onSelected = model.isPointOnSelectedItem(cp) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(cp))
-                                if onSelected {
-                                    let now = Date()
-                                    if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
-                                        Self.lastSelectTap = .distantPast
-                    model.showDeleteMenu = true
-                    model.deleteMenuLocation = CGPoint(x: cp.x * scale + offset.width + 60, y: cp.y * scale + offset.height)
-                                        return
-                                    }
-                                    Self.lastSelectTap = now
-                                    model.beginMove(at: cp)
-                                } else {
-                                    model.selectedStrokeIds.removeAll()
-                                    model.selectedImageIds.removeAll()
-                                    model.selectionBoundary.removeAll()
-                                }
-                             } else if model.selectionLasso.isEmpty {
-                                 // Nothing selected — check for double-tap to show paste menu
-                                 let now = Date()
-                                 if now.timeIntervalSince(Self.lastEmptyTap) < 0.4 {
-                                     Self.lastEmptyTap = .distantPast
-                                     model.showDeleteMenu = true
-                                     model.deleteMenuLocation = CGPoint(x: cp.x * scale + offset.width + 60, y: cp.y * scale + offset.height)
-                                     return
-                                 }
-                                 Self.lastEmptyTap = now
-                                 model.beginLasso(at: cp)
-                            } else {
-                                model.addLassoPoint(cp)
-                            }
-                            return
-                        }
-
-                        if model.currentStroke == nil {
-                            model.beginStroke(at: cp, isEraser: model.currentTool == .eraser)
-                        } else {
-                            model.addPoint(cp)
-                        }
-                        pointCount = model.currentStroke?.points.count ?? 0
-                    }
-                    .onEnded { _ in
-                        if model.currentTool == .select {
-                            if model.isMoving { model.commitMove() }
-                            else if model.isResizing { model.commitMove() }
-                            else { model.endLasso() }
-                            return
-                        }
-                        model.endStroke()
-                        pointCount = 0
-                    }
-            )
-            .onContinuousHover { phase in
-                switch phase {
-                case .active(let location):
-                    hoverLocation = location
-                case .ended:
-                    hoverLocation = nil
-                }
-            }
+            .overlay(DrawingInputOverlay(handler: pointerHandler))
             .onReceive(Timer.publish(every: 1/60.0, on: .main, in: .common).autoconnect()) { _ in
                 if !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty {
                     macDashPhase += 1
@@ -1178,6 +1102,231 @@ if stroke.isEraser {
                                                 lineCap: .round, lineJoin: .round))
             }
         }
+    }
+}
+
+// MARK: - Pointer Input (macOS)
+
+/// Routes AppKit mouse/tablet events into the SwiftUI `CanvasView`,
+/// preserving device information so we can distinguish pencil from finger/mouse.
+struct DrawingInputOverlay: NSViewRepresentable {
+    let handler: CanvasPointerHandler
+
+    /// Temporary diagnostic flag — set back to true if you need to inspect event types again.
+    static var debugInputLogging = false
+
+    func makeNSView(context: Context) -> InputView {
+        let view = InputView()
+        view.handler = handler
+        return view
+    }
+
+    func updateNSView(_ nsView: InputView, context: Context) {
+        nsView.handler = handler
+    }
+
+    final class InputView: NSView {
+        var handler: CanvasPointerHandler?
+
+        override var acceptsFirstResponder: Bool { true }
+        override var isFlipped: Bool { true }  // top-left origin, matches SwiftUI
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            for area in trackingAreas { removeTrackingArea(area) }
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            ))
+        }
+
+        private func log(_ event: NSEvent, _ phase: String) {
+            guard DrawingInputOverlay.debugInputLogging else { return }
+            let device: String
+            if #available(macOS 10.15, *) {
+                device = "\(event.pointingDeviceType.rawValue)"
+            } else {
+                device = "?"
+            }
+            print("[CanvasInput] \(phase) type=\(event.type.rawValue) subtype=\(event.subtype.rawValue) device=\(device)")
+        }
+
+        private func isPencil(_ event: NSEvent) -> Bool {
+            // Sidecar delivers Apple Pencil as tablet events; finger/mouse come through
+            // as regular mouse events.
+            if event.type == .tabletPoint { return true }
+            if event.subtype == .tabletPoint || event.subtype == .tabletProximity { return true }
+            if #available(macOS 10.15, *), event.pointingDeviceType == .pen || event.pointingDeviceType == .eraser {
+                return true
+            }
+            return false
+        }
+
+        private func canvasPoint(for event: NSEvent) -> CGPoint {
+            let p = convert(event.locationInWindow, from: nil)
+            guard let h = handler else { return p }
+            return CGPoint(
+                x: (p.x - h.offset.width) / h.scale,
+                y: (p.y - h.offset.height) / h.scale
+            )
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            log(event, "down")
+            // Always forward to AppKit first. Sidecar delivers finger/palm input
+            // as digitizer touches that AppKit tracks internally; skipping super
+            // leaves its touch state unbalanced and trips the
+            // "Missing Touches" assertion in -[NSEvent _initDigitizerTouchesFromIOHidEvent:].
+            super.mouseDown(with: event)
+            guard let h = handler else { return }
+            // Drawing tools accept only pencil input; select accepts any pointer.
+            // Finger/palm/mouse events are ignored for drawing so they can't perturb
+            // an in-progress pencil stroke, but AppKit has already seen the event.
+            if h.model.currentTool != .select && !isPencil(event) {
+                return
+            }
+            let loc = convert(event.locationInWindow, from: nil)
+            h.onHover(loc)
+            h.onChange(canvasPoint(for: event), drawing: true)
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            super.mouseDragged(with: event)
+            guard let h = handler else { return }
+            if h.model.currentTool != .select && !isPencil(event) {
+                return
+            }
+            let loc = convert(event.locationInWindow, from: nil)
+            h.onHover(loc)
+            h.onChange(canvasPoint(for: event), drawing: false)
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            log(event, "up")
+            super.mouseUp(with: event)
+            guard let h = handler else { return }
+            if h.model.currentTool != .select && !isPencil(event) {
+                return
+            }
+            h.onEnd()
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            guard let h = handler else { return }
+            h.onHover(convert(event.locationInWindow, from: nil))
+        }
+
+        override func mouseExited(with event: NSEvent) {
+            handler?.onHover(nil)
+        }
+
+        // Sidecar digitizer touches (finger/palm) are tracked by AppKit as touch
+        // sequences. Forward every phase to super so AppKit's touch state stays
+        // balanced; we intentionally do not consume these for drawing.
+        override func touchesBegan(with event: NSEvent) {
+            super.touchesBegan(with: event)
+        }
+
+        override func touchesMoved(with event: NSEvent) {
+            super.touchesMoved(with: event)
+        }
+
+        override func touchesEnded(with event: NSEvent) {
+            super.touchesEnded(with: event)
+        }
+
+        override func touchesCancelled(with event: NSEvent) {
+            super.touchesCancelled(with: event)
+        }
+    }
+}
+
+/// Captures the current canvas transform and model so the overlay can forward
+/// pointer input back into `CanvasView` without creating a reference cycle.
+struct CanvasPointerHandler {
+    let model: DrawingModel
+    let offset: CGSize
+    let scale: CGFloat
+    let onHover: (CGPoint?) -> Void
+    let onPoint: (Int) -> Void
+    let onBeginDraw: (() -> Void)?
+
+    func onChange(_ canvas: CGPoint, drawing: Bool) {
+        if drawing {
+            onBeginDraw?()
+            model.lastCanvasTapLocation = canvas
+        }
+
+        if model.currentTool == .select {
+            // macOS: tap on unselected image selects it
+            if let imgId = model.hitTestImage(canvas), !model.selectedImageIds.contains(imgId) {
+                model.selectedStrokeIds.removeAll()
+                model.selectedImageIds = [imgId]
+                model.selectionBoundary.removeAll()
+                return
+            }
+            if model.isMoving || model.isResizing {
+                let delta = CGSize(width: canvas.x - model.lastMovePoint.x, height: canvas.y - model.lastMovePoint.y)
+                model.moveSelected(by: delta)
+                model.lastMovePoint = canvas
+            } else if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectionBoundary.isEmpty {
+                // Check for resize handle hit first
+                if model.hitTestResizeHandle(canvas) != nil {
+                    model.beginMove(at: canvas)
+                    return
+                }
+                let onSelected = model.isPointOnSelectedItem(canvas) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(canvas))
+                if onSelected {
+                    let now = Date()
+                    if now.timeIntervalSince(CanvasView.lastSelectTap) < 0.4 {
+                        CanvasView.lastSelectTap = .distantPast
+                        model.showDeleteMenu = true
+                        model.deleteMenuLocation = CGPoint(x: canvas.x * scale + offset.width + 60, y: canvas.y * scale + offset.height)
+                        return
+                    }
+                    CanvasView.lastSelectTap = now
+                    model.beginMove(at: canvas)
+                } else {
+                    model.selectedStrokeIds.removeAll()
+                    model.selectedImageIds.removeAll()
+                    model.selectionBoundary.removeAll()
+                }
+            } else if model.selectionLasso.isEmpty {
+                // Nothing selected — check for double-tap to show paste menu
+                let now = Date()
+                if now.timeIntervalSince(CanvasView.lastEmptyTap) < 0.4 {
+                    CanvasView.lastEmptyTap = .distantPast
+                    model.showDeleteMenu = true
+                    model.deleteMenuLocation = CGPoint(x: canvas.x * scale + offset.width + 60, y: canvas.y * scale + offset.height)
+                    return
+                }
+                CanvasView.lastEmptyTap = now
+                model.beginLasso(at: canvas)
+            } else {
+                model.addLassoPoint(canvas)
+            }
+            return
+        }
+
+        if model.currentStroke == nil {
+            model.beginStroke(at: canvas, isEraser: model.currentTool == .eraser)
+        } else {
+            model.addPoint(canvas)
+        }
+        onPoint(model.currentStroke?.points.count ?? 0)
+    }
+
+    func onEnd() {
+        if model.currentTool == .select {
+            if model.isMoving { model.commitMove() }
+            else if model.isResizing { model.commitMove() }
+            else { model.endLasso() }
+            return
+        }
+        model.endStroke()
+        onPoint(0)
     }
 }
 
