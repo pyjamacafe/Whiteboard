@@ -1,8 +1,216 @@
 import CoreGraphics
 import Foundation
 
-/// Pure geometry, spline smoothing, hit-testing, and erasing algorithms.
+/// 2D uniform-grid spatial hash for O(1)-bucket queries over dense boards.
+final class SpatialHashGrid {
+    struct CellKey: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    let cellSize: CGFloat
+    private var buckets: [CellKey: [Int]] = [:]
+    private var boundsByIndex: [CGRect] = []
+    private var indexedCount: Int = 0
+    private var firstId: UUID?
+    private var lastId: UUID?
+
+    init(cellSize: CGFloat = 256) {
+        self.cellSize = max(cellSize, 32)
+    }
+
+    /// Rebuilds or incrementally updates the index to match `strokes`.
+    func sync(with strokes: [Stroke]) {
+        if strokes.count == indexedCount,
+           strokes.first?.id == firstId,
+           strokes.last?.id == lastId {
+            return
+        }
+
+        // Fast path: a single stroke was appended to the end.
+        if strokes.count == indexedCount + 1,
+           indexedCount > 0,
+           strokes.first?.id == firstId,
+           strokes[indexedCount - 1].id == lastId {
+            let idx = indexedCount
+            let b = GeometryEngine.strokeBounds(strokes[idx])
+            boundsByIndex.append(b)
+            insert(index: idx, bounds: b)
+            indexedCount = strokes.count
+            lastId = strokes.last?.id
+            return
+        }
+
+        rebuild(with: strokes)
+    }
+
+    func rebuild(with strokes: [Stroke]) {
+        buckets.removeAll(keepingCapacity: true)
+        boundsByIndex.removeAll(keepingCapacity: true)
+        boundsByIndex.reserveCapacity(strokes.count)
+        for (idx, stroke) in strokes.enumerated() {
+            let b = GeometryEngine.strokeBounds(stroke)
+            boundsByIndex.append(b)
+            insert(index: idx, bounds: b)
+        }
+        indexedCount = strokes.count
+        firstId = strokes.first?.id
+        lastId = strokes.last?.id
+    }
+
+    func invalidate() {
+        buckets.removeAll(keepingCapacity: true)
+        boundsByIndex.removeAll(keepingCapacity: true)
+        indexedCount = 0
+        firstId = nil
+        lastId = nil
+    }
+
+    /// Returns sorted stroke indices whose bounding boxes intersect `rect`.
+    func queryIndices(in rect: CGRect) -> [Int] {
+        guard !rect.isNull, !rect.isEmpty,
+              rect.minX.isFinite, rect.minY.isFinite, rect.maxX.isFinite, rect.maxY.isFinite,
+              indexedCount > 0 else { return [] }
+        let minCX = Int(floor(rect.minX / cellSize))
+        let maxCX = Int(floor(rect.maxX / cellSize))
+        let minCY = Int(floor(rect.minY / cellSize))
+        let maxCY = Int(floor(rect.maxY / cellSize))
+        guard minCX <= maxCX, minCY <= maxCY else { return [] }
+
+        // Guard against huge query rects (e.g. extreme zoom out): fall back to direct bounds check.
+        let spanX = maxCX - minCX + 1
+        let spanY = maxCY - minCY + 1
+        if spanX > 64 || spanY > 64 || spanX * spanY > 2048 {
+            var result: [Int] = []
+            for idx in 0..<boundsByIndex.count where boundsByIndex[idx].intersects(rect) {
+                result.append(idx)
+            }
+            return result
+        }
+
+        var seen = Set<Int>()
+        var result: [Int] = []
+        for cx in minCX...maxCX {
+            for cy in minCY...maxCY {
+                guard let indices = buckets[CellKey(x: cx, y: cy)] else { continue }
+                for idx in indices where seen.insert(idx).inserted {
+                    if idx < boundsByIndex.count && boundsByIndex[idx].intersects(rect) {
+                        result.append(idx)
+                    }
+                }
+            }
+        }
+        result.sort()
+        return result
+    }
+
+    private func insert(index: Int, bounds: CGRect) {
+        guard !bounds.isNull, !bounds.isEmpty,
+              bounds.minX.isFinite, bounds.minY.isFinite, bounds.maxX.isFinite, bounds.maxY.isFinite else { return }
+        let minCX = Int(floor(bounds.minX / cellSize))
+        let maxCX = Int(floor(bounds.maxX / cellSize))
+        let minCY = Int(floor(bounds.minY / cellSize))
+        let maxCY = Int(floor(bounds.maxY / cellSize))
+        guard minCX <= maxCX, minCY <= maxCY else { return }
+
+        // Cap per-stroke bucket fanout to prevent runaway loops on gigantic strokes.
+        let clampedMaxCX = min(maxCX, minCX + 64)
+        let clampedMaxCY = min(maxCY, minCY + 64)
+        for cx in minCX...clampedMaxCX {
+            for cy in minCY...clampedMaxCY {
+                buckets[CellKey(x: cx, y: cy), default: []].append(index)
+            }
+        }
+    }
+}
+
+/// Incrementally builds a smooth quadratic `CGMutablePath` for the active
+/// in-progress stroke so drag events do O(1) work instead of re-smoothing all
+/// prior points on every frame.
+final class IncrementalStrokePath {
+    private(set) var strokeId: UUID?
+    private(set) var pointCount: Int = 0
+    private var path = CGMutablePath()
+    private var lastPoint: CGPoint = .zero
+
+    func reset() {
+        strokeId = nil
+        pointCount = 0
+        path = CGMutablePath()
+        lastPoint = .zero
+    }
+
+    func path(for stroke: Stroke) -> CGPath? {
+        guard stroke.points.count >= 2 else { return nil }
+        if stroke.id != strokeId || stroke.points.count < pointCount {
+            strokeId = stroke.id
+            pointCount = 0
+            path = CGMutablePath()
+        }
+
+        if pointCount == 0 {
+            let p0 = stroke.points[0]
+            path.move(to: p0)
+            lastPoint = p0
+            pointCount = 1
+        }
+
+        while pointCount < stroke.points.count {
+            let pt = stroke.points[pointCount]
+            let mid = CGPoint(x: (lastPoint.x + pt.x) * 0.5, y: (lastPoint.y + pt.y) * 0.5)
+            path.addQuadCurve(to: mid, control: lastPoint)
+            lastPoint = pt
+            pointCount += 1
+        }
+
+        return path
+    }
+}
+
+/// Pure geometry, spline smoothing, simplification, hit-testing, and erasing algorithms.
 enum GeometryEngine {
+
+    // MARK: - Point Simplification (Ramer-Douglas-Peucker)
+
+    /// Reduces redundant collinear/near-collinear points while preserving stroke
+    /// shape within `tolerance` (in canvas points).
+    static func simplifyRDP(_ points: [CGPoint], tolerance: CGFloat = 0.3) -> [CGPoint] {
+        guard points.count > 2, tolerance > 0 else { return points }
+        let tolSq = tolerance * tolerance
+        var keep = [Bool](repeating: false, count: points.count)
+        keep[0] = true
+        keep[points.count - 1] = true
+
+        var stack: [(Int, Int)] = [(0, points.count - 1)]
+        while let (start, end) = stack.popLast() {
+            guard end - start > 1 else { continue }
+            let a = points[start]
+            let b = points[end]
+            var maxDistSq: CGFloat = 0
+            var maxIdx = start
+
+            for i in (start + 1)..<end {
+                let dSq = pointSegmentDistanceSquared(points[i], a, b)
+                if dSq > maxDistSq {
+                    maxDistSq = dSq
+                    maxIdx = i
+                }
+            }
+
+            if maxDistSq > tolSq {
+                keep[maxIdx] = true
+                stack.append((start, maxIdx))
+                stack.append((maxIdx, end))
+            }
+        }
+
+        var result: [CGPoint] = []
+        result.reserveCapacity(points.count)
+        for i in 0..<points.count where keep[i] {
+            result.append(points[i])
+        }
+        return result
+    }
 
     // MARK: - Smoothing
 
@@ -67,7 +275,6 @@ enum GeometryEngine {
             }
         }
 
-        // Fallback (2-point Catmull-Rom or non-Catmull-Rom strokes)
         path.move(to: stroke.points[0])
         var prev = stroke.points[0]
         for i in 1..<stroke.points.count {
@@ -84,8 +291,6 @@ enum GeometryEngine {
 
     // MARK: - Bounding Boxes
 
-    /// Returns the axis-aligned bounding box of a single stroke, expanded by half
-    /// its visual line width (including Sharpie glow margin).
     static func strokeBounds(_ stroke: Stroke) -> CGRect {
         guard let first = stroke.points.first else { return .null }
         var minX = first.x, maxX = first.x
@@ -100,8 +305,6 @@ enum GeometryEngine {
         return CGRect(x: minX - margin, y: minY - margin, width: (maxX - minX) + margin * 2, height: (maxY - minY) + margin * 2)
     }
 
-    /// Computes a unified bounding box over all non-eraser strokes and placed images,
-    /// properly supporting negative infinite-canvas coordinates.
     static func boundingBox(of strokes: [Stroke], images: [PlacedImage], padding: CGFloat = 0) -> CGRect? {
         var minX = CGFloat.greatestFiniteMagnitude
         var maxX = -CGFloat.greatestFiniteMagnitude
@@ -146,6 +349,11 @@ enum GeometryEngine {
         hypot(a.x - b.x, a.y - b.y)
     }
 
+    static func distanceSquared(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = a.x - b.x, dy = a.y - b.y
+        return dx * dx + dy * dy
+    }
+
     static func pointInPolygon(_ point: CGPoint, _ polygon: [CGPoint]) -> Bool {
         guard polygon.count >= 3 else { return false }
         var inside = false
@@ -180,7 +388,6 @@ enum GeometryEngine {
         sqrt(pointSegmentDistanceSquared(p, a, b))
     }
 
-    /// Returns whether two line segments AB and CD properly intersect.
     private static func segmentsIntersect(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> Bool {
         func cross(_ o: CGPoint, _ u: CGPoint, _ v: CGPoint) -> CGFloat {
             (u.x - o.x) * (v.y - o.y) - (u.y - o.y) * (v.x - o.x)
@@ -193,7 +400,6 @@ enum GeometryEngine {
                ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
     }
 
-    /// Minimum squared distance between line segments AB and CD.
     static func segmentSegmentDistanceSquared(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> CGFloat {
         if segmentsIntersect(a, b, c, d) { return 0 }
         return min(
@@ -204,19 +410,28 @@ enum GeometryEngine {
 
     // MARK: - Erasing
 
-    /// Erases strokes touched by `eraser` using bounding-box pre-filtering and
-    /// segment-to-segment distance checks so fast sparse strokes don't skip lines.
+    /// Erases strokes touched by `eraser`, optionally using a `SpatialHashGrid`
+    /// to skip strokes outside the eraser's bounding box in O(1) buckets.
     static func erase(
         strokes: [Stroke],
         with eraser: Stroke,
         mode: EraserMode,
-        target: EraseTarget
+        target: EraseTarget,
+        spatialGrid: SpatialHashGrid? = nil
     ) -> [Stroke] {
         guard !eraser.points.isEmpty else { return strokes }
 
         let radius = max(eraser.lineWidth / 2, 0.5)
         let radiusSq = radius * radius
         let eraserBounds = strokeBounds(eraser).insetBy(dx: -radius, dy: -radius)
+
+        let candidateIndices: Set<Int>?
+        if let grid = spatialGrid {
+            grid.sync(with: strokes)
+            candidateIndices = Set(grid.queryIndices(in: eraserBounds))
+        } else {
+            candidateIndices = nil
+        }
 
         let isTargeted: (Stroke) -> Bool = { stroke in
             switch target {
@@ -226,7 +441,6 @@ enum GeometryEngine {
             }
         }
 
-        // Pre-build eraser segments (or single point if count == 1)
         let eraserSegments: [(CGPoint, CGPoint)]
         if eraser.points.count >= 2 {
             eraserSegments = (0..<(eraser.points.count - 1)).map { (eraser.points[$0], eraser.points[$0 + 1]) }
@@ -260,13 +474,27 @@ enum GeometryEngine {
         }
 
         if mode == .full {
-            return strokes.filter { $0.isEraser || !isTargeted($0) || !strokeHit($0) }
+            var kept: [Stroke] = []
+            kept.reserveCapacity(strokes.count)
+            for (idx, pen) in strokes.enumerated() {
+                if let candidates = candidateIndices, !candidates.contains(idx) {
+                    kept.append(pen)
+                    continue
+                }
+                if pen.isEraser || !isTargeted(pen) || !strokeHit(pen) {
+                    kept.append(pen)
+                }
+            }
+            return kept
         }
 
-        // Partial erase: split targeted strokes where points/segments fall inside the eraser radius.
         var result: [Stroke] = []
         result.reserveCapacity(strokes.count)
-        for pen in strokes {
+        for (idx, pen) in strokes.enumerated() {
+            if let candidates = candidateIndices, !candidates.contains(idx) {
+                result.append(pen)
+                continue
+            }
             if pen.isEraser || !isTargeted(pen) || !strokeBounds(pen).intersects(eraserBounds) {
                 result.append(pen)
                 continue
@@ -320,7 +548,6 @@ enum GeometryEngine {
 
     // MARK: - Image Resizing
 
-    /// Aspect-ratio-locked corner resize that guards against zero dimensions / NaN.
     static func resizedRect(start: CGRect, corner: Int, offset: CGSize, minSize: CGFloat = 10) -> CGRect? {
         guard start.width > 0, start.height > 0,
               start.width.isFinite, start.height.isFinite,
@@ -331,7 +558,7 @@ enum GeometryEngine {
         var newRect = start
 
         switch corner {
-        case 0: // top-left
+        case 0:
             if dragX {
                 let newW = max(minSize, start.width - offset.width)
                 let newH = newW / aspect
@@ -341,7 +568,7 @@ enum GeometryEngine {
                 let newW = newH * aspect
                 newRect = CGRect(x: start.maxX - newW, y: start.maxY - newH, width: newW, height: newH)
             }
-        case 1: // top-right
+        case 1:
             if dragX {
                 let newW = max(minSize, start.width + offset.width)
                 let newH = newW / aspect
@@ -351,7 +578,7 @@ enum GeometryEngine {
                 let newW = newH * aspect
                 newRect = CGRect(x: start.minX, y: start.maxY - newH, width: newW, height: newH)
             }
-        case 2: // bottom-right
+        case 2:
             if dragX {
                 let newW = max(minSize, start.width + offset.width)
                 let newH = newW / aspect
@@ -361,7 +588,7 @@ enum GeometryEngine {
                 let newW = newH * aspect
                 newRect = CGRect(x: start.minX, y: start.minY, width: newW, height: newH)
             }
-        case 3: // bottom-left
+        case 3:
             if dragX {
                 let newW = max(minSize, start.width - offset.width)
                 let newH = newW / aspect

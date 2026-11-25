@@ -2,22 +2,22 @@ import SwiftUI
 
 @main
 struct DoodlesApp: App {
-    @StateObject private var model = DrawingModel()
+    @State private var model = DrawingModel()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .environmentObject(model)
-                .onReceive(model.$currentBoardId) { _ in setTitle() }
-                .onReceive(model.$showWelcome) { _ in setTitle() }
-                .onReceive(model.$welcomeFolderName) { _ in setTitle() }
+                .environment(model)
+                .onChange(of: model.currentBoardId) { _, _ in setTitle() }
+                .onChange(of: model.showWelcome) { _, _ in setTitle() }
+                .onChange(of: model.welcomeFolderName) { _, _ in setTitle() }
                 .onAppear {
                     setTitle()
                 }
                 #if os(macOS)
                 .background(WindowAccessor(model: model))
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-                    model.flushAutoSave()
+                    model.flushAutoSave(drainBackgroundQueue: true)
                 }
                 #endif
         }

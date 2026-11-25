@@ -1,4 +1,4 @@
-import Combine
+import Observation
 import SwiftUI
 import UniformTypeIdentifiers
 #if os(macOS)
@@ -9,7 +9,7 @@ import UIKit
 typealias PlatformImage = UIImage
 #endif
 
-struct Stroke: Identifiable, Codable {
+nonisolated struct Stroke: Identifiable, Codable, Sendable {
     var id = UUID()
     var points: [CGPoint]
     let color: CodableColor
@@ -57,6 +57,7 @@ struct Stroke: Identifiable, Codable {
 
     var uiColor: Color { color.color }
 
+    @MainActor
     func displayColor(for model: DrawingModel) -> Color {
         StrokeRenderer.resolveDisplayColor(
             for: self,
@@ -66,7 +67,7 @@ struct Stroke: Identifiable, Codable {
     }
 }
 
-struct CodableColor: Codable, Equatable {
+nonisolated struct CodableColor: Codable, Equatable, Sendable {
     let r: Double
     let g: Double
     let b: Double
@@ -86,7 +87,7 @@ struct CodableColor: Codable, Equatable {
     var color: Color { Color(.sRGB, red: r, green: g, blue: b, opacity: a) }
 }
 
-struct PlacedImage: Identifiable, Codable {
+nonisolated struct PlacedImage: Identifiable, Codable, Sendable {
     var id = UUID()
     var position: CodablePoint
     var size: CodablePoint  // stored as (width, height)
@@ -103,7 +104,7 @@ struct PlacedImage: Identifiable, Codable {
     var cgSize: CGSize { CGSize(width: size.cgPoint.x, height: size.cgPoint.y) }
 }
 
-struct CodablePoint: Codable, Equatable {
+nonisolated struct CodablePoint: Codable, Equatable, Sendable {
     let x: Double
     let y: Double
     init(_ p: CGPoint) { x = Double(p.x); y = Double(p.y) }
@@ -206,80 +207,108 @@ struct EraserSettings {
     var eraseTarget: EraseTarget = .all
 }
 
-class DrawingModel: ObservableObject {
-    @Published var strokes: [Stroke] = []
-    @Published var placedImages: [PlacedImage] = []
-    @Published var currentTool: Tool = .pen
-    @Published var canUndo: Bool = false
-    @Published var canRedo: Bool = false
+@Observable
+final class DrawingModel {
+    var strokes: [Stroke] = [] {
+        didSet { committedRevision &+= 1 }
+    }
+    var placedImages: [PlacedImage] = [] {
+        didSet { committedRevision &+= 1 }
+    }
+    var currentTool: Tool = .pen {
+        didSet { scheduleSettingsSave() }
+    }
+    var canUndo: Bool = false
+    var canRedo: Bool = false
 
-    @Published var penPresetIndex: Int = 0
-    @Published var sharpiePresetIndex: Int = 0
-    @Published var penSettings = PenSettings()
-    @Published var sharpieSettings = SharpieSettings()
-    @Published var eraserSettings = EraserSettings()
-    @Published var appSettings = AppSettings()
+    var penPresetIndex: Int = 0 {
+        didSet { scheduleSettingsSave() }
+    }
+    var sharpiePresetIndex: Int = 0 {
+        didSet { scheduleSettingsSave() }
+    }
+    var penSettings = PenSettings() {
+        didSet { scheduleSettingsSave() }
+    }
+    var sharpieSettings = SharpieSettings() {
+        didSet { scheduleSettingsSave() }
+    }
+    var eraserSettings = EraserSettings() {
+        didSet { scheduleSettingsSave() }
+    }
+    var appSettings = AppSettings() {
+        didSet { scheduleSettingsSave() }
+    }
 
-    @Published var recentFiles: [URL] = []
-    @Published var boards: [BoardMeta] = []
-    @Published var folders: [BoardFolder] = []
-    @Published var trashedBoards: [TrashEntry] = []
-    @Published var currentBoardId: String?
+    var recentFiles: [URL] = []
+    var boards: [BoardMeta] = []
+    var folders: [BoardFolder] = []
+    var trashedBoards: [TrashEntry] = []
+    var currentBoardId: String?
 
-    @Published var selectionLasso: [CGPoint] = []
-    @Published var selectionBoundary: [CGPoint] = []
-    @Published var selectedStrokeIds: Set<UUID> = []
-    @Published var selectedImageIds: Set<UUID> = []
+    var selectionLasso: [CGPoint] = []
+    var selectionBoundary: [CGPoint] = []
+    var selectedStrokeIds: Set<UUID> = []
+    var selectedImageIds: Set<UUID> = []
 
-    @Published var pendingAction: PendingAction?
-    @Published var showDeleteMenu: Bool = false
-    @Published var deleteMenuLocation: CGPoint = .zero
-    @Published var showClearConfirmation: Bool = false
-    @Published var isToolbarVisible: Bool = true
-    @Published var showWelcome: Bool = true
-    @Published var needsRecenter: Bool = false
-    @Published var welcomeFolderName: String?
-    @Published var lastErrorMessage: String?
-    /// Incremented when background thumbnail generation finishes so WelcomeView refreshes.
-    @Published private(set) var thumbnailRevision: Int = 0
+    var pendingAction: PendingAction?
+    var showDeleteMenu: Bool = false
+    var deleteMenuLocation: CGPoint = .zero
+    var showClearConfirmation: Bool = false
+    var isToolbarVisible: Bool = true
+    var showWelcome: Bool = true
+    var needsRecenter: Bool = false
+    var welcomeFolderName: String?
+    var lastErrorMessage: String?
 
-    var currentStroke: Stroke?
-    var previousTool: Tool = .pen
-    var lastCanvasTapLocation: CGPoint = .zero
-    var imageCache: [UUID: PlatformImage] = [:]
+    /// Bumped whenever committed strokes or placed images change so the canvas
+    /// backing store knows when to re-bake (or incrementally append).
+    private(set) var committedRevision: Int = 0
+    /// Bumped when background thumbnail generation finishes so WelcomeView refreshes.
+    private(set) var thumbnailRevision: Int = 0
 
-    var openFileURL: URL? {
+    @ObservationIgnored var currentStroke: Stroke?
+    @ObservationIgnored var previousTool: Tool = .pen
+    @ObservationIgnored var lastCanvasTapLocation: CGPoint = .zero
+    @ObservationIgnored var imageCache: [UUID: PlatformImage] = [:]
+    @ObservationIgnored let spatialGrid = SpatialHashGrid(cellSize: 256)
+
+    @ObservationIgnored var openFileURL: URL? {
         didSet {
             if let url = openFileURL { addRecent(url) }
         }
     }
 
-    let store: BoardStore
-    private let userDefaults: UserDefaults
-    private var history = CanvasHistory(maxSnapshots: 100)
+    @ObservationIgnored let store: BoardStore
+    @ObservationIgnored private let userDefaults: UserDefaults
+    @ObservationIgnored private var history = CanvasHistory(maxSnapshots: 100)
+    @ObservationIgnored private var isInitializing = true
 
-    private let recentKey = "recentFiles"
-    private let maxRecent = 5
-    private let defaultsKey = "savedDefaults"
+    @ObservationIgnored private let recentKey = "recentFiles"
+    @ObservationIgnored private let maxRecent = 5
+    @ObservationIgnored private let defaultsKey = "savedDefaults"
 
-    private var settingsSaveSubscription: AnyCancellable?
-    private var saveWorkItem: DispatchWorkItem?
-    private var pendingAutoSaveBoardId: String?
+    @ObservationIgnored private var settingsSaveWorkItem: DispatchWorkItem?
+    @ObservationIgnored private var saveWorkItem: DispatchWorkItem?
+    @ObservationIgnored private var pendingAutoSaveBoardId: String?
 
     // Async thumbnail cache + in-flight deduplication
-    private let thumbnailCache = NSCache<NSString, PlatformImage>()
-    private var thumbnailKeys: Set<String> = []
-    private var inFlightThumbnails: Set<String> = []
-    private let thumbnailQueue = DispatchQueue(label: "com.whiteboard.thumbnails", qos: .userInitiated)
+    @ObservationIgnored private let thumbnailCache = NSCache<NSString, PlatformImage>()
+    @ObservationIgnored private var thumbnailKeys: Set<String> = []
+    @ObservationIgnored private var inFlightThumbnails: Set<String> = []
+    @ObservationIgnored private let thumbnailQueue = DispatchQueue(label: "com.whiteboard.thumbnails", qos: .userInitiated)
 
     // Move / Resize state
-    var isMoving: Bool = false
-    var isResizing: Bool = false
-    var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft
-    var resizeImageId: UUID?
-    var resizeStartRect: CGRect = .zero
-    var lastMovePoint: CGPoint = .zero
-    private var moveSnapshotTaken: Bool = false
+    @ObservationIgnored var isMoving: Bool = false
+    @ObservationIgnored var isResizing: Bool = false
+    @ObservationIgnored var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft
+    @ObservationIgnored var resizeImageId: UUID?
+    @ObservationIgnored var resizeStartRect: CGRect = .zero
+    @ObservationIgnored var lastMovePoint: CGPoint = .zero
+    @ObservationIgnored private var moveSnapshotTaken: Bool = false
+
+    /// Minimum canvas-space squared distance between consecutive raw stroke points.
+    @ObservationIgnored private let minStrokePointDistanceSq: CGFloat = 1.25 * 1.25
 
     enum PendingAction: Equatable {
         case open
@@ -297,22 +326,17 @@ class DrawingModel: ObservableObject {
         loadDefaults()
         loadRecents()
         loadBoards()
+        isInitializing = false
+    }
 
-        // Only observe actual settings publishers rather than all objectWillChange events
-        // so drawing strokes doesn't trigger UserDefaults writes.
-        let settingsChanges = Publishers.MergeMany([
-            $penSettings.map { _ in () }.eraseToAnyPublisher(),
-            $sharpieSettings.map { _ in () }.eraseToAnyPublisher(),
-            $eraserSettings.map { _ in () }.eraseToAnyPublisher(),
-            $appSettings.map { _ in () }.eraseToAnyPublisher(),
-            $currentTool.map { _ in () }.eraseToAnyPublisher(),
-        ])
-        settingsSaveSubscription = settingsChanges
-            .dropFirst(5) // ignore initial values emitted on subscription
-            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
-            .sink { [weak self] in
-                self?.saveDefaults()
-            }
+    private func scheduleSettingsSave() {
+        guard !isInitializing else { return }
+        settingsSaveWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.saveDefaults()
+        }
+        settingsSaveWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: item)
     }
 
     private func reportError(_ message: String) {
@@ -333,7 +357,6 @@ class DrawingModel: ObservableObject {
             recentFiles = paths.map { URL(fileURLWithPath: $0) }
             return
         }
-        // Backward compatibility with legacy NSKeyedArchiver storage
         if let urls = (try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSURL.self], from: data)) as? [URL] {
             recentFiles = urls
         }
@@ -371,19 +394,23 @@ class DrawingModel: ObservableObject {
         let isDarkMode: Bool
         let revealSettingsOnSingleTap: Bool
         let pencilOnly: Bool?
+        let penPresetIndex: Int?
+        let sharpiePresetIndex: Int?
         let currentTool: String
 
         enum CodingKeys: String, CodingKey {
             case penLightColor, penDarkColor, penThickness,
                  sharpieLightColor, sharpieDarkColor, sharpieThickness,
-                 eraserSize, eraserMode, eraseTarget, canvasBg, isDarkMode, revealSettingsOnSingleTap, pencilOnly, currentTool
+                 eraserSize, eraserMode, eraseTarget, canvasBg, isDarkMode, revealSettingsOnSingleTap, pencilOnly,
+                 penPresetIndex, sharpiePresetIndex, currentTool
         }
 
         init(
             penLightColor: CodableColor, penDarkColor: CodableColor, penThickness: CGFloat,
             sharpieLightColor: CodableColor?, sharpieDarkColor: CodableColor?, sharpieThickness: CGFloat?,
             eraserSize: CGFloat, eraserMode: String, eraseTarget: String?, canvasBg: String,
-            isDarkMode: Bool, revealSettingsOnSingleTap: Bool, pencilOnly: Bool?, currentTool: String
+            isDarkMode: Bool, revealSettingsOnSingleTap: Bool, pencilOnly: Bool?,
+            penPresetIndex: Int?, sharpiePresetIndex: Int?, currentTool: String
         ) {
             self.penLightColor = penLightColor
             self.penDarkColor = penDarkColor
@@ -398,6 +425,8 @@ class DrawingModel: ObservableObject {
             self.isDarkMode = isDarkMode
             self.revealSettingsOnSingleTap = revealSettingsOnSingleTap
             self.pencilOnly = pencilOnly
+            self.penPresetIndex = penPresetIndex
+            self.sharpiePresetIndex = sharpiePresetIndex
             self.currentTool = currentTool
         }
 
@@ -416,6 +445,8 @@ class DrawingModel: ObservableObject {
             isDarkMode = try c.decode(Bool.self, forKey: .isDarkMode)
             revealSettingsOnSingleTap = try c.decodeIfPresent(Bool.self, forKey: .revealSettingsOnSingleTap) ?? true
             pencilOnly = try c.decodeIfPresent(Bool.self, forKey: .pencilOnly)
+            penPresetIndex = try c.decodeIfPresent(Int.self, forKey: .penPresetIndex)
+            sharpiePresetIndex = try c.decodeIfPresent(Int.self, forKey: .sharpiePresetIndex)
             currentTool = try c.decodeIfPresent(String.self, forKey: .currentTool) ?? Tool.pen.rawValue
         }
     }
@@ -435,6 +466,8 @@ class DrawingModel: ObservableObject {
             isDarkMode: appSettings.isDarkMode,
             revealSettingsOnSingleTap: appSettings.revealSettingsOnSingleTap,
             pencilOnly: appSettings.pencilOnly,
+            penPresetIndex: penPresetIndex,
+            sharpiePresetIndex: sharpiePresetIndex,
             currentTool: currentTool.rawValue
         )
         if let data = try? JSONEncoder().encode(s) {
@@ -458,7 +491,29 @@ class DrawingModel: ObservableObject {
         appSettings.isDarkMode = s.isDarkMode
         appSettings.revealSettingsOnSingleTap = s.revealSettingsOnSingleTap
         if let po = s.pencilOnly { appSettings.pencilOnly = po }
+        if let pIdx = s.penPresetIndex, penSettings.lightPresets.indices.contains(pIdx) {
+            penPresetIndex = pIdx
+        } else {
+            let target = appSettings.isDarkMode ? s.penDarkColor : s.penLightColor
+            penPresetIndex = closestPresetIndex(to: target, in: penPresets)
+        }
+        if let sIdx = s.sharpiePresetIndex, sharpieSettings.lightPresets.indices.contains(sIdx) {
+            sharpiePresetIndex = sIdx
+        } else if let sc = appSettings.isDarkMode ? s.sharpieDarkColor : s.sharpieLightColor {
+            sharpiePresetIndex = closestPresetIndex(to: sc, in: sharpiePresets)
+        }
         currentTool = Tool(rawValue: s.currentTool) ?? .pen
+    }
+
+    private func closestPresetIndex(to target: CodableColor, in candidates: [Color]) -> Int {
+        var bestIdx = 0
+        var bestDist = Double.infinity
+        for (j, c) in candidates.enumerated() {
+            let pc = CodableColor(c)
+            let d = (target.r - pc.r) * (target.r - pc.r) + (target.g - pc.g) * (target.g - pc.g) + (target.b - pc.b) * (target.b - pc.b)
+            if d < bestDist { bestDist = d; bestIdx = j }
+        }
+        return bestIdx
     }
 
     func resetToFactory() {
@@ -511,7 +566,6 @@ class DrawingModel: ObservableObject {
         currentBoardId = meta.id
         openFileURL = store.boardURL(for: meta.id)
         resetCanvasState()
-        // Persist initial empty board file immediately so it exists on disk.
         do {
             try store.saveBoardSync(id: meta.id, saveData: SaveData(strokes: [], placedImages: []))
         } catch {
@@ -608,6 +662,7 @@ class DrawingModel: ObservableObject {
             currentBoardId = id
             openFileURL = store.boardURL(for: id)
             migratePresetIndices()
+            spatialGrid.rebuild(with: strokes)
             updateUndoRedo()
         } catch {
             reportError(error.localizedDescription)
@@ -656,42 +711,64 @@ class DrawingModel: ObservableObject {
         }
     }
 
-    /// Synchronously flushes any pending debounced auto-save before switching
-    /// boards, closing a board, or terminating the app.
-    func flushAutoSave() {
-        guard let boardId = pendingAutoSaveBoardId ?? (saveWorkItem != nil ? currentBoardId : nil) else {
-            store.drainPendingWrites()
-            return
-        }
+    func flushAutoSave(drainBackgroundQueue: Bool = false) {
+        let boardId = pendingAutoSaveBoardId ?? (saveWorkItem != nil ? currentBoardId : nil)
         saveWorkItem?.cancel()
         saveWorkItem = nil
         pendingAutoSaveBoardId = nil
 
-        guard currentBoardId == boardId else {
+        if let boardId, currentBoardId == boardId {
+            let snapshot = SaveData(strokes: strokes, placedImages: placedImages)
+            invalidateThumbnail(for: boardId)
+            if let idx = boards.firstIndex(where: { $0.id == boardId }) {
+                boards[idx].modified = Date()
+                saveBoards()
+            }
+            do {
+                try store.saveBoardSync(id: boardId, saveData: snapshot)
+            } catch {
+                reportError(error.localizedDescription)
+            }
+        }
+        if drainBackgroundQueue {
             store.drainPendingWrites()
-            return
         }
-
-        let snapshot = SaveData(strokes: strokes, placedImages: placedImages)
-        invalidateThumbnail(for: boardId)
-        if let idx = boards.firstIndex(where: { $0.id == boardId }) {
-            boards[idx].modified = Date()
-            saveBoards()
-        }
-        do {
-            try store.saveBoardSync(id: boardId, saveData: snapshot)
-        } catch {
-            reportError(error.localizedDescription)
-        }
-        store.drainPendingWrites()
     }
 
-    // MARK: - Theme-aware colors
+    // MARK: - Theme-aware colors (always synchronized with preset indices)
 
-    var penColor: Color { appSettings.isDarkMode ? penSettings.darkColor : penSettings.lightColor }
     var penPresets: [Color] { appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets }
-    var sharpieColor: Color { appSettings.isDarkMode ? sharpieSettings.darkColor : sharpieSettings.lightColor }
     var sharpiePresets: [Color] { appSettings.isDarkMode ? sharpieSettings.darkPresets : sharpieSettings.lightPresets }
+
+    var penColor: Color {
+        if penPresets.indices.contains(penPresetIndex) {
+            return penPresets[penPresetIndex]
+        }
+        return appSettings.isDarkMode ? penSettings.darkColor : penSettings.lightColor
+    }
+
+    var sharpieColor: Color {
+        if sharpiePresets.indices.contains(sharpiePresetIndex) {
+            return sharpiePresets[sharpiePresetIndex]
+        }
+        return appSettings.isDarkMode ? sharpieSettings.darkColor : sharpieSettings.lightColor
+    }
+
+    func selectPenPreset(_ index: Int) {
+        guard penSettings.lightPresets.indices.contains(index),
+              penSettings.darkPresets.indices.contains(index) else { return }
+        penPresetIndex = index
+        penSettings.lightColor = penSettings.lightPresets[index]
+        penSettings.darkColor = penSettings.darkPresets[index]
+    }
+
+    func selectSharpiePreset(_ index: Int) {
+        guard sharpieSettings.lightPresets.indices.contains(index),
+              sharpieSettings.darkPresets.indices.contains(index) else { return }
+        sharpiePresetIndex = index
+        sharpieSettings.lightColor = sharpieSettings.lightPresets[index]
+        sharpieSettings.darkColor = sharpieSettings.darkPresets[index]
+    }
 
     // MARK: - History Helpers
 
@@ -720,6 +797,7 @@ class DrawingModel: ObservableObject {
         strokes.removeAll()
         placedImages.removeAll()
         imageCache.removeAll()
+        spatialGrid.invalidate()
         currentStroke = nil
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
@@ -753,6 +831,14 @@ class DrawingModel: ObservableObject {
     }
 
     func addPoint(_ point: CGPoint) {
+        guard let last = currentStroke?.points.last else {
+            currentStroke?.points.append(point)
+            return
+        }
+        // Filter duplicate / sub-pixel jitter points in canvas space.
+        if GeometryEngine.distanceSquared(last, point) < minStrokePointDistanceSq {
+            return
+        }
         currentStroke?.points.append(point)
     }
 
@@ -765,12 +851,13 @@ class DrawingModel: ObservableObject {
                 strokes: strokes,
                 with: stroke,
                 mode: eraserSettings.mode,
-                target: eraserSettings.eraseTarget
+                target: eraserSettings.eraseTarget,
+                spatialGrid: spatialGrid
             )
-            // Only push undo snapshot if the eraser actually changed something.
             if updated.count != strokes.count || !zip(updated, strokes).allSatisfy({ $0.id == $1.id && $0.points.count == $1.points.count }) {
                 saveState()
                 strokes = updated
+                spatialGrid.rebuild(with: strokes)
                 updateUndoRedo()
                 scheduleAutoSave()
             }
@@ -780,6 +867,7 @@ class DrawingModel: ObservableObject {
         guard stroke.points.count >= 2 else { return }
         saveState()
         strokes.append(stroke)
+        spatialGrid.sync(with: strokes)
         updateUndoRedo()
         scheduleAutoSave()
     }
@@ -791,7 +879,7 @@ class DrawingModel: ObservableObject {
     }
 
     func addLassoPoint(_ point: CGPoint) {
-        if let last = selectionLasso.last, GeometryEngine.distance(last, point) < 5 { return }
+        if let last = selectionLasso.last, GeometryEngine.distanceSquared(last, point) < 25 { return }
         selectionLasso.append(point)
     }
 
@@ -810,7 +898,11 @@ class DrawingModel: ObservableObject {
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
 
-        for stroke in strokes where !stroke.isEraser {
+        spatialGrid.sync(with: strokes)
+        let candidateIndices = spatialGrid.queryIndices(in: path.boundingBoxOfPath)
+        for idx in candidateIndices {
+            let stroke = strokes[idx]
+            guard !stroke.isEraser else { continue }
             for p in stroke.points where path.contains(p) {
                 selectedStrokeIds.insert(stroke.id)
                 break
@@ -918,6 +1010,7 @@ class DrawingModel: ObservableObject {
         resizeImageId = nil
         moveSnapshotTaken = false
         if didMutate {
+            spatialGrid.rebuild(with: strokes)
             updateUndoRedo()
             scheduleAutoSave()
         }
@@ -990,6 +1083,7 @@ class DrawingModel: ObservableObject {
             selectedImageIds.removeAll()
         }
         selectionBoundary.removeAll()
+        spatialGrid.rebuild(with: strokes)
         updateUndoRedo()
         scheduleAutoSave()
     }
@@ -1088,6 +1182,7 @@ class DrawingModel: ObservableObject {
         } else {
             selectionBoundary.removeAll()
         }
+        spatialGrid.rebuild(with: strokes)
         updateUndoRedo()
         scheduleAutoSave()
     }
@@ -1194,6 +1289,7 @@ class DrawingModel: ObservableObject {
         selectedStrokeIds = prev.selectedStrokeIds
         selectedImageIds = prev.selectedImageIds
         selectionBoundary = prev.selectionBoundary
+        spatialGrid.rebuild(with: strokes)
         pruneImageCache()
         updateUndoRedo()
         scheduleAutoSave()
@@ -1206,6 +1302,7 @@ class DrawingModel: ObservableObject {
         selectedStrokeIds = next.selectedStrokeIds
         selectedImageIds = next.selectedImageIds
         selectionBoundary = next.selectionBoundary
+        spatialGrid.rebuild(with: strokes)
         pruneImageCache()
         updateUndoRedo()
         scheduleAutoSave()
@@ -1221,6 +1318,7 @@ class DrawingModel: ObservableObject {
         strokes.removeAll()
         placedImages.removeAll()
         imageCache.removeAll()
+        spatialGrid.invalidate()
         currentStroke = nil
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
@@ -1232,6 +1330,7 @@ class DrawingModel: ObservableObject {
 
     // MARK: - Save / Load / Export
 
+    /// Portable JSON `.wb` export payload (always embeds images for single-file sharing).
     func saveData() -> Data? {
         let data = SaveData(strokes: strokes, placedImages: placedImages)
         return try? JSONEncoder().encode(data)
@@ -1245,6 +1344,7 @@ class DrawingModel: ObservableObject {
             placedImages = save.placedImages
             imageCache.removeAll()
             migratePresetIndices()
+            spatialGrid.rebuild(with: strokes)
             updateUndoRedo()
         } catch {
             reportError("Failed to open file: \(error.localizedDescription)")
@@ -1327,8 +1427,6 @@ class DrawingModel: ObservableObject {
         )
     }
 
-    /// Renders an arbitrary board (loaded from disk) to PNG data, used by the
-    /// homescreen's bulk-export action.
     func pngData(forBoardId id: String) -> Data? {
         let save: SaveData
         if id == currentBoardId {
@@ -1365,10 +1463,8 @@ class DrawingModel: ObservableObject {
         )
     }
 
-    // MARK: - Async Thumbnails
+    // MARK: - Persistent Disk + Memory Async Thumbnails
 
-    /// Returns a cached thumbnail immediately if available, or schedules background
-    /// decoding/rendering and bumps `thumbnailRevision` when ready.
     func thumbnail(for boardId: String, size: CGSize = CGSize(width: 240, height: 320)) -> PlatformImage? {
         let isDark = appSettings.isDarkMode
         let key = "\(boardId)|\(isDark ? 1 : 0)|\(Int(size.width))x\(Int(size.height))"
@@ -1384,21 +1480,32 @@ class DrawingModel: ObservableObject {
             ? SaveData(strokes: strokes, placedImages: placedImages)
             : nil
         let boardStore = self.store
+        let renderSize = CGSize(width: 240, height: 320)
 
         thumbnailQueue.async { [weak self] in
-            let save = inMemorySave ?? boardStore.loadBoardData(id: boardId)
-            let rendered: PlatformImage?
-            if let save, (!save.strokes.isEmpty || !save.placedImages.isEmpty) {
-                rendered = StrokeRenderer.renderThumbnail(
-                    strokes: save.strokes,
-                    placedImages: save.placedImages,
-                    penPresets: penP,
-                    sharpiePresets: sharpieP,
-                    isDarkMode: isDark,
-                    size: size
-                )
+            var rendered: PlatformImage?
+
+            // 1. Fast path: load pre-rendered PNG thumbnail directly from disk
+            if inMemorySave == nil,
+               let diskData = boardStore.loadDiskThumbnail(for: boardId, isDark: isDark),
+               let img = PlatformImage(data: diskData) {
+                rendered = img
             } else {
-                rendered = nil
+                // 2. Render from board data and persist PNG thumbnail to disk
+                let save = inMemorySave ?? boardStore.loadBoardData(id: boardId)
+                if let save, (!save.strokes.isEmpty || !save.placedImages.isEmpty) {
+                    rendered = StrokeRenderer.renderThumbnail(
+                        strokes: save.strokes,
+                        placedImages: save.placedImages,
+                        penPresets: penP,
+                        sharpiePresets: sharpieP,
+                        isDarkMode: isDark,
+                        size: renderSize
+                    )
+                    if let rendered, let png = StrokeRenderer.encodeThumbnailPNG(rendered) {
+                        boardStore.saveDiskThumbnail(for: boardId, isDark: isDark, pngData: png)
+                    }
+                }
             }
 
             DispatchQueue.main.async {
@@ -1421,5 +1528,6 @@ class DrawingModel: ObservableObject {
         }
         thumbnailKeys = thumbnailKeys.filter { !$0.hasPrefix(prefix) }
         inFlightThumbnails = inFlightThumbnails.filter { !$0.hasPrefix(prefix) }
+        store.invalidateDiskThumbnails(for: boardId)
     }
 }

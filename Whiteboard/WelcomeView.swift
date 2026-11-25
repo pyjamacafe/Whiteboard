@@ -5,7 +5,7 @@ import AppKit
 #endif
 
 struct WelcomeView: View {
-    @ObservedObject var model: DrawingModel
+    var model: DrawingModel
     @State private var showNewName = false
     @State private var showNewFolder = false
     @State private var newName = ""

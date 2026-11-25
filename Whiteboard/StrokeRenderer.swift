@@ -236,6 +236,22 @@ enum StrokeRenderer {
         return UIImage(cgImage: cgImg)
         #endif
     }
+
+    static func encodeThumbnailPNG(_ image: PlatformImage) -> Data? {
+        #if os(macOS)
+        var proposed = NSRect(origin: .zero, size: image.size)
+        guard let cgImg = image.cgImage(forProposedRect: &proposed, context: nil, hints: nil) else { return nil }
+        #else
+        guard let cgImg = image.cgImage else { return nil }
+        #endif
+        guard let cfData = CFDataCreateMutable(nil, 0),
+              let dest = CGImageDestinationCreateWithData(cfData, UTType.png.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(dest, cgImg, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return cfData as Data
+    }
 }
 
 /// FileDocument wrapper used by SwiftUI `.fileExporter`.

@@ -1,7 +1,7 @@
 import Foundation
 
-/// Serialized contents of a `.wb` board file.
-struct SaveData: Codable {
+/// Portable serialized contents of a `.wb` board file (JSON-compatible for export/import).
+nonisolated struct SaveData: Codable, Sendable {
     let strokes: [Stroke]
     let placedImages: [PlacedImage]
 
@@ -21,29 +21,42 @@ struct SaveData: Codable {
     }
 }
 
-struct BoardMeta: Codable, Identifiable, Equatable {
+/// Fast internal on-disk representation: binary plist + external image asset refs
+/// so auto-save never re-encodes megabytes of base64 image data on every stroke.
+private nonisolated struct StoredImageRef: Codable, Sendable {
+    let id: UUID
+    let position: CodablePoint
+    let size: CodablePoint
+}
+
+private nonisolated struct BinaryBoardData: Codable, Sendable {
+    let version: Int
+    let strokes: [Stroke]
+    let imageRefs: [StoredImageRef]
+}
+
+nonisolated struct BoardMeta: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
     var created: Date
     var modified: Date
 }
 
-struct BoardFolder: Codable, Identifiable, Equatable {
+nonisolated struct BoardFolder: Codable, Identifiable, Equatable, Sendable {
     var id: String
     var name: String
     var boardIds: [String]
 }
 
-struct BoardIndex: Codable, Equatable {
+nonisolated struct BoardIndex: Codable, Equatable, Sendable {
     var boards: [BoardMeta]
     var folders: [BoardFolder]
 }
 
-struct TrashEntry: Codable, Identifiable, Equatable {
+nonisolated struct TrashEntry: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let name: String
     let deletedAt: Date
-    /// Exact filename inside `.trash/` so cleanup and restore never mismatch timestamps.
     let fileName: String?
 
     enum CodingKeys: String, CodingKey {
@@ -92,8 +105,11 @@ enum BoardStoreError: LocalizedError {
     }
 }
 
-/// Manages atomic disk I/O for boards, folders, and the 30-day trash directory.
-final class BoardStore {
+/// Manages atomic disk I/O for boards, external image assets, disk thumbnails,
+/// folders, and the 30-day trash directory.
+/// Explicitly `nonisolated` so background `ioQueue` and `thumbnailQueue` work
+/// never contends with or deadlocks against `@MainActor`.
+nonisolated final class BoardStore: @unchecked Sendable {
     let baseDirectory: URL
     private let fileManager: FileManager
     private let ioQueue = DispatchQueue(label: "com.whiteboard.boardstore.io", qos: .utility)
@@ -122,9 +138,19 @@ final class BoardStore {
     var indexURL: URL { baseDirectory.appendingPathComponent("boards.json") }
     var trashDirectory: URL { baseDirectory.appendingPathComponent(".trash", isDirectory: true) }
     var trashIndexURL: URL { trashDirectory.appendingPathComponent("trash_index.json") }
+    var assetsDirectory: URL { baseDirectory.appendingPathComponent(".assets", isDirectory: true) }
+    var thumbsDirectory: URL { baseDirectory.appendingPathComponent(".thumbs", isDirectory: true) }
 
     func boardURL(for id: String) -> URL {
         baseDirectory.appendingPathComponent("\(id).wb")
+    }
+
+    func assetURL(for imageId: UUID) -> URL {
+        assetsDirectory.appendingPathComponent("\(imageId.uuidString).img")
+    }
+
+    func thumbnailURL(for boardId: String, isDark: Bool) -> URL {
+        thumbsDirectory.appendingPathComponent("\(boardId)_\(isDark ? "dark" : "light").png")
     }
 
     private func ensureDirectoryExists(_ url: URL) {
@@ -147,7 +173,6 @@ final class BoardStore {
                 folders: decoded.folders
             )
         } catch {
-            // Back up the unreadable index so a subsequent save never silently destroys it.
             let backupName = "boards.json.corrupt.\(Int(Date().timeIntervalSince1970))"
             let backupURL = baseDirectory.appendingPathComponent(backupName)
             var savedBackup: URL?
@@ -168,7 +193,49 @@ final class BoardStore {
         }
     }
 
-    // MARK: - Board Files
+    // MARK: - Board Files (Fast Binary Plist + External Assets, Legacy JSON compatible)
+
+    private static let binaryPlistMagic = Data("bplist00".utf8)
+
+    private func decodeBoardData(_ data: Data) throws -> SaveData {
+        if data.starts(with: Self.binaryPlistMagic) {
+            let binary = try PropertyListDecoder().decode(BinaryBoardData.self, from: data)
+            var images: [PlacedImage] = []
+            images.reserveCapacity(binary.imageRefs.count)
+            for ref in binary.imageRefs {
+                let url = assetURL(for: ref.id)
+                if let imgData = try? Data(contentsOf: url) {
+                    images.append(PlacedImage(
+                        id: ref.id,
+                        position: ref.position.cgPoint,
+                        size: CGSize(width: ref.size.x, height: ref.size.y),
+                        imageData: imgData
+                    ))
+                }
+            }
+            return SaveData(strokes: binary.strokes, placedImages: images)
+        }
+        return try JSONDecoder().decode(SaveData.self, from: data)
+    }
+
+    private func encodeBoardData(_ saveData: SaveData) throws -> Data {
+        if !saveData.placedImages.isEmpty {
+            ensureDirectoryExists(assetsDirectory)
+            for img in saveData.placedImages {
+                let url = assetURL(for: img.id)
+                if !fileManager.fileExists(atPath: url.path) {
+                    try img.imageData.write(to: url, options: .atomic)
+                }
+            }
+        }
+        let refs = saveData.placedImages.map {
+            StoredImageRef(id: $0.id, position: $0.position, size: $0.size)
+        }
+        let payload = BinaryBoardData(version: 2, strokes: saveData.strokes, imageRefs: refs)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        return try encoder.encode(payload)
+    }
 
     func loadBoard(id: String) throws -> SaveData {
         let url = boardURL(for: id)
@@ -177,7 +244,7 @@ final class BoardStore {
         }
         do {
             let data = try Data(contentsOf: url)
-            return try JSONDecoder().decode(SaveData.self, from: data)
+            return try decodeBoardData(data)
         } catch {
             throw BoardStoreError.ioFailure("Failed to open board", error)
         }
@@ -191,7 +258,7 @@ final class BoardStore {
         ensureDirectoryExists(baseDirectory)
         let url = boardURL(for: id)
         do {
-            let data = try JSONEncoder().encode(saveData)
+            let data = try encodeBoardData(saveData)
             try data.write(to: url, options: .atomic)
         } catch {
             throw BoardStoreError.ioFailure("Failed to save board", error)
@@ -210,9 +277,27 @@ final class BoardStore {
         }
     }
 
-    /// Waits for any queued background writes to finish before terminating.
     func drainPendingWrites() {
         ioQueue.sync {}
+    }
+
+    // MARK: - Persistent Disk Thumbnails
+
+    func loadDiskThumbnail(for boardId: String, isDark: Bool) -> Data? {
+        let url = thumbnailURL(for: boardId, isDark: isDark)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        return try? Data(contentsOf: url)
+    }
+
+    func saveDiskThumbnail(for boardId: String, isDark: Bool, pngData: Data) {
+        ensureDirectoryExists(thumbsDirectory)
+        let url = thumbnailURL(for: boardId, isDark: isDark)
+        try? pngData.write(to: url, options: .atomic)
+    }
+
+    func invalidateDiskThumbnails(for boardId: String) {
+        try? fileManager.removeItem(at: thumbnailURL(for: boardId, isDark: false))
+        try? fileManager.removeItem(at: thumbnailURL(for: boardId, isDark: true))
     }
 
     // MARK: - Trash
@@ -232,8 +317,6 @@ final class BoardStore {
         try data.write(to: trashIndexURL, options: .atomic)
     }
 
-    /// Moves a board file into `.trash/` with a single consistent timestamp and
-    /// records the exact filename in `trash_index.json`.
     func trashBoard(id: String, name: String, now: Date = Date()) throws -> [TrashEntry] {
         ensureDirectoryExists(trashDirectory)
         let fileName = "\(id)_\(Int64(now.timeIntervalSince1970 * 1000)).wb"
@@ -250,6 +333,7 @@ final class BoardStore {
                 throw BoardStoreError.ioFailure("Failed to move board to trash", error)
             }
         }
+        invalidateDiskThumbnails(for: id)
 
         var entries = loadTrash()
         entries.append(TrashEntry(id: id, name: name, deletedAt: now, fileName: fileName))
@@ -261,8 +345,6 @@ final class BoardStore {
         return cleanTrash(now: now)
     }
 
-    /// Removes trashed boards older than `retentionDays` (default 30) using their
-    /// recorded filename (falling back to prefix match for legacy entries).
     @discardableResult
     func cleanTrash(now: Date = Date(), retentionDays: TimeInterval = 30) -> [TrashEntry] {
         let entries = loadTrash()
@@ -275,7 +357,6 @@ final class BoardStore {
                 if let fileName = entry.fileName {
                     try? fileManager.removeItem(at: trashDirectory.appendingPathComponent(fileName))
                 } else {
-                    // Legacy fallback: remove any file matching "<id>_*.wb"
                     for file in dirFiles where file.lastPathComponent.hasPrefix("\(entry.id)_") {
                         try? fileManager.removeItem(at: file)
                     }
@@ -291,7 +372,6 @@ final class BoardStore {
         return remaining.sorted { $0.deletedAt > $1.deletedAt }
     }
 
-    /// Restores a trashed board to a new board ID on disk and removes it from trash.
     func restoreBoard(id: String, newBoardId: String) throws -> (name: String, saveData: SaveData, remainingTrash: [TrashEntry]) {
         var entries = loadTrash()
         let entry = entries.first(where: { $0.id == id })
@@ -313,7 +393,7 @@ final class BoardStore {
         let decoded: SaveData
         do {
             data = try Data(contentsOf: sourceURL)
-            decoded = try JSONDecoder().decode(SaveData.self, from: data)
+            decoded = try decodeBoardData(data)
             ensureDirectoryExists(baseDirectory)
             try data.write(to: boardURL(for: newBoardId), options: .atomic)
         } catch {

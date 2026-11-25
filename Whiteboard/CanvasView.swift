@@ -1,20 +1,19 @@
 import SwiftUI
-import Combine
 #if os(iOS)
 import UIKit
 #else
 import AppKit
 #endif
 
-/// Caches smoothed `CGPath` and bounding box per stroke so redraws avoid
-/// recomputing Catmull-Rom splines on every frame. Automatically invalidates
-/// when a stroke's point count or origin changes (e.g. after a move).
+/// Caches smoothed `CGPath`, SwiftUI `Path`, and bounding box per stroke so
+/// redraws avoid recomputing Catmull-Rom splines or copying path geometry.
 final class StrokePathCache {
     struct Entry {
         let pointCount: Int
         let firstPoint: CGPoint
         let lastPoint: CGPoint
         let cgPath: CGPath
+        let swiftUIPath: Path
         let bounds: CGRect
     }
 
@@ -36,6 +35,7 @@ final class StrokePathCache {
             firstPoint: first,
             lastPoint: last,
             cgPath: cgPath,
+            swiftUIPath: Path(cgPath),
             bounds: GeometryEngine.strokeBounds(stroke)
         )
         entries[stroke.id] = entry
@@ -54,7 +54,7 @@ final class StrokePathCache {
 #if os(iOS)
 
 struct CanvasView: UIViewRepresentable {
-    @ObservedObject var model: DrawingModel
+    var model: DrawingModel
     var onBeginDraw: (() -> Void)?
 
     func makeUIView(context: Context) -> DrawingCanvasView {
@@ -66,8 +66,15 @@ struct CanvasView: UIViewRepresentable {
 
     func updateUIView(_ uiView: DrawingCanvasView, context: Context) {
         uiView.model = model
-        uiView.refresh()
         uiView.onBeginDraw = onBeginDraw
+        let _ = model.committedRevision
+        let _ = model.appSettings.isDarkMode
+        let _ = model.appSettings.canvasBackground
+        let _ = model.selectionBoundary.count
+        let _ = model.selectionLasso.count
+        let _ = model.selectedImageIds.count
+        let _ = model.needsRecenter
+        uiView.refresh()
     }
 }
 
@@ -173,13 +180,12 @@ class CanvasGridView: UIView {
     }
 }
 
-// MARK: - Stroke Layer View
+// MARK: - Committed Layer View (Spatial-Culled Cached Paths; Never Redrawn During Active Drag)
 
-class StrokeLayerView: UIView {
+class CommittedLayerView: UIView {
     weak var model: DrawingModel?
     var offset: CGSize = .zero
     var scale: CGFloat = 1.0
-    var dashPhase: CGFloat = 0
     private let pathCache = StrokePathCache()
 
     override init(frame: CGRect) {
@@ -208,7 +214,6 @@ class StrokeLayerView: UIView {
         ctx.translateBy(x: offset.width, y: offset.height)
         ctx.scaleBy(x: scale, y: scale)
 
-        // Placed images
         for img in model.placedImages {
             let imgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
             guard imgRect.intersects(visibleCanvasRect) else { continue }
@@ -223,15 +228,16 @@ class StrokeLayerView: UIView {
             StrokeRenderer.drawPlacedImage(img, in: ctx, cachedImage: cached)
         }
 
+        model.spatialGrid.sync(with: model.strokes)
+        let visibleIndices = model.spatialGrid.queryIndices(in: visibleCanvasRect)
         let penPresets = model.penPresets
         let sharpiePresets = model.sharpiePresets
         let isDark = model.appSettings.isDarkMode
         let eraserWidth = model.eraserSettings.size / scale
 
-        // Committed strokes (cached path + viewport culling)
-        for stroke in model.strokes {
+        for idx in visibleIndices {
+            let stroke = model.strokes[idx]
             guard let entry = pathCache.entry(for: stroke) else { continue }
-            guard entry.bounds.intersects(visibleCanvasRect) else { continue }
             StrokeRenderer.drawStroke(
                 stroke,
                 in: ctx,
@@ -244,29 +250,58 @@ class StrokeLayerView: UIView {
         }
         pathCache.prune(activeIds: Set(model.strokes.map(\.id)))
 
-        // Active stroke
-        if let current = model.currentStroke {
+        ctx.restoreGState()
+    }
+}
+
+// MARK: - Live Overlay View (Active Stroke + Lasso + Selection Only)
+
+class LiveOverlayView: UIView {
+    weak var model: DrawingModel?
+    var offset: CGSize = .zero
+    var scale: CGFloat = 1.0
+    var dashPhase: CGFloat = 0
+    private let incrementalPath = IncrementalStrokePath()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        backgroundColor = .clear
+        isOpaque = false
+    }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext(), let model = model, scale > 0 else { return }
+
+        ctx.saveGState()
+        ctx.translateBy(x: offset.width, y: offset.height)
+        ctx.scaleBy(x: scale, y: scale)
+
+        if let current = model.currentStroke, let path = GeometryEngine.makeCGPath(for: current) {
             StrokeRenderer.drawStroke(
                 current,
                 in: ctx,
-                penPresets: penPresets,
-                sharpiePresets: sharpiePresets,
-                isDarkMode: isDark,
-                eraserWidthOverride: current.isEraser ? eraserWidth : nil
+                penPresets: model.penPresets,
+                sharpiePresets: model.sharpiePresets,
+                isDarkMode: model.appSettings.isDarkMode,
+                eraserWidthOverride: current.isEraser ? (model.eraserSettings.size / scale) : nil,
+                cachedPath: path
             )
         }
 
-        // Lasso being drawn
         if !model.selectionLasso.isEmpty {
             drawDashedPolygon(model.selectionLasso, close: false, color: UIColor.systemBlue.withAlphaComponent(0.6), in: ctx)
         }
 
-        // Selection boundary — retained lasso outline
         if !model.selectionBoundary.isEmpty {
             drawDashedPolygon(model.selectionBoundary, close: true, color: UIColor.systemBlue, in: ctx)
         }
 
-        // Selection rects for placed images
         for img in model.placedImages where model.selectedImageIds.contains(img.id) {
             let imgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
             ctx.saveGState()
@@ -322,7 +357,8 @@ class StrokeLayerView: UIView {
 class DrawingCanvasView: UIView {
     weak var model: DrawingModel? {
         didSet {
-            strokeLayer.model = model
+            committedLayer.model = model
+            liveOverlay.model = model
             gridView.model = model
         }
     }
@@ -332,18 +368,21 @@ class DrawingCanvasView: UIView {
     private var offset: CGSize = .zero {
         didSet {
             gridView.offset = offset
-            strokeLayer.offset = offset
+            committedLayer.offset = offset
+            liveOverlay.offset = offset
         }
     }
     private var scale: CGFloat = 1.0 {
         didSet {
             gridView.scale = scale
-            strokeLayer.scale = scale
+            committedLayer.scale = scale
+            liveOverlay.scale = scale
         }
     }
 
     private let gridView = CanvasGridView()
-    private let strokeLayer = StrokeLayerView()
+    private let committedLayer = CommittedLayerView()
+    private let liveOverlay = LiveOverlayView()
     private var dashPhase: CGFloat = 0
     private var displayLink: CADisplayLink?
 
@@ -417,8 +456,8 @@ class DrawingCanvasView: UIView {
             return
         }
         dashPhase += 1
-        strokeLayer.dashPhase = dashPhase
-        strokeLayer.setNeedsDisplay()
+        liveOverlay.dashPhase = dashPhase
+        liveOverlay.setNeedsDisplay()
     }
 
     private func setup() {
@@ -430,9 +469,13 @@ class DrawingCanvasView: UIView {
         gridView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         addSubview(gridView)
 
-        strokeLayer.frame = bounds
-        strokeLayer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        addSubview(strokeLayer)
+        committedLayer.frame = bounds
+        committedLayer.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(committedLayer)
+
+        liveOverlay.frame = bounds
+        liveOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(liveOverlay)
 
         layer.addSublayer(hoverIndicatorLayer)
 
@@ -511,11 +554,13 @@ class DrawingCanvasView: UIView {
             centerOnContent()
             model.needsRecenter = false
         }
-        strokeLayer.model = model
+        committedLayer.model = model
+        liveOverlay.model = model
         gridView.model = model
         syncDashAnimationState()
         gridView.setNeedsDisplay()
-        strokeLayer.setNeedsDisplay()
+        committedLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 
     private func centerOnContent() {
@@ -545,8 +590,7 @@ class DrawingCanvasView: UIView {
                 model.selectedImageIds = [imgId]
                 model.selectionBoundary.removeAll()
                 syncDashAnimationState()
-                strokeLayer.setNeedsDisplay()
-                gridView.setNeedsDisplay()
+                liveOverlay.setNeedsDisplay()
                 return
             }
             if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectionBoundary.isEmpty {
@@ -557,12 +601,12 @@ class DrawingCanvasView: UIView {
                         model.showDeleteMenu = true
                         let tapLoc = touch.location(in: self)
                         model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
-                        strokeLayer.setNeedsDisplay()
+                        liveOverlay.setNeedsDisplay()
                         return
                     }
                     Self.lastSelectTap = now
                     model.beginMove(at: cp)
-                    strokeLayer.setNeedsDisplay()
+                    liveOverlay.setNeedsDisplay()
                     return
                 }
                 let onSelected = model.isPointOnSelectedItem(cp) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(cp))
@@ -573,7 +617,7 @@ class DrawingCanvasView: UIView {
                         model.showDeleteMenu = true
                         let tapLoc = touch.location(in: self)
                         model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
-                        strokeLayer.setNeedsDisplay()
+                        liveOverlay.setNeedsDisplay()
                         return
                     }
                     Self.lastSelectTap = now
@@ -583,7 +627,7 @@ class DrawingCanvasView: UIView {
                     model.selectedImageIds.removeAll()
                     model.selectionBoundary.removeAll()
                     syncDashAnimationState()
-                    strokeLayer.setNeedsDisplay()
+                    liveOverlay.setNeedsDisplay()
                     return
                 }
             } else {
@@ -593,19 +637,19 @@ class DrawingCanvasView: UIView {
                     model.showDeleteMenu = true
                     let tapLoc = touch.location(in: self)
                     model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
-                    strokeLayer.setNeedsDisplay()
+                    liveOverlay.setNeedsDisplay()
                     return
                 }
                 Self.lastEmptyTap = now
                 model.beginLasso(at: cp)
                 syncDashAnimationState()
             }
-            strokeLayer.setNeedsDisplay()
+            liveOverlay.setNeedsDisplay()
             return
         }
 
         model.beginStroke(at: toCanvas(touch.location(in: self)), isEraser: model.currentTool == .eraser)
-        strokeLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -622,6 +666,8 @@ class DrawingCanvasView: UIView {
                 let delta = CGSize(width: cur.x - model.lastMovePoint.x, height: cur.y - model.lastMovePoint.y)
                 model.moveSelected(by: delta)
                 model.lastMovePoint = cur
+                committedLayer.setNeedsDisplay()
+                liveOverlay.setNeedsDisplay()
             } else if !model.selectedImageIds.isEmpty {
                 // Image selected — ignore touch moves unless dragging/resizing
             } else {
@@ -629,8 +675,8 @@ class DrawingCanvasView: UIView {
                 for ct in coalesced {
                     model.addLassoPoint(toCanvas(ct.location(in: self)))
                 }
+                liveOverlay.setNeedsDisplay()
             }
-            strokeLayer.setNeedsDisplay()
             return
         }
 
@@ -640,7 +686,7 @@ class DrawingCanvasView: UIView {
         for ct in coalesced {
             model.addPoint(toCanvas(ct.location(in: self)))
         }
-        strokeLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -649,16 +695,18 @@ class DrawingCanvasView: UIView {
             if model?.showDeleteMenu == true { return }
             if model?.isMoving == true || model?.isResizing == true {
                 model?.commitMove()
+                committedLayer.setNeedsDisplay()
             } else {
                 model?.endLasso()
             }
             syncDashAnimationState()
-            strokeLayer.setNeedsDisplay()
+            liveOverlay.setNeedsDisplay()
             return
         }
         model?.endStroke()
         hideHoverIndicator()
-        strokeLayer.setNeedsDisplay()
+        committedLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -666,16 +714,18 @@ class DrawingCanvasView: UIView {
         if model?.currentTool == .select {
             if model?.isMoving == true || model?.isResizing == true {
                 model?.commitMove()
+                committedLayer.setNeedsDisplay()
             } else {
                 model?.endLasso()
             }
             syncDashAnimationState()
-            strokeLayer.setNeedsDisplay()
+            liveOverlay.setNeedsDisplay()
             return
         }
         model?.endStroke()
         hideHoverIndicator()
-        strokeLayer.setNeedsDisplay()
+        committedLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 
     // MARK: - Gestures
@@ -685,7 +735,8 @@ class DrawingCanvasView: UIView {
         scale = min(max(scale * gesture.scale, 0.3), 5.0)
         gesture.scale = 1
         gridView.setNeedsDisplay()
-        strokeLayer.setNeedsDisplay()
+        committedLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -695,7 +746,8 @@ class DrawingCanvasView: UIView {
         offset.height += t.y
         gesture.setTranslation(.zero, in: self)
         gridView.setNeedsDisplay()
-        strokeLayer.setNeedsDisplay()
+        committedLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 }
 
@@ -727,307 +779,37 @@ extension DrawingCanvasView: UIPencilInteractionDelegate {
 
 #else
 
-struct CanvasView: View {
-    @ObservedObject var model: DrawingModel
-    var onBeginDraw: (() -> Void)?
-    @State private var offset: CGSize = .zero
-    @State private var scale: CGFloat = 1.0
-    @State private var pointCount: Int = 0
-    @State private var hoverLocation: CGPoint?
-
-    static var lastSelectTap: Date = .distantPast
-    static var lastEmptyTap: Date = .distantPast
-
-    @State private var keyMonitor: Any?
-    @State private var scrollMonitor: Any?
-    @State private var viewSize: CGSize?
-    @State private var pathCache = StrokePathCache()
-
-    private var hasActiveSelection: Bool {
-        !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty || !model.selectedImageIds.isEmpty
-    }
-
-    private var pointerHandler: CanvasPointerHandler {
-        CanvasPointerHandler(
-            model: model,
-            offset: offset,
-            scale: max(scale, 0.01),
-            onHover: { hoverLocation = $0 },
-            onPoint: { pointCount = $0 },
-            onBeginDraw: onBeginDraw
-        )
-    }
+/// Isolated background layer — only redraws when offset, scale, background style,
+/// or dark mode changes.
+private struct BackgroundGridCanvas: View {
+    let background: CanvasBackground
+    let isDarkMode: Bool
+    let offset: CGSize
+    let scale: CGFloat
 
     var body: some View {
-        ZStack {
-            GeometryReader { geo in
-                Color.clear
-                    .onAppear { viewSize = geo.size }
-                    .onChange(of: geo.size) { _, newSize in viewSize = newSize }
+        Canvas { context, size in
+            let safeScale = max(scale, 0.01)
+            let spacing: CGFloat = 30 * safeScale
+            let bg = isDarkMode ? Color.black : Color.white
+            let fg = isDarkMode ? Color(red: 56/255, green: 56/255, blue: 58/255) : Color.gray.opacity(0.2)
+
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(bg))
+
+            switch background {
+            case .none: break
+            case .grid:
+                let gridPath = gridLines(spacing: spacing, size: size, offset: offset)
+                context.stroke(gridPath, with: .color(fg), style: StrokeStyle(lineWidth: 0.5, dash: [3, 6]))
+            case .dots:
+                let dotsPath = dotGrid(spacing: spacing, size: size, offset: offset)
+                context.fill(dotsPath, with: .color(fg))
+            case .ruled:
+                let ruledPath = ruledLines(spacing: spacing, size: size, offset: offset)
+                context.stroke(ruledPath, with: .color(fg), lineWidth: 0.5)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // Background grid layer
-            Canvas { context, size in
-                let safeScale = max(scale, 0.01)
-                let spacing: CGFloat = 30 * safeScale
-                let isDark = model.appSettings.isDarkMode
-                let bg = isDark ? Color.black : Color.white
-                let fg = isDark ? Color(red: 56/255, green: 56/255, blue: 58/255) : Color.gray.opacity(0.2)
-
-                context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(bg))
-
-                switch model.appSettings.canvasBackground {
-                case .none: break
-                case .grid:
-                    let gridPath = gridLines(spacing: spacing, size: size, offset: offset)
-                    context.stroke(gridPath, with: .color(fg), style: StrokeStyle(lineWidth: 0.5, dash: [3, 6]))
-                case .dots:
-                    let dotsPath = dotGrid(spacing: spacing, size: size, offset: offset)
-                    context.fill(dotsPath, with: .color(fg))
-                case .ruled:
-                    let ruledPath = ruledLines(spacing: spacing, size: size, offset: offset)
-                    context.stroke(ruledPath, with: .color(fg), lineWidth: 0.5)
-                }
-            }
-
-            // Stroke & selection layer — only ticks animation when selection is active
-            TimelineView(.animation(paused: !hasActiveSelection)) { timeline in
-                let dashPhase: CGFloat = hasActiveSelection
-                    ? CGFloat(timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100) * 60)
-                    : 0
-
-                Canvas { context, size in
-                    let _ = pointCount
-                    let _ = hoverLocation
-
-                    let safeScale = max(scale, 0.01)
-                    let tf = CGAffineTransform(translationX: offset.width, y: offset.height)
-                        .scaledBy(x: safeScale, y: safeScale)
-                    let visibleCanvasRect = CGRect(
-                        x: -offset.width / safeScale,
-                        y: -offset.height / safeScale,
-                        width: size.width / safeScale,
-                        height: size.height / safeScale
-                    )
-
-                    // Placed images — draw cached NSImage directly without per-frame lockFocus
-                    for img in model.placedImages {
-                        let canvasImgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
-                        guard canvasImgRect.intersects(visibleCanvasRect) else { continue }
-                        let screenRect = canvasImgRect.applying(tf)
-                        let nsImage: NSImage? = {
-                            if let cached = model.imageCache[img.id] { return cached }
-                            if let imgObj = NSImage(data: img.imageData) {
-                                model.imageCache[img.id] = imgObj
-                                return imgObj
-                            }
-                            return nil
-                        }()
-                        if let nsImg = nsImage {
-                            context.draw(Image(nsImage: nsImg), in: screenRect)
-                        }
-                    }
-
-                    // Committed strokes (cached path + viewport culling)
-                    for stroke in model.strokes {
-                        guard let entry = pathCache.entry(for: stroke) else { continue }
-                        guard entry.bounds.intersects(visibleCanvasRect) else { continue }
-                        let path = Path(entry.cgPath).applying(tf)
-                        drawStrokePath(path, stroke: stroke, in: &context, scale: safeScale)
-                    }
-                    pathCache.prune(activeIds: Set(model.strokes.map(\.id)))
-
-                    // Active stroke
-                    if let current = model.currentStroke,
-                       let cgPath = GeometryEngine.makeCGPath(for: current) {
-                        let path = Path(cgPath).applying(tf)
-                        drawStrokePath(path, stroke: current, in: &context, scale: safeScale)
-                    }
-
-                    // Lasso being drawn
-                    if !model.selectionLasso.isEmpty {
-                        let lPath = smoothPolygonPath(model.selectionLasso, close: false, transform: tf)
-                        context.stroke(
-                            lPath,
-                            with: .color(.blue.opacity(0.6)),
-                            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
-                        )
-                    }
-
-                    // Selection boundary — retained lasso outline
-                    if !model.selectionBoundary.isEmpty {
-                        let bPath = smoothPolygonPath(model.selectionBoundary, close: true, transform: tf)
-                        context.stroke(
-                            bPath,
-                            with: .color(.blue),
-                            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
-                        )
-                    }
-
-                    // Selection rects for placed images
-                    for img in model.placedImages where model.selectedImageIds.contains(img.id) {
-                        let rect = CGRect(origin: img.cgPosition, size: img.cgSize).applying(tf)
-                        context.stroke(
-                            Path(roundedRect: rect, cornerRadius: 0),
-                            with: .color(.blue),
-                            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
-                        )
-                        let hs: CGFloat = 8
-                        for corner in [
-                            rect.origin,
-                            CGPoint(x: rect.maxX, y: rect.minY),
-                            CGPoint(x: rect.maxX, y: rect.maxY),
-                            CGPoint(x: rect.minX, y: rect.maxY),
-                        ] {
-                            let handle = CGRect(x: corner.x - hs / 2, y: corner.y - hs / 2, width: hs, height: hs)
-                            context.fill(Path(ellipseIn: handle), with: .color(.blue))
-                        }
-                    }
-
-                    // Hover cursor dot
-                    if let loc = hoverLocation {
-                        let dotSize: CGFloat = model.currentTool == .eraser
-                            ? model.eraserSettings.size
-                            : model.currentTool == .pen
-                                ? model.penSettings.thickness
-                                : model.currentTool == .sharpie ? model.sharpieSettings.thickness : 4
-                        let dot = Path(ellipseIn: CGRect(
-                            x: loc.x - dotSize / 2, y: loc.y - dotSize / 2,
-                            width: dotSize, height: dotSize
-                        ))
-                        context.fill(dot, with: .color(model.currentTool == .eraser ? .red.opacity(0.25) : .black.opacity(0.4)))
-                    }
-                }
-            }
-            .overlay(DrawingInputOverlay(handler: pointerHandler))
-            .onReceive(model.$needsRecenter) { needs in
-                if needs, let size = viewSize {
-                    centerOnContent(canvasSize: size)
-                    model.needsRecenter = false
-                }
-            }
-        }
-        .onAppear {
-            installMonitors()
-        }
-        .onDisappear {
-            removeMonitors()
         }
     }
-
-    private func installMonitors() {
-        removeMonitors()
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            // Do not intercept keystrokes while typing in a text field or modal sheet.
-            if let keyWindow = NSApp.keyWindow {
-                if keyWindow.attachedSheet != nil { return event }
-                if keyWindow.firstResponder is NSTextView { return event }
-            }
-
-            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            let hasCmd = flags.contains(.command)
-            let hasShift = flags.contains(.shift)
-            let hasCtrlOrOpt = flags.contains(.control) || flags.contains(.option)
-            let char = event.charactersIgnoringModifiers?.lowercased()
-
-            // Command-modified shortcuts (handled first so ⌘S never triggers Sharpie)
-            if hasCmd && !hasCtrlOrOpt {
-                switch char {
-                case "z":
-                    if hasShift { model.redo() } else { model.undo() }
-                    return nil
-                case "s":
-                    model.save()
-                    return nil
-                case "c":
-                    model.copySelected()
-                    return nil
-                case "v":
-                    model.paste()
-                    return nil
-                case "i":
-                    model.pendingAction = .importImage
-                    return nil
-                case "=":
-                    model.resizeSelectedImages(by: 1.25)
-                    return nil
-                case "-":
-                    model.resizeSelectedImages(by: 0.8)
-                    return nil
-                default:
-                    return event
-                }
-            }
-
-            // Unmodified single-key shortcuts
-            if !hasCmd && !hasCtrlOrOpt {
-                if char == "\u{7F}" || event.keyCode == 51 || event.keyCode == 117 {
-                    model.deleteSelected()
-                    return nil
-                }
-
-                switch char {
-                case "p":
-                    model.selectTool(.pen)
-                    return nil
-                case "s":
-                    model.selectTool(hasShift ? .select : .sharpie)
-                    return nil
-                case "e":
-                    let prior = model.currentTool
-                    model.selectTool(.eraser)
-                    switch prior {
-                    case .pen: model.eraserSettings.eraseTarget = .pen
-                    case .sharpie: model.eraserSettings.eraseTarget = .sharpie
-                    default: model.eraserSettings.eraseTarget = .all
-                    }
-                    return nil
-                case "1", "2", "3", "4", "5", "6", "7", "8":
-                    if let c = char, let digit = Int(c) {
-                        let idx = digit - 1
-                        switch model.currentTool {
-                        case .pen where idx < model.penPresets.count:
-                            model.penSettings.lightColor = model.penPresets[idx]
-                            model.penSettings.darkColor = model.penPresets[idx]
-                            model.penPresetIndex = idx
-                            return nil
-                        case .sharpie where idx < model.sharpiePresets.count:
-                            model.sharpieSettings.lightColor = model.sharpiePresets[idx]
-                            model.sharpieSettings.darkColor = model.sharpiePresets[idx]
-                            model.sharpiePresetIndex = idx
-                            return nil
-                        default: break
-                        }
-                    }
-                default: break
-                }
-            }
-
-            return event
-        }
-
-        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-            // Only pan when scrolling over the main key window with no sheet open.
-            guard let keyWindow = NSApp.keyWindow,
-                  event.window === keyWindow,
-                  keyWindow.attachedSheet == nil else {
-                return event
-            }
-            offset.width += event.scrollingDeltaX
-            offset.height += event.scrollingDeltaY
-            return event
-        }
-    }
-
-    private func removeMonitors() {
-        if let m = keyMonitor { NSEvent.removeMonitor(m) }
-        if let m = scrollMonitor { NSEvent.removeMonitor(m) }
-        keyMonitor = nil
-        scrollMonitor = nil
-    }
-
-    // MARK: - Background helpers
 
     private func gridLines(spacing: CGFloat, size: CGSize, offset: CGSize) -> Path {
         Path { path in
@@ -1075,6 +857,209 @@ struct CanvasView: View {
             }
         }
     }
+}
+
+/// Isolated committed-content layer — draws spatial-culled cached `Path`s using a
+/// single GPU `GraphicsContext` transform (no 28MB CPU bitmap copy, no per-stroke
+/// vertex transformation, and NEVER invalidated by mouse hover or active stroke drag!).
+private struct CommittedStrokesCanvas: View {
+    let model: DrawingModel
+    let pathCache: StrokePathCache
+    let committedRevision: Int
+    let isDarkMode: Bool
+    let offset: CGSize
+    let scale: CGFloat
+
+    var body: some View {
+        Canvas { context, size in
+            let _ = committedRevision
+            let safeScale = max(scale, 0.01)
+            let visibleCanvasRect = CGRect(
+                x: -offset.width / safeScale,
+                y: -offset.height / safeScale,
+                width: size.width / safeScale,
+                height: size.height / safeScale
+            )
+
+            // Apply viewport transform once on the GPU GraphicsContext
+            context.translateBy(x: offset.width, y: offset.height)
+            context.scaleBy(x: safeScale, y: safeScale)
+
+            // Placed images
+            for img in model.placedImages {
+                let canvasImgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
+                guard canvasImgRect.intersects(visibleCanvasRect) else { continue }
+                let nsImage: NSImage? = {
+                    if let cached = model.imageCache[img.id] { return cached }
+                    if let imgObj = NSImage(data: img.imageData) {
+                        model.imageCache[img.id] = imgObj
+                        return imgObj
+                    }
+                    return nil
+                }()
+                if let nsImg = nsImage {
+                    context.draw(Image(nsImage: nsImg), in: canvasImgRect)
+                }
+            }
+
+            // Spatial-indexed viewport query for committed strokes
+            model.spatialGrid.sync(with: model.strokes)
+            let visibleIndices = model.spatialGrid.queryIndices(in: visibleCanvasRect)
+            let baseColor = isDarkMode ? Color.black : Color.white
+            let eraserWidth = model.eraserSettings.size / safeScale
+
+            for idx in visibleIndices {
+                let stroke = model.strokes[idx]
+                guard let entry = pathCache.entry(for: stroke) else { continue }
+                drawCachedStroke(
+                    entry.swiftUIPath,
+                    stroke: stroke,
+                    baseColor: baseColor,
+                    eraserWidth: eraserWidth,
+                    in: &context
+                )
+            }
+            pathCache.prune(activeIds: Set(model.strokes.map(\.id)))
+        }
+    }
+
+    private func drawCachedStroke(
+        _ path: Path,
+        stroke: Stroke,
+        baseColor: Color,
+        eraserWidth: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        if stroke.isEraser {
+            context.blendMode = .clear
+            context.stroke(
+                path,
+                with: .color(.white),
+                style: StrokeStyle(lineWidth: eraserWidth, lineCap: .round, lineJoin: .round)
+            )
+            context.blendMode = .normal
+        } else if stroke.isSharpie {
+            let glowColor = stroke.displayColor(for: model)
+            context.stroke(
+                path,
+                with: .color(glowColor),
+                style: StrokeStyle(lineWidth: stroke.lineWidth + 3, lineCap: .round, lineJoin: .round)
+            )
+            context.stroke(
+                path,
+                with: .color(baseColor),
+                style: StrokeStyle(lineWidth: stroke.lineWidth, lineCap: .round, lineJoin: .round)
+            )
+        } else {
+            context.stroke(
+                path,
+                with: .color(stroke.displayColor(for: model)),
+                style: StrokeStyle(lineWidth: stroke.lineWidth, lineCap: .round, lineJoin: .round)
+            )
+        }
+    }
+}
+
+/// Isolated live layer — draws ONLY the active in-progress stroke (via O(1)
+/// `IncrementalStrokePath`) and selection/lasso overlays.
+private struct LiveInteractionCanvas: View {
+    let model: DrawingModel
+    let incrementalPath: IncrementalStrokePath
+    let activePointCount: Int
+    let offset: CGSize
+    let scale: CGFloat
+
+    private var hasActiveSelection: Bool {
+        !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty || !model.selectedImageIds.isEmpty
+    }
+
+    var body: some View {
+        TimelineView(.animation(paused: !hasActiveSelection)) { timeline in
+            let dashPhase: CGFloat = hasActiveSelection
+                ? CGFloat(timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100) * 60)
+                : 0
+
+            Canvas { context, _ in
+                let _ = activePointCount
+                let safeScale = max(scale, 0.01)
+
+                // Active stroke rendered with the exact same path algorithm as committed strokes
+                if let current = model.currentStroke,
+                   let cgPath = GeometryEngine.makeCGPath(for: current) {
+                    context.drawLayer { layerCtx in
+                        layerCtx.translateBy(x: offset.width, y: offset.height)
+                        layerCtx.scaleBy(x: safeScale, y: safeScale)
+                        let path = Path(cgPath)
+                        if current.isEraser {
+                            layerCtx.stroke(
+                                path,
+                                with: .color(.red.opacity(0.25)),
+                                style: StrokeStyle(lineWidth: model.eraserSettings.size / safeScale, lineCap: .round, lineJoin: .round)
+                            )
+                        } else if current.isSharpie {
+                            layerCtx.stroke(
+                                path,
+                                with: .color(current.displayColor(for: model)),
+                                style: StrokeStyle(lineWidth: current.lineWidth + 3, lineCap: .round, lineJoin: .round)
+                            )
+                            let baseColor = model.appSettings.isDarkMode ? Color.black : Color.white
+                            layerCtx.stroke(
+                                path,
+                                with: .color(baseColor),
+                                style: StrokeStyle(lineWidth: current.lineWidth, lineCap: .round, lineJoin: .round)
+                            )
+                        } else {
+                            layerCtx.stroke(
+                                path,
+                                with: .color(current.displayColor(for: model)),
+                                style: StrokeStyle(lineWidth: current.lineWidth, lineCap: .round, lineJoin: .round)
+                            )
+                        }
+                    }
+                }
+
+                let tf = CGAffineTransform(translationX: offset.width, y: offset.height)
+                    .scaledBy(x: safeScale, y: safeScale)
+
+                if !model.selectionLasso.isEmpty {
+                    let lPath = smoothPolygonPath(model.selectionLasso, close: false, transform: tf)
+                    context.stroke(
+                        lPath,
+                        with: .color(.blue.opacity(0.6)),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
+                    )
+                }
+
+                if !model.selectionBoundary.isEmpty {
+                    let bPath = smoothPolygonPath(model.selectionBoundary, close: true, transform: tf)
+                    context.stroke(
+                        bPath,
+                        with: .color(.blue),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
+                    )
+                }
+
+                for img in model.placedImages where model.selectedImageIds.contains(img.id) {
+                    let rect = CGRect(origin: img.cgPosition, size: img.cgSize).applying(tf)
+                    context.stroke(
+                        Path(roundedRect: rect, cornerRadius: 0),
+                        with: .color(.blue),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
+                    )
+                    let hs: CGFloat = 8
+                    for corner in [
+                        rect.origin,
+                        CGPoint(x: rect.maxX, y: rect.minY),
+                        CGPoint(x: rect.maxX, y: rect.maxY),
+                        CGPoint(x: rect.minX, y: rect.maxY),
+                    ] {
+                        let handle = CGRect(x: corner.x - hs / 2, y: corner.y - hs / 2, width: hs, height: hs)
+                        context.fill(Path(ellipseIn: handle), with: .color(.blue))
+                    }
+                }
+            }
+        }
+    }
 
     private func smoothPolygonPath(_ pts: [CGPoint], close: Bool, transform tf: CGAffineTransform) -> Path {
         var path = Path()
@@ -1090,48 +1075,199 @@ struct CanvasView: View {
         if close { path.closeSubpath() }
         return path
     }
+}
+
+struct CanvasView: View {
+    var model: DrawingModel
+    var onBeginDraw: (() -> Void)?
+
+    @State private var offset: CGSize = .zero
+    @State private var scale: CGFloat = 1.0
+    @State private var pointCount: Int = 0
+
+    static var lastSelectTap: Date = .distantPast
+    static var lastEmptyTap: Date = .distantPast
+
+    @State private var keyMonitor: Any?
+    @State private var scrollMonitor: Any?
+    @State private var viewSize: CGSize?
+    @State private var pathCache = StrokePathCache()
+    @State private var incrementalPath = IncrementalStrokePath()
+
+    private var pointerHandler: CanvasPointerHandler {
+        CanvasPointerHandler(
+            model: model,
+            offset: offset,
+            scale: max(scale, 0.01),
+            onPoint: { pointCount = $0 },
+            onBeginDraw: onBeginDraw
+        )
+    }
+
+    var body: some View {
+        ZStack {
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { viewSize = geo.size }
+                    .onChange(of: geo.size) { _, newSize in viewSize = newSize }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            BackgroundGridCanvas(
+                background: model.appSettings.canvasBackground,
+                isDarkMode: model.appSettings.isDarkMode,
+                offset: offset,
+                scale: scale
+            )
+
+            CommittedStrokesCanvas(
+                model: model,
+                pathCache: pathCache,
+                committedRevision: model.committedRevision,
+                isDarkMode: model.appSettings.isDarkMode,
+                offset: offset,
+                scale: scale
+            )
+
+            LiveInteractionCanvas(
+                model: model,
+                incrementalPath: incrementalPath,
+                activePointCount: pointCount,
+                offset: offset,
+                scale: scale
+            )
+        }
+        .overlay(DrawingInputOverlay(handler: pointerHandler))
+        .onChange(of: model.needsRecenter) { _, needs in
+            if needs, let size = viewSize {
+                centerOnContent(canvasSize: size)
+                model.needsRecenter = false
+            }
+        }
+        .onAppear {
+            installMonitors()
+        }
+        .onDisappear {
+            removeMonitors()
+        }
+    }
+
+    private func installMonitors() {
+        removeMonitors()
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if let keyWindow = NSApp.keyWindow {
+                if keyWindow.attachedSheet != nil { return event }
+                if keyWindow.firstResponder is NSTextView { return event }
+            }
+
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let hasCmd = flags.contains(.command)
+            let hasShift = flags.contains(.shift)
+            let hasCtrlOrOpt = flags.contains(.control) || flags.contains(.option)
+            let char = event.charactersIgnoringModifiers?.lowercased()
+
+            if hasCmd && !hasCtrlOrOpt {
+                switch char {
+                case "z":
+                    if hasShift { model.redo() } else { model.undo() }
+                    return nil
+                case "s":
+                    model.save()
+                    return nil
+                case "c":
+                    model.copySelected()
+                    return nil
+                case "v":
+                    model.paste()
+                    return nil
+                case "i":
+                    model.pendingAction = .importImage
+                    return nil
+                case "=":
+                    model.resizeSelectedImages(by: 1.25)
+                    return nil
+                case "-":
+                    model.resizeSelectedImages(by: 0.8)
+                    return nil
+                default:
+                    return event
+                }
+            }
+
+            if !hasCmd && !hasCtrlOrOpt {
+                if event.keyCode == 48 || char == "\t" {
+                    model.isToolbarVisible.toggle()
+                    return nil
+                }
+
+                if char == "\u{7F}" || event.keyCode == 51 || event.keyCode == 117 {
+                    model.deleteSelected()
+                    return nil
+                }
+
+                switch char {
+                case "p":
+                    model.selectTool(.pen)
+                    return nil
+                case "s":
+                    model.selectTool(hasShift ? .select : .sharpie)
+                    return nil
+                case "e":
+                    let prior = model.currentTool
+                    model.selectTool(.eraser)
+                    switch prior {
+                    case .pen: model.eraserSettings.eraseTarget = .pen
+                    case .sharpie: model.eraserSettings.eraseTarget = .sharpie
+                    default: model.eraserSettings.eraseTarget = .all
+                    }
+                    return nil
+                case "1", "2", "3", "4", "5", "6", "7", "8":
+                    if let c = char, let digit = Int(c) {
+                        let idx = digit - 1
+                        switch model.currentTool {
+                        case .pen where idx < model.penPresets.count:
+                            model.selectPenPreset(idx)
+                            return nil
+                        case .sharpie where idx < model.sharpiePresets.count:
+                            model.selectSharpiePreset(idx)
+                            return nil
+                        default: break
+                        }
+                    }
+                default: break
+                }
+            }
+
+            return event
+        }
+
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard let keyWindow = NSApp.keyWindow,
+                  event.window === keyWindow,
+                  keyWindow.attachedSheet == nil else {
+                return event
+            }
+            offset.width += event.scrollingDeltaX
+            offset.height += event.scrollingDeltaY
+            return event
+        }
+    }
+
+    private func removeMonitors() {
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        if let m = scrollMonitor { NSEvent.removeMonitor(m) }
+        keyMonitor = nil
+        scrollMonitor = nil
+    }
 
     private func centerOnContent(canvasSize: CGSize) {
         offset = .zero
         scale = 1.0
     }
-
-    private func drawStrokePath(_ path: Path, stroke: Stroke, in context: inout GraphicsContext, scale: CGFloat) {
-        if stroke.isEraser {
-            context.blendMode = .clear
-            context.stroke(
-                path,
-                with: .color(.white),
-                style: StrokeStyle(lineWidth: model.eraserSettings.size, lineCap: .round, lineJoin: .round)
-            )
-            context.blendMode = .normal
-        } else if stroke.isSharpie {
-            let glowColor = stroke.displayColor(for: model)
-            context.stroke(
-                path,
-                with: .color(glowColor),
-                style: StrokeStyle(lineWidth: (stroke.lineWidth + 3) * scale, lineCap: .round, lineJoin: .round)
-            )
-            let baseColor = model.appSettings.isDarkMode ? Color.black : Color.white
-            context.stroke(
-                path,
-                with: .color(baseColor),
-                style: StrokeStyle(lineWidth: stroke.lineWidth * scale, lineCap: .round, lineJoin: .round)
-            )
-        } else {
-            context.stroke(
-                path,
-                with: .color(stroke.displayColor(for: model)),
-                style: StrokeStyle(lineWidth: stroke.lineWidth * scale, lineCap: .round, lineJoin: .round)
-            )
-        }
-    }
 }
 
-// MARK: - Pointer Input (macOS)
+// MARK: - Pointer Input + GPU Hover Indicator (macOS)
 
-/// Routes AppKit mouse/tablet events into the SwiftUI `CanvasView`,
-/// preserving device information so we can distinguish pencil from finger/mouse.
 struct DrawingInputOverlay: NSViewRepresentable {
     let handler: CanvasPointerHandler
 
@@ -1150,6 +1286,26 @@ struct DrawingInputOverlay: NSViewRepresentable {
     final class InputView: NSView {
         var handler: CanvasPointerHandler?
 
+        /// GPU-composited hover dot — moving the mouse updates this CALayer directly
+        /// with ZERO SwiftUI state mutations or Canvas redraws!
+        private let hoverDotLayer: CALayer = {
+            let layer = CALayer()
+            layer.isHidden = true
+            return layer
+        }()
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer?.addSublayer(hoverDotLayer)
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            wantsLayer = true
+            layer?.addSublayer(hoverDotLayer)
+        }
+
         override var acceptsFirstResponder: Bool { true }
         override var isFlipped: Bool { true }
 
@@ -1164,6 +1320,39 @@ struct DrawingInputOverlay: NSViewRepresentable {
             ))
         }
 
+        private func updateHoverDot(at point: CGPoint?) {
+            guard let point, let model = handler?.model else {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
+                hoverDotLayer.isHidden = true
+                CATransaction.commit()
+                return
+            }
+            let size: CGFloat
+            let color: CGColor
+            switch model.currentTool {
+            case .eraser:
+                size = max(model.eraserSettings.size, 4)
+                color = NSColor.systemRed.withAlphaComponent(0.25).cgColor
+            case .pen:
+                size = max(model.penSettings.thickness * 1.5, 4)
+                color = (model.appSettings.isDarkMode ? NSColor.white : NSColor.black).withAlphaComponent(0.4).cgColor
+            case .sharpie:
+                size = max(model.sharpieSettings.thickness * 1.5, 4)
+                color = (model.appSettings.isDarkMode ? NSColor.white : NSColor.black).withAlphaComponent(0.4).cgColor
+            case .select:
+                size = 4
+                color = (model.appSettings.isDarkMode ? NSColor.white : NSColor.black).withAlphaComponent(0.4).cgColor
+            }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            hoverDotLayer.frame = CGRect(x: point.x - size / 2, y: point.y - size / 2, width: size, height: size)
+            hoverDotLayer.cornerRadius = size / 2
+            hoverDotLayer.backgroundColor = color
+            hoverDotLayer.isHidden = false
+            CATransaction.commit()
+        }
+
         private func log(_ event: NSEvent, _ phase: String) {
             guard DrawingInputOverlay.debugInputLogging else { return }
             let device: String
@@ -1176,8 +1365,6 @@ struct DrawingInputOverlay: NSViewRepresentable {
         }
 
         private func isPencil(_ event: NSEvent) -> Bool {
-            // Note: Do NOT read `event.pointingDeviceType` on non-proximity mouse events —
-            // AppKit raises NSInternalInconsistencyException ("Invalid message sent to event").
             if event.type == .tabletPoint || event.type == .tabletProximity { return true }
             if event.subtype == .tabletPoint || event.subtype == .tabletProximity { return true }
             return false
@@ -1204,7 +1391,7 @@ struct DrawingInputOverlay: NSViewRepresentable {
             super.mouseDown(with: event)
             guard let h = handler, shouldAcceptInput(event, handler: h) else { return }
             let loc = convert(event.locationInWindow, from: nil)
-            h.onHover(loc)
+            updateHoverDot(at: loc)
             h.onChange(canvasPoint(for: event), drawing: true)
         }
 
@@ -1212,7 +1399,7 @@ struct DrawingInputOverlay: NSViewRepresentable {
             super.mouseDragged(with: event)
             guard let h = handler, shouldAcceptInput(event, handler: h) else { return }
             let loc = convert(event.locationInWindow, from: nil)
-            h.onHover(loc)
+            updateHoverDot(at: loc)
             h.onChange(canvasPoint(for: event), drawing: false)
         }
 
@@ -1224,12 +1411,11 @@ struct DrawingInputOverlay: NSViewRepresentable {
         }
 
         override func mouseMoved(with event: NSEvent) {
-            guard let h = handler else { return }
-            h.onHover(convert(event.locationInWindow, from: nil))
+            updateHoverDot(at: convert(event.locationInWindow, from: nil))
         }
 
         override func mouseExited(with event: NSEvent) {
-            handler?.onHover(nil)
+            updateHoverDot(at: nil)
         }
 
         override func touchesBegan(with event: NSEvent) { super.touchesBegan(with: event) }
@@ -1239,13 +1425,10 @@ struct DrawingInputOverlay: NSViewRepresentable {
     }
 }
 
-/// Captures the current canvas transform and model so the overlay can forward
-/// pointer input back into `CanvasView` without creating a reference cycle.
 struct CanvasPointerHandler {
     let model: DrawingModel
     let offset: CGSize
     let scale: CGFloat
-    let onHover: (CGPoint?) -> Void
     let onPoint: (Int) -> Void
     let onBeginDraw: (() -> Void)?
 

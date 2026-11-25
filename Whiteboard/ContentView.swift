@@ -5,7 +5,7 @@ import UIKit
 #endif
 
 struct ContentView: View {
-    @EnvironmentObject var model: DrawingModel
+    @Environment(DrawingModel.self) var model
     @Environment(\.scenePhase) private var scenePhase
     @State private var hoveredTool: String?
     @State private var settingsTool: Tool?
@@ -23,6 +23,7 @@ struct ContentView: View {
     enum ExportFormat: String { case wb, png, pdf }
 
     var body: some View {
+        @Bindable var model = model
         let content = Group {
             if model.showWelcome {
                 WelcomeView(model: model, onStart: { model.showWelcome = false })
@@ -376,7 +377,8 @@ struct ContentView: View {
 
     #if os(iOS) && !targetEnvironment(macCatalyst)
     private var settingsSidebarContent: some View {
-        NavigationStack {
+        @Bindable var model = model
+        return NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     settingsGroup(title: nil, items: [
@@ -509,6 +511,7 @@ struct ContentView: View {
     #endif
 
     private var settingsMenu: some View {
+        @Bindable var model = model
         let content = Group {
             Section {
                 Button(action: { model.undo() }) { Label("Undo", systemImage: "arrow.uturn.backward") }

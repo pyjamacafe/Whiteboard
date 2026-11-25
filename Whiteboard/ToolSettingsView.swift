@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ToolSettingsView: View {
-    @ObservedObject var model: DrawingModel
+    @Bindable var model: DrawingModel
     let tool: Tool
 
     var body: some View {
@@ -31,7 +31,7 @@ struct ToolSettingsView: View {
                         .fill(color)
                         .frame(width: 20, height: 20)
                         .overlay(
-                            color == selected.wrappedValue ?
+                            i == selectedIndex.wrappedValue ?
                             RoundedRectangle(cornerRadius: 4).stroke(Color.primary, lineWidth: 1.5) : nil
                         )
                         .shadow(color: .black.opacity(0.1), radius: 0.5)
@@ -59,6 +59,9 @@ struct ToolSettingsView: View {
                 ColorPickerView(currentColor: presets.wrappedValue[idx]) { newColor in
                     if presets.wrappedValue.indices.contains(idx) {
                         presets.wrappedValue[idx] = newColor
+                        if selectedIndex.wrappedValue == idx {
+                            selected.wrappedValue = newColor
+                        }
                     }
                 }
             }

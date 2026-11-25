@@ -282,4 +282,112 @@ final class WhiteboardTests: XCTestCase {
         model.migratePresetIndices()
         XCTAssertEqual(model.strokes[0].presetIndex, 1)
     }
+
+    // MARK: - Performance & Storage Optimization Tests
+
+    func testSpatialHashGridQueryAndIncrementalSync() {
+        let grid = SpatialHashGrid(cellSize: 100)
+        let s1 = Stroke(points: [CGPoint(x: 10, y: 10), CGPoint(x: 50, y: 50)], color: .black, lineWidth: 2, isEraser: false)
+        let s2 = Stroke(points: [CGPoint(x: 1000, y: 1000), CGPoint(x: 1050, y: 1050)], color: .black, lineWidth: 2, isEraser: false)
+        var strokes = [s1, s2]
+        grid.sync(with: strokes)
+
+        XCTAssertEqual(grid.queryIndices(in: CGRect(x: 0, y: 0, width: 100, height: 100)), [0])
+        XCTAssertEqual(grid.queryIndices(in: CGRect(x: 950, y: 950, width: 150, height: 150)), [1])
+
+        // Incremental single-stroke append
+        let s3 = Stroke(points: [CGPoint(x: 20, y: 20), CGPoint(x: 40, y: 40)], color: .red, lineWidth: 2, isEraser: false)
+        strokes.append(s3)
+        grid.sync(with: strokes)
+        XCTAssertEqual(grid.queryIndices(in: CGRect(x: 0, y: 0, width: 100, height: 100)), [0, 2])
+    }
+
+    func testRDPSimplificationReducesCollinearPoints() {
+        // 50 collinear points along y = 0, then a sharp corner to (500, 100)
+        var pts = (0..<50).map { CGPoint(x: CGFloat($0) * 10, y: 0) }
+        pts.append(CGPoint(x: 490, y: 100))
+
+        let simplified = GeometryEngine.simplifyRDP(pts, tolerance: 0.3)
+        XCTAssertEqual(simplified.count, 3)
+        XCTAssertEqual(simplified.first, pts.first)
+        XCTAssertEqual(simplified.last, pts.last)
+    }
+
+    func testBoardStoreBinaryAssetRoundTripAndLegacyJSONCompat() throws {
+        // 1. Binary plist + external image asset round-trip
+        let stroke = Stroke(points: [CGPoint(x: 0, y: 0), CGPoint(x: 40, y: 40)], color: .blue, lineWidth: 3, isEraser: false)
+        let imgData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let img = PlacedImage(position: CGPoint(x: 10, y: 20), size: CGSize(width: 80, height: 60), imageData: imgData)
+
+        try store.saveBoardSync(id: "bin1", saveData: SaveData(strokes: [stroke], placedImages: [img]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.assetURL(for: img.id).path))
+
+        let loaded = try store.loadBoard(id: "bin1")
+        XCTAssertEqual(loaded.strokes.count, 1)
+        XCTAssertEqual(loaded.placedImages.count, 1)
+        XCTAssertEqual(loaded.placedImages[0].imageData, imgData)
+
+        // 2. Legacy JSON `.wb` file written directly still decodes cleanly
+        let legacyJSON = try JSONEncoder().encode(SaveData(strokes: [stroke], placedImages: [img]))
+        try legacyJSON.write(to: store.boardURL(for: "legacy1"), options: .atomic)
+        let loadedLegacy = try store.loadBoard(id: "legacy1")
+        XCTAssertEqual(loadedLegacy.strokes.count, 1)
+        XCTAssertEqual(loadedLegacy.placedImages.count, 1)
+    }
+
+    func testBoardStoreDiskThumbnails() {
+        let fakePNG = Data([1, 2, 3, 4])
+        XCTAssertNil(store.loadDiskThumbnail(for: "b1", isDark: false))
+        store.saveDiskThumbnail(for: "b1", isDark: false, pngData: fakePNG)
+        XCTAssertEqual(store.loadDiskThumbnail(for: "b1", isDark: false), fakePNG)
+
+        store.invalidateDiskThumbnails(for: "b1")
+        XCTAssertNil(store.loadDiskThumbnail(for: "b1", isDark: false))
+    }
+
+    func testStrokePathCacheCachesAndInvalidatesOnMove() {
+        let cache = StrokePathCache()
+        let stroke = Stroke(points: [CGPoint(x: 10, y: 10), CGPoint(x: 100, y: 100)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: true)
+        let entry1 = cache.entry(for: stroke)
+        XCTAssertNotNil(entry1)
+
+        // Same stroke returns cached entry
+        let entry2 = cache.entry(for: stroke)
+        XCTAssertEqual(entry1?.bounds, entry2?.bounds)
+
+        // Moved stroke (same ID, shifted points) invalidates and updates bounds
+        let moved = Stroke(id: stroke.id, points: [CGPoint(x: 210, y: 210), CGPoint(x: 300, y: 300)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: true)
+        let entry3 = cache.entry(for: moved)
+        XCTAssertNotNil(entry3)
+        XCTAssertNotEqual(entry1?.bounds, entry3?.bounds)
+    }
+
+    func testAddPointFiltersSubPixelDuplicates() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.beginStroke(at: CGPoint(x: 10, y: 10), isEraser: false)
+        model.addPoint(CGPoint(x: 10.2, y: 10.2)) // too close, filtered
+        model.addPoint(CGPoint(x: 10.5, y: 10.5)) // still too close, filtered
+        model.addPoint(CGPoint(x: 20, y: 20))     // kept
+        XCTAssertEqual(model.currentStroke?.points.count, 2)
+    }
+
+    func testToolHighlightColorAlwaysMatchesStrokeDisplayColor() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.selectPenPreset(5) // Blue
+        model.beginStroke(at: CGPoint(x: 0, y: 0), isEraser: false)
+        model.addPoint(CGPoint(x: 20, y: 20))
+        model.endStroke()
+
+        XCTAssertEqual(CodableColor(model.penColor), CodableColor(model.strokes[0].displayColor(for: model)))
+
+        // Toggle Dark Mode — highlight and stroke must remain identical
+        model.appSettings.isDarkMode = true
+        XCTAssertEqual(CodableColor(model.penColor), CodableColor(model.strokes[0].displayColor(for: model)))
+
+        // Persist and reload defaults in a new model instance
+        model.saveDefaults()
+        let reloaded = DrawingModel(store: store, userDefaults: testDefaults)
+        XCTAssertEqual(reloaded.penPresetIndex, 5)
+        XCTAssertEqual(CodableColor(reloaded.penColor), CodableColor(reloaded.penPresets[5]))
+    }
 }
