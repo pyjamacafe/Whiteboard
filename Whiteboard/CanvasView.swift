@@ -228,6 +228,12 @@ class CommittedLayerView: UIView {
             StrokeRenderer.drawPlacedImage(img, in: ctx, cachedImage: cached)
         }
 
+        for fill in model.fills {
+            let box = fill.boundingBox()
+            guard !box.isNull, box.intersects(visibleCanvasRect) else { continue }
+            StrokeRenderer.drawFill(fill, in: ctx, fillPresets: model.fillPresets)
+        }
+
         model.spatialGrid.sync(with: model.strokes)
         let visibleIndices = model.spatialGrid.queryIndices(in: visibleCanvasRect)
         let penPresets = model.penPresets
@@ -648,6 +654,13 @@ class DrawingCanvasView: UIView {
             return
         }
 
+        if model.currentTool == .fill {
+            if model.floodFill(at: toCanvas(touch.location(in: self))) {
+                committedLayer.setNeedsDisplay()
+            }
+            return
+        }
+
         model.beginStroke(at: toCanvas(touch.location(in: self)), isEraser: model.currentTool == .eraser)
         liveOverlay.setNeedsDisplay()
     }
@@ -658,6 +671,8 @@ class DrawingCanvasView: UIView {
         #if os(iOS) && !targetEnvironment(macCatalyst)
         guard !model.appSettings.pencilOnly || touch.type == .pencil || model.currentTool == .select else { return }
         #endif
+
+        if model.currentTool == .fill { return }
 
         if model.currentTool == .select {
             if model.showDeleteMenu { return }
@@ -703,6 +718,10 @@ class DrawingCanvasView: UIView {
             liveOverlay.setNeedsDisplay()
             return
         }
+        if model?.currentTool == .fill {
+            hideHoverIndicator()
+            return
+        }
         model?.endStroke()
         hideHoverIndicator()
         committedLayer.setNeedsDisplay()
@@ -720,6 +739,10 @@ class DrawingCanvasView: UIView {
             }
             syncDashAnimationState()
             liveOverlay.setNeedsDisplay()
+            return
+        }
+        if model?.currentTool == .fill {
+            hideHoverIndicator()
             return
         }
         model?.endStroke()
@@ -900,6 +923,17 @@ private struct CommittedStrokesCanvas: View {
                 if let nsImg = nsImage {
                     context.draw(Image(nsImage: nsImg), in: canvasImgRect)
                 }
+            }
+
+            // Vectorized fills (rendered behind strokes with even-odd rule for holes)
+            for fill in model.fills {
+                let box = fill.boundingBox()
+                guard !box.isNull, box.intersects(visibleCanvasRect) else { continue }
+                context.fill(
+                    Path(fill.makeCGPath()),
+                    with: .color(fill.displayColor(for: model)),
+                    style: FillStyle(eoFill: true)
+                )
             }
 
             // Spatial-indexed viewport query for committed strokes
@@ -1209,6 +1243,9 @@ struct CanvasView: View {
                 case "p":
                     model.selectTool(.pen)
                     return nil
+                case "f":
+                    model.selectTool(.fill)
+                    return nil
                 case "s":
                     model.selectTool(hasShift ? .select : .sharpie)
                     return nil
@@ -1230,6 +1267,9 @@ struct CanvasView: View {
                             return nil
                         case .sharpie where idx < model.sharpiePresets.count:
                             model.selectSharpiePreset(idx)
+                            return nil
+                        case .fill where idx < model.fillPresets.count:
+                            model.selectFillPreset(idx)
                             return nil
                         default: break
                         }
@@ -1340,6 +1380,9 @@ struct DrawingInputOverlay: NSViewRepresentable {
             case .sharpie:
                 size = max(model.sharpieSettings.thickness * 1.5, 4)
                 color = (model.appSettings.isDarkMode ? NSColor.white : NSColor.black).withAlphaComponent(0.4).cgColor
+            case .fill:
+                size = 10
+                color = StrokeRenderer.cgColor(from: model.fillColor.opacity(0.6))
             case .select:
                 size = 4
                 color = (model.appSettings.isDarkMode ? NSColor.white : NSColor.black).withAlphaComponent(0.4).cgColor
@@ -1486,6 +1529,13 @@ struct CanvasPointerHandler {
             return
         }
 
+        if model.currentTool == .fill {
+            if drawing {
+                model.floodFill(at: canvas)
+            }
+            return
+        }
+
         if model.currentStroke == nil {
             model.beginStroke(at: canvas, isEraser: model.currentTool == .eraser)
         } else {
@@ -1495,6 +1545,7 @@ struct CanvasPointerHandler {
     }
 
     func onEnd() {
+        if model.currentTool == .fill { return }
         if model.currentTool == .select {
             if model.isMoving || model.isResizing { model.commitMove() }
             else { model.endLasso() }

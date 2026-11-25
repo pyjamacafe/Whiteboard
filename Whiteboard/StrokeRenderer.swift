@@ -38,6 +38,27 @@ enum StrokeRenderer {
         return stroke.color.color
     }
 
+    static func resolveFillColor(for fill: FillShape, fillPresets: [Color]) -> Color {
+        let base: Color
+        if fill.presetIndex >= 0, fill.presetIndex < fillPresets.count {
+            base = fillPresets[fill.presetIndex]
+        } else {
+            base = fill.color.color
+        }
+        return base.opacity(fill.opacity)
+    }
+
+    static func drawFill(_ fill: FillShape, in ctx: CGContext, fillPresets: [Color], cachedPath: CGPath? = nil) {
+        let path = cachedPath ?? fill.makeCGPath()
+        guard !path.isEmpty else { return }
+        ctx.saveGState()
+        ctx.setBlendMode(.normal)
+        ctx.setFillColor(cgColor(from: resolveFillColor(for: fill, fillPresets: fillPresets)))
+        ctx.addPath(path)
+        ctx.fillPath(using: .evenOdd)
+        ctx.restoreGState()
+    }
+
     static func drawPlacedImage(_ img: PlacedImage, in ctx: CGContext, cachedImage: PlatformImage? = nil) {
         let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
         guard rect.width > 0, rect.height > 0 else { return }
@@ -111,8 +132,10 @@ enum StrokeRenderer {
     static func pngData(
         strokes: [Stroke],
         placedImages: [PlacedImage],
+        fills: [FillShape] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
+        fillPresets: [Color] = [],
         isDarkMode: Bool,
         size: CGSize,
         offset: CGPoint = .zero,
@@ -138,6 +161,10 @@ enum StrokeRenderer {
         for img in placedImages {
             drawPlacedImage(img, in: ctx)
         }
+        let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        for f in fills {
+            drawFill(f, in: ctx, fillPresets: resolvedFillPresets)
+        }
         for s in strokes {
             drawStroke(s, in: ctx, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
         }
@@ -157,8 +184,10 @@ enum StrokeRenderer {
     static func pdfData(
         strokes: [Stroke],
         placedImages: [PlacedImage],
+        fills: [FillShape] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
+        fillPresets: [Color] = [],
         isDarkMode: Bool,
         size: CGSize,
         offset: CGPoint = .zero
@@ -180,6 +209,10 @@ enum StrokeRenderer {
         for img in placedImages {
             drawPlacedImage(img, in: pdf)
         }
+        let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        for f in fills {
+            drawFill(f, in: pdf, fillPresets: resolvedFillPresets)
+        }
         for s in strokes {
             drawStroke(s, in: pdf, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
         }
@@ -193,14 +226,16 @@ enum StrokeRenderer {
     static func renderThumbnail(
         strokes: [Stroke],
         placedImages: [PlacedImage],
+        fills: [FillShape] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
+        fillPresets: [Color] = [],
         isDarkMode: Bool,
         size: CGSize
     ) -> PlatformImage? {
         let w = Int(size.width.rounded()), h = Int(size.height.rounded())
         guard w > 0, h > 0 else { return nil }
-        guard let bounds = GeometryEngine.boundingBox(of: strokes, images: placedImages, padding: 10) else {
+        guard let bounds = GeometryEngine.boundingBox(of: strokes, images: placedImages, fills: fills, padding: 10) else {
             return nil
         }
 
@@ -224,6 +259,10 @@ enum StrokeRenderer {
 
         for img in placedImages {
             drawPlacedImage(img, in: ctx)
+        }
+        let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        for f in fills {
+            drawFill(f, in: ctx, fillPresets: resolvedFillPresets)
         }
         for s in strokes where !s.isEraser {
             drawStroke(s, in: ctx, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)

@@ -9,6 +9,7 @@ struct HelpView: View {
                 Section("Tools") {
                     ShortcutRow("Pen", key: "P")
                     ShortcutRow("Sharpie", key: "S")
+                    ShortcutRow("Fill", key: "F")
                     ShortcutRow("Eraser", key: "E")
                     ShortcutRow("Selection", key: "⇧S")
                     ShortcutRow("Color preset 1–8", key: "1 – 8")

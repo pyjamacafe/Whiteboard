@@ -4,20 +4,23 @@ import Foundation
 nonisolated struct SaveData: Codable, Sendable {
     let strokes: [Stroke]
     let placedImages: [PlacedImage]
+    let fills: [FillShape]
 
     enum CodingKeys: String, CodingKey {
-        case strokes, placedImages
+        case strokes, placedImages, fills
     }
 
-    init(strokes: [Stroke], placedImages: [PlacedImage]) {
+    init(strokes: [Stroke], placedImages: [PlacedImage], fills: [FillShape] = []) {
         self.strokes = strokes
         self.placedImages = placedImages
+        self.fills = fills
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         strokes = try c.decode([Stroke].self, forKey: .strokes)
         placedImages = try c.decodeIfPresent([PlacedImage].self, forKey: .placedImages) ?? []
+        fills = try c.decodeIfPresent([FillShape].self, forKey: .fills) ?? []
     }
 }
 
@@ -33,6 +36,26 @@ private nonisolated struct BinaryBoardData: Codable, Sendable {
     let version: Int
     let strokes: [Stroke]
     let imageRefs: [StoredImageRef]
+    let fills: [FillShape]
+
+    enum CodingKeys: String, CodingKey {
+        case version, strokes, imageRefs, fills
+    }
+
+    init(version: Int, strokes: [Stroke], imageRefs: [StoredImageRef], fills: [FillShape] = []) {
+        self.version = version
+        self.strokes = strokes
+        self.imageRefs = imageRefs
+        self.fills = fills
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decode(Int.self, forKey: .version)
+        strokes = try c.decode([Stroke].self, forKey: .strokes)
+        imageRefs = try c.decode([StoredImageRef].self, forKey: .imageRefs)
+        fills = try c.decodeIfPresent([FillShape].self, forKey: .fills) ?? []
+    }
 }
 
 nonisolated struct BoardMeta: Codable, Identifiable, Equatable, Sendable {
@@ -213,7 +236,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
                     ))
                 }
             }
-            return SaveData(strokes: binary.strokes, placedImages: images)
+            return SaveData(strokes: binary.strokes, placedImages: images, fills: binary.fills)
         }
         return try JSONDecoder().decode(SaveData.self, from: data)
     }
@@ -231,7 +254,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
         let refs = saveData.placedImages.map {
             StoredImageRef(id: $0.id, position: $0.position, size: $0.size)
         }
-        let payload = BinaryBoardData(version: 2, strokes: saveData.strokes, imageRefs: refs)
+        let payload = BinaryBoardData(version: 3, strokes: saveData.strokes, imageRefs: refs, fills: saveData.fills)
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         return try encoder.encode(payload)

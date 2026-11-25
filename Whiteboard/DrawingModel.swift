@@ -112,7 +112,7 @@ nonisolated struct CodablePoint: Codable, Equatable, Sendable {
 }
 
 enum Tool: String, CaseIterable {
-    case pen, sharpie, eraser, select
+    case pen, sharpie, fill, eraser, select
 }
 
 enum CanvasBackground: String, CaseIterable {
@@ -190,6 +190,34 @@ struct SharpieSettings {
     ]
 }
 
+struct FillSettings {
+    var lightColor: Color = Color(red: 0.0, green: 0.35, blue: 1.0)
+    var darkColor: Color = Color(red: 0.3, green: 0.6, blue: 1.0)
+    var opacity: Double = 0.5
+    let opacityOptions: [Double] = [0.25, 0.5, 0.75, 1.0]
+    var gapTolerance: CGFloat = 2.5
+    var lightPresets: [Color] = [
+        Color(red: 0.05, green: 0.05, blue: 0.05),
+        Color(red: 0.95, green: 0.0, blue: 0.1),
+        Color(red: 1.0, green: 0.45, blue: 0.0),
+        Color(red: 1.0, green: 0.8, blue: 0.0),
+        Color(red: 0.0, green: 0.7, blue: 0.15),
+        Color(red: 0.0, green: 0.35, blue: 1.0),
+        Color(red: 0.55, green: 0.15, blue: 1.0),
+        Color(red: 0.6, green: 0.35, blue: 0.1),
+    ]
+    var darkPresets: [Color] = [
+        Color(red: 1.0, green: 1.0, blue: 1.0),
+        Color(red: 1.0, green: 0.3, blue: 0.3),
+        Color(red: 1.0, green: 0.6, blue: 0.15),
+        Color(red: 1.0, green: 0.9, blue: 0.25),
+        Color(red: 0.3, green: 1.0, blue: 0.45),
+        Color(red: 0.3, green: 0.6, blue: 1.0),
+        Color(red: 0.7, green: 0.4, blue: 1.0),
+        Color(red: 1.0, green: 0.4, blue: 0.7),
+    ]
+}
+
 enum EraserMode: String, CaseIterable {
     case partial = "Partial"
     case full = "Full Stroke"
@@ -215,6 +243,9 @@ final class DrawingModel {
     var placedImages: [PlacedImage] = [] {
         didSet { committedRevision &+= 1 }
     }
+    var fills: [FillShape] = [] {
+        didSet { committedRevision &+= 1 }
+    }
     var currentTool: Tool = .pen {
         didSet { scheduleSettingsSave() }
     }
@@ -227,10 +258,16 @@ final class DrawingModel {
     var sharpiePresetIndex: Int = 0 {
         didSet { scheduleSettingsSave() }
     }
+    var fillPresetIndex: Int = 5 {
+        didSet { scheduleSettingsSave() }
+    }
     var penSettings = PenSettings() {
         didSet { scheduleSettingsSave() }
     }
     var sharpieSettings = SharpieSettings() {
+        didSet { scheduleSettingsSave() }
+    }
+    var fillSettings = FillSettings() {
         didSet { scheduleSettingsSave() }
     }
     var eraserSettings = EraserSettings() {
@@ -250,6 +287,7 @@ final class DrawingModel {
     var selectionBoundary: [CGPoint] = []
     var selectedStrokeIds: Set<UUID> = []
     var selectedImageIds: Set<UUID> = []
+    var selectedFillIds: Set<UUID> = []
 
     var pendingAction: PendingAction?
     var showDeleteMenu: Bool = false
@@ -520,12 +558,14 @@ final class DrawingModel {
         userDefaults.removeObject(forKey: defaultsKey)
         penSettings = PenSettings()
         sharpieSettings = SharpieSettings()
+        fillSettings = FillSettings()
         eraserSettings = EraserSettings()
         appSettings = AppSettings()
         currentTool = .pen
         previousTool = .pen
         penPresetIndex = 0
         sharpiePresetIndex = 0
+        fillPresetIndex = 5
     }
 
     var hasDefaults: Bool {
@@ -686,6 +726,7 @@ final class DrawingModel {
             resetCanvasState()
             strokes = save.strokes
             placedImages = save.placedImages
+            fills = save.fills
             currentBoardId = id
             openFileURL = store.boardURL(for: id)
             migratePresetIndices()
@@ -724,7 +765,7 @@ final class DrawingModel {
         saveWorkItem = nil
         pendingAutoSaveBoardId = nil
 
-        let snapshot = SaveData(strokes: strokes, placedImages: placedImages)
+        let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
         invalidateThumbnail(for: boardId)
         if let idx = boards.firstIndex(where: { $0.id == boardId }) {
             boards[idx].modified = Date()
@@ -745,7 +786,7 @@ final class DrawingModel {
         pendingAutoSaveBoardId = nil
 
         if let boardId, currentBoardId == boardId {
-            let snapshot = SaveData(strokes: strokes, placedImages: placedImages)
+            let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
             invalidateThumbnail(for: boardId)
             if let idx = boards.firstIndex(where: { $0.id == boardId }) {
                 boards[idx].modified = Date()
@@ -766,6 +807,7 @@ final class DrawingModel {
 
     var penPresets: [Color] { appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets }
     var sharpiePresets: [Color] { appSettings.isDarkMode ? sharpieSettings.darkPresets : sharpieSettings.lightPresets }
+    var fillPresets: [Color] { appSettings.isDarkMode ? fillSettings.darkPresets : fillSettings.lightPresets }
 
     var penColor: Color {
         if penPresets.indices.contains(penPresetIndex) {
@@ -779,6 +821,13 @@ final class DrawingModel {
             return sharpiePresets[sharpiePresetIndex]
         }
         return appSettings.isDarkMode ? sharpieSettings.darkColor : sharpieSettings.lightColor
+    }
+
+    var fillColor: Color {
+        if fillPresets.indices.contains(fillPresetIndex) {
+            return fillPresets[fillPresetIndex]
+        }
+        return appSettings.isDarkMode ? fillSettings.darkColor : fillSettings.lightColor
     }
 
     func selectPenPreset(_ index: Int) {
@@ -797,14 +846,50 @@ final class DrawingModel {
         sharpieSettings.darkColor = sharpieSettings.darkPresets[index]
     }
 
+    func selectFillPreset(_ index: Int) {
+        guard fillSettings.lightPresets.indices.contains(index),
+              fillSettings.darkPresets.indices.contains(index) else { return }
+        fillPresetIndex = index
+        fillSettings.lightColor = fillSettings.lightPresets[index]
+        fillSettings.darkColor = fillSettings.darkPresets[index]
+    }
+
+    // MARK: - Flood Fill
+
+    /// Flood-fills the nearest enclosed region bounded by pen/sharpie strokes around `point`.
+    /// Returns `true` if a closed region was found and filled, `false` if open/unbounded.
+    @discardableResult
+    func floodFill(at point: CGPoint) -> Bool {
+        guard let contours = FloodFillEngine.computeContours(
+            at: point,
+            strokes: strokes,
+            gapTolerance: fillSettings.gapTolerance
+        ) else {
+            return false
+        }
+        saveState()
+        let shape = FillShape(
+            contours: contours,
+            color: fillColor,
+            opacity: fillSettings.opacity,
+            presetIndex: fillPresetIndex
+        )
+        fills.append(shape)
+        updateUndoRedo()
+        scheduleAutoSave()
+        return true
+    }
+
     // MARK: - History Helpers
 
     private func makeSnapshot() -> CanvasSnapshot {
         CanvasSnapshot(
             strokes: strokes,
             placedImages: placedImages,
+            fills: fills,
             selectedStrokeIds: selectedStrokeIds,
             selectedImageIds: selectedImageIds,
+            selectedFillIds: selectedFillIds,
             selectionBoundary: selectionBoundary
         )
     }
@@ -823,11 +908,13 @@ final class DrawingModel {
     private func resetCanvasState() {
         strokes.removeAll()
         placedImages.removeAll()
+        fills.removeAll()
         imageCache.removeAll()
         spatialGrid.invalidate()
         currentStroke = nil
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
+        selectedFillIds.removeAll()
         selectionLasso.removeAll()
         selectionBoundary.removeAll()
         isMoving = false
@@ -874,16 +961,30 @@ final class DrawingModel {
         currentStroke = nil
 
         if stroke.isEraser {
-            let updated = GeometryEngine.erase(
+            let updatedStrokes = GeometryEngine.erase(
                 strokes: strokes,
                 with: stroke,
                 mode: eraserSettings.mode,
                 target: eraserSettings.eraseTarget,
                 spatialGrid: spatialGrid
             )
-            if updated.count != strokes.count || !zip(updated, strokes).allSatisfy({ $0.id == $1.id && $0.points.count == $1.points.count }) {
+            let updatedFills: [FillShape]
+            if eraserSettings.eraseTarget == .all && !fills.isEmpty {
+                updatedFills = fills.filter { fill in
+                    let path = fill.makeCGPath()
+                    return !stroke.points.contains { path.contains($0, using: .evenOdd) }
+                }
+            } else {
+                updatedFills = fills
+            }
+
+            let strokesChanged = updatedStrokes.count != strokes.count
+                || !zip(updatedStrokes, strokes).allSatisfy({ $0.id == $1.id && $0.points.count == $1.points.count })
+            let fillsChanged = updatedFills.count != fills.count
+            if strokesChanged || fillsChanged {
                 saveState()
-                strokes = updated
+                strokes = updatedStrokes
+                fills = updatedFills
                 spatialGrid.rebuild(with: strokes)
                 updateUndoRedo()
                 scheduleAutoSave()
@@ -924,6 +1025,7 @@ final class DrawingModel {
 
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
+        selectedFillIds.removeAll()
 
         spatialGrid.sync(with: strokes)
         let candidateIndices = spatialGrid.queryIndices(in: path.boundingBoxOfPath)
@@ -933,6 +1035,15 @@ final class DrawingModel {
             for p in stroke.points where path.contains(p) {
                 selectedStrokeIds.insert(stroke.id)
                 break
+            }
+        }
+
+        for fill in fills {
+            let box = fill.boundingBox()
+            guard !box.isNull else { continue }
+            let center = CGPoint(x: box.midX, y: box.midY)
+            if path.contains(center) || fill.contours.first?.contains(where: { path.contains($0) }) == true {
+                selectedFillIds.insert(fill.id)
             }
         }
 
@@ -963,6 +1074,11 @@ final class DrawingModel {
         }
         for img in placedImages where selectedImageIds.contains(img.id) {
             if CGRect(origin: img.cgPosition, size: img.cgSize).contains(point) {
+                return true
+            }
+        }
+        for fill in fills where selectedFillIds.contains(fill.id) {
+            if fill.makeCGPath().contains(point, using: .evenOdd) {
                 return true
             }
         }
@@ -1090,6 +1206,15 @@ final class DrawingModel {
                 imageData: img.imageData
             )
         }
+        if !selectedFillIds.isEmpty {
+            fills = fills.map { fill in
+                guard selectedFillIds.contains(fill.id) else { return fill }
+                let shifted = fill.contours.map { loop in
+                    loop.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) }
+                }
+                return FillShape(id: fill.id, contours: shifted, color: fill.uiColor, opacity: fill.opacity, presetIndex: fill.presetIndex)
+            }
+        }
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) }
         }
@@ -1100,14 +1225,16 @@ final class DrawingModel {
     }
 
     func deleteSelected() {
-        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectionBoundary.isEmpty else { return }
+        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty || !selectionBoundary.isEmpty else { return }
         saveState()
-        if !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty {
+        if !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty {
             strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
             for id in selectedImageIds { imageCache.removeValue(forKey: id) }
             placedImages = placedImages.filter { !selectedImageIds.contains($0.id) }
+            fills = fills.filter { !selectedFillIds.contains($0.id) }
             selectedStrokeIds.removeAll()
             selectedImageIds.removeAll()
+            selectedFillIds.removeAll()
         }
         selectionBoundary.removeAll()
         spatialGrid.rebuild(with: strokes)
@@ -1303,6 +1430,7 @@ final class DrawingModel {
         if tool != .select {
             selectedStrokeIds.removeAll()
             selectedImageIds.removeAll()
+            selectedFillIds.removeAll()
             selectionBoundary.removeAll()
         }
         showDeleteMenu = false
@@ -1313,8 +1441,10 @@ final class DrawingModel {
         guard let prev = history.undo(current: makeSnapshot()) else { return }
         strokes = prev.strokes
         placedImages = prev.placedImages
+        fills = prev.fills
         selectedStrokeIds = prev.selectedStrokeIds
         selectedImageIds = prev.selectedImageIds
+        selectedFillIds = prev.selectedFillIds
         selectionBoundary = prev.selectionBoundary
         spatialGrid.rebuild(with: strokes)
         pruneImageCache()
@@ -1326,8 +1456,10 @@ final class DrawingModel {
         guard let next = history.redo(current: makeSnapshot()) else { return }
         strokes = next.strokes
         placedImages = next.placedImages
+        fills = next.fills
         selectedStrokeIds = next.selectedStrokeIds
         selectedImageIds = next.selectedImageIds
+        selectedFillIds = next.selectedFillIds
         selectionBoundary = next.selectionBoundary
         spatialGrid.rebuild(with: strokes)
         pruneImageCache()
@@ -1344,11 +1476,13 @@ final class DrawingModel {
         saveState()
         strokes.removeAll()
         placedImages.removeAll()
+        fills.removeAll()
         imageCache.removeAll()
         spatialGrid.invalidate()
         currentStroke = nil
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
+        selectedFillIds.removeAll()
         selectionLasso.removeAll()
         selectionBoundary.removeAll()
         updateUndoRedo()
@@ -1359,7 +1493,7 @@ final class DrawingModel {
 
     /// Portable JSON `.wb` export payload (always embeds images for single-file sharing).
     func saveData() -> Data? {
-        let data = SaveData(strokes: strokes, placedImages: placedImages)
+        let data = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
         return try? JSONEncoder().encode(data)
     }
 
@@ -1369,6 +1503,7 @@ final class DrawingModel {
             saveState()
             strokes = save.strokes
             placedImages = save.placedImages
+            fills = save.fills
             imageCache.removeAll()
             migratePresetIndices()
             spatialGrid.rebuild(with: strokes)
@@ -1435,7 +1570,7 @@ final class DrawingModel {
     func exportPDF() { pendingAction = .export(.pdf) }
 
     func canvasBoundingRect(padding: CGFloat = 40) -> (size: CGSize, offset: CGPoint) {
-        guard let box = GeometryEngine.boundingBox(of: strokes, images: placedImages, padding: padding) else {
+        guard let box = GeometryEngine.boundingBox(of: strokes, images: placedImages, fills: fills, padding: padding) else {
             return (CGSize(width: 1000, height: 1000), .zero)
         }
         return (box.size, box.origin)
@@ -1445,8 +1580,10 @@ final class DrawingModel {
         StrokeRenderer.pngData(
             strokes: strokes,
             placedImages: placedImages,
+            fills: fills,
             penPresets: penPresets,
             sharpiePresets: sharpiePresets,
+            fillPresets: fillPresets,
             isDarkMode: appSettings.isDarkMode,
             size: size,
             offset: offset,
@@ -1457,20 +1594,22 @@ final class DrawingModel {
     func pngData(forBoardId id: String) -> Data? {
         let save: SaveData
         if id == currentBoardId {
-            save = SaveData(strokes: strokes, placedImages: placedImages)
+            save = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
         } else if let loaded = store.loadBoardData(id: id) {
             save = loaded
         } else {
             return nil
         }
-        guard let box = GeometryEngine.boundingBox(of: save.strokes, images: save.placedImages, padding: 40) else {
+        guard let box = GeometryEngine.boundingBox(of: save.strokes, images: save.placedImages, fills: save.fills, padding: 40) else {
             return nil
         }
         return StrokeRenderer.pngData(
             strokes: save.strokes,
             placedImages: save.placedImages,
+            fills: save.fills,
             penPresets: penPresets,
             sharpiePresets: sharpiePresets,
+            fillPresets: fillPresets,
             isDarkMode: appSettings.isDarkMode,
             size: box.size,
             offset: box.origin,
@@ -1482,8 +1621,10 @@ final class DrawingModel {
         StrokeRenderer.pdfData(
             strokes: strokes,
             placedImages: placedImages,
+            fills: fills,
             penPresets: penPresets,
             sharpiePresets: sharpiePresets,
+            fillPresets: fillPresets,
             isDarkMode: appSettings.isDarkMode,
             size: size,
             offset: offset
@@ -1503,8 +1644,9 @@ final class DrawingModel {
 
         let penP = penPresets
         let sharpieP = sharpiePresets
+        let fillP = fillPresets
         let inMemorySave: SaveData? = (boardId == currentBoardId)
-            ? SaveData(strokes: strokes, placedImages: placedImages)
+            ? SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
             : nil
         let boardStore = self.store
         let renderSize = CGSize(width: 320, height: 240)
@@ -1520,12 +1662,14 @@ final class DrawingModel {
             } else {
                 // 2. Render from board data and persist PNG thumbnail to disk
                 let save = inMemorySave ?? boardStore.loadBoardData(id: boardId)
-                if let save, (!save.strokes.isEmpty || !save.placedImages.isEmpty) {
+                if let save, (!save.strokes.isEmpty || !save.placedImages.isEmpty || !save.fills.isEmpty) {
                     rendered = StrokeRenderer.renderThumbnail(
                         strokes: save.strokes,
                         placedImages: save.placedImages,
+                        fills: save.fills,
                         penPresets: penP,
                         sharpiePresets: sharpieP,
+                        fillPresets: fillP,
                         isDarkMode: isDark,
                         size: renderSize
                     )

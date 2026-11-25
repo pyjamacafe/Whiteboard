@@ -215,6 +215,7 @@ struct ContentView: View {
         switch tool {
         case .pen: return model.penColor
         case .sharpie: return model.sharpieColor
+        case .fill: return model.fillColor
         default: return Color.accentColor
         }
     }
@@ -295,6 +296,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             toolButton(systemName: "pencil.tip", tool: .pen)
             toolButton(systemName: "pencil", tool: .sharpie)
+            toolButton(systemName: "drop.fill", tool: .fill)
             toolButton(systemName: "eraser", tool: .eraser)
             toolButton(systemName: "cursorarrow.click", tool: .select)
 

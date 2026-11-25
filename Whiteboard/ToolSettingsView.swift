@@ -9,6 +9,7 @@ struct ToolSettingsView: View {
             switch tool {
             case .pen: penSettings
             case .sharpie: sharpieSettings
+            case .fill: fillSettings
             case .eraser: eraserSettings
             case .select: EmptyView()
             }
@@ -96,6 +97,7 @@ struct ToolSettingsView: View {
 
     @State private var lastPenTapIndex: Int?
     @State private var lastSharpieTapIndex: Int?
+    @State private var lastFillTapIndex: Int?
 
     // MARK: - Pen
 
@@ -144,6 +146,57 @@ struct ToolSettingsView: View {
                                 model.sharpieSettings.thickness == w ?
                                 Circle().stroke(Color.primary, lineWidth: 1) : nil
                             )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    // MARK: - Fill
+
+    private var fillSettings: some View {
+        HStack(spacing: 12) {
+            squarePresetRow(
+                presets: model.appSettings.isDarkMode ? $model.fillSettings.darkPresets : $model.fillSettings.lightPresets,
+                selected: model.appSettings.isDarkMode ? $model.fillSettings.darkColor : $model.fillSettings.lightColor,
+                selectedIndex: $model.fillPresetIndex,
+                lastTapIndex: $lastFillTapIndex
+            )
+
+            Divider().frame(height: 24)
+
+            // Opacity presets
+            HStack(spacing: 4) {
+                ForEach(model.fillSettings.opacityOptions, id: \.self) { op in
+                    let isSelected = abs(model.fillSettings.opacity - op) < 0.01
+                    Button(action: { model.fillSettings.opacity = op }) {
+                        Text("\(Int(op * 100))%")
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 6)
+                            .frame(height: 26)
+                            .background(isSelected ? Color.accentColor : Color.clear)
+                            .foregroundColor(isSelected ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Divider().frame(height: 24)
+
+            // Gap tolerance presets (Off / Low / Med)
+            HStack(spacing: 4) {
+                ForEach([(label: "Strict", val: CGFloat(0)), (label: "Auto", val: CGFloat(2.5)), (label: "Wide", val: CGFloat(5))], id: \.label) { opt in
+                    let isSelected = abs(model.fillSettings.gapTolerance - opt.val) < 0.1
+                    Button(action: { model.fillSettings.gapTolerance = opt.val }) {
+                        Text(opt.label)
+                            .font(.caption2.weight(.medium))
+                            .padding(.horizontal, 6)
+                            .frame(height: 26)
+                            .background(isSelected ? Color.accentColor : Color.clear)
+                            .foregroundColor(isSelected ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
                     }
                     .buttonStyle(.plain)
                 }

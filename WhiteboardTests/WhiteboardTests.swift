@@ -413,4 +413,79 @@ final class WhiteboardTests: XCTestCase {
         model.emptyTrash()
         XCTAssertTrue(model.trashedBoards.isEmpty)
     }
+
+    // MARK: - Flood Fill (Option #2) Tests
+
+    private func makeBoxStroke(rect: CGRect, closed: Bool = true, gap: CGFloat = 0) -> Stroke {
+        var pts: [CGPoint] = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY),
+        ]
+        if closed {
+            pts.append(CGPoint(x: rect.minX, y: rect.minY + gap))
+        }
+        return Stroke(points: pts, color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false)
+    }
+
+    func testFloodFillEnclosedSquareSucceedsAndOpenShapeAborts() {
+        let closedBox = makeBoxStroke(rect: CGRect(x: 0, y: 0, width: 100, height: 100), closed: true)
+        let contours = FloodFillEngine.computeContours(at: CGPoint(x: 50, y: 50), strokes: [closedBox], gapTolerance: 0)
+        XCTAssertNotNil(contours)
+        XCTAssertEqual(contours?.count, 1)
+
+        let shape = FillShape(contours: contours!, color: .blue, opacity: 0.5, presetIndex: 5)
+        let path = shape.makeCGPath()
+        XCTAssertTrue(path.contains(CGPoint(x: 50, y: 50), using: .evenOdd))
+        XCTAssertFalse(path.contains(CGPoint(x: 150, y: 150), using: .evenOdd))
+
+        // Open shape (missing left edge) must abort with nil (no bleeding!)
+        let openBox = makeBoxStroke(rect: CGRect(x: 0, y: 0, width: 100, height: 100), closed: false)
+        XCTAssertNil(FloodFillEngine.computeContours(at: CGPoint(x: 50, y: 50), strokes: [openBox], gapTolerance: 2.5))
+    }
+
+    func testFloodFillPreservesInteriorHoleWithEvenOddRule() {
+        let outer = makeBoxStroke(rect: CGRect(x: 0, y: 0, width: 120, height: 120), closed: true)
+        let inner = makeBoxStroke(rect: CGRect(x: 40, y: 40, width: 40, height: 40), closed: true)
+
+        // Tap inside the ring (between outer and inner)
+        let contours = FloodFillEngine.computeContours(at: CGPoint(x: 20, y: 60), strokes: [outer, inner], gapTolerance: 0)
+        XCTAssertNotNil(contours)
+        XCTAssertEqual(contours?.count, 2, "Ring fill should produce outer contour + inner hole contour")
+
+        let path = FillShape(contours: contours!, color: .red).makeCGPath()
+        XCTAssertTrue(path.contains(CGPoint(x: 20, y: 60), using: .evenOdd), "Ring interior should be filled")
+        XCTAssertFalse(path.contains(CGPoint(x: 60, y: 60), using: .evenOdd), "Center hole should remain unfilled")
+    }
+
+    func testFloodFillGapToleranceAndPersistenceAndUndo() throws {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.createBoard(name: "Fill Test")
+        let boardId = try XCTUnwrap(model.currentBoardId)
+
+        // Small 4pt gap at top-left corner
+        let gappedBox = makeBoxStroke(rect: CGRect(x: 0, y: 0, width: 100, height: 100), closed: true, gap: 4)
+        model.strokes = [gappedBox]
+
+        // Strict mode (gapTolerance = 0) should refuse to bleed through the 4pt gap
+        model.fillSettings.gapTolerance = 0
+        XCTAssertFalse(model.floodFill(at: CGPoint(x: 50, y: 50)))
+
+        // Auto mode (gapTolerance = 2.5 => 5pt closing) should fill cleanly
+        model.fillSettings.gapTolerance = 2.5
+        XCTAssertTrue(model.floodFill(at: CGPoint(x: 50, y: 50)))
+        XCTAssertEqual(model.fills.count, 1)
+
+        // Persist and reload from BoardStore
+        model.flushAutoSave()
+        let loaded = try store.loadBoard(id: boardId)
+        XCTAssertEqual(loaded.fills.count, 1)
+
+        // Undo removes the fill, Redo restores it
+        model.undo()
+        XCTAssertTrue(model.fills.isEmpty)
+        model.redo()
+        XCTAssertEqual(model.fills.count, 1)
+    }
 }

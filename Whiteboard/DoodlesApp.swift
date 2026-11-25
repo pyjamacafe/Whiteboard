@@ -37,6 +37,8 @@ struct DoodlesApp: App {
                     .keyboardShortcut("p", modifiers: [])
                 Button("Sharpie") { model.selectTool(.sharpie) }
                     .keyboardShortcut("s", modifiers: [])
+                Button("Fill") { model.selectTool(.fill) }
+                    .keyboardShortcut("f", modifiers: [])
                 Button("Eraser") { model.selectTool(.eraser) }
                     .keyboardShortcut("e", modifiers: [])
                 Button("Selection") { model.selectTool(.select) }

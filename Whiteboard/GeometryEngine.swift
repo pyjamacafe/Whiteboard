@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 
 /// 2D uniform-grid spatial hash for O(1)-bucket queries over dense boards.
-final class SpatialHashGrid {
+nonisolated final class SpatialHashGrid {
     struct CellKey: Hashable {
         let x: Int
         let y: Int
@@ -168,7 +168,7 @@ final class IncrementalStrokePath {
 }
 
 /// Pure geometry, spline smoothing, simplification, hit-testing, and erasing algorithms.
-enum GeometryEngine {
+nonisolated enum GeometryEngine {
 
     // MARK: - Point Simplification (Ramer-Douglas-Peucker)
 
@@ -305,7 +305,7 @@ enum GeometryEngine {
         return CGRect(x: minX - margin, y: minY - margin, width: (maxX - minX) + margin * 2, height: (maxY - minY) + margin * 2)
     }
 
-    static func boundingBox(of strokes: [Stroke], images: [PlacedImage], padding: CGFloat = 0) -> CGRect? {
+    static func boundingBox(of strokes: [Stroke], images: [PlacedImage], fills: [FillShape] = [], padding: CGFloat = 0) -> CGRect? {
         var minX = CGFloat.greatestFiniteMagnitude
         var maxX = -CGFloat.greatestFiniteMagnitude
         var minY = CGFloat.greatestFiniteMagnitude
@@ -327,6 +327,16 @@ enum GeometryEngine {
         for img in images {
             let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
             guard rect.width > 0, rect.height > 0 else { continue }
+            minX = min(minX, rect.minX)
+            maxX = max(maxX, rect.maxX)
+            minY = min(minY, rect.minY)
+            maxY = max(maxY, rect.maxY)
+            hasContent = true
+        }
+
+        for fill in fills {
+            let rect = fill.boundingBox()
+            guard !rect.isNull else { continue }
             minX = min(minX, rect.minX)
             maxX = max(maxX, rect.maxX)
             minY = min(minY, rect.minY)
