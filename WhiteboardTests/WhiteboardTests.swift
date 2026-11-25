@@ -390,4 +390,27 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertEqual(reloaded.penPresetIndex, 5)
         XCTAssertEqual(CodableColor(reloaded.penColor), CodableColor(reloaded.penPresets[5]))
     }
+
+    func testQuickBoardCreationAndPermanentTrashDelete() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.createFolder(name: "Work")
+        let folderId = model.folders[0].id
+
+        let id1 = model.createQuickBoard(folderId: folderId)
+        let id2 = model.createQuickBoard(folderId: folderId)
+
+        XCTAssertEqual(model.boards.first(where: { $0.id == id1 })?.name, "Untitled Doodle")
+        XCTAssertEqual(model.boards.first(where: { $0.id == id2 })?.name, "Untitled Doodle 2")
+        XCTAssertEqual(model.folderName(forBoardId: id1), "Work")
+
+        model.trashBoard(id: id1, name: "Untitled Doodle")
+        model.trashBoard(id: id2, name: "Untitled Doodle 2")
+        XCTAssertEqual(model.trashedBoards.count, 2)
+
+        model.permanentlyDeleteTrashedBoard(id: id1)
+        XCTAssertEqual(model.trashedBoards.count, 1)
+
+        model.emptyTrash()
+        XCTAssertTrue(model.trashedBoards.isEmpty)
+    }
 }

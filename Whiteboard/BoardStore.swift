@@ -407,4 +407,34 @@ nonisolated final class BoardStore: @unchecked Sendable {
         let name = entry?.name ?? "Restored Board"
         return (name, decoded, entries.sorted { $0.deletedAt > $1.deletedAt })
     }
+
+    /// Permanently deletes a single trashed board from disk and `trash_index.json`.
+    @discardableResult
+    func permanentlyDeleteTrash(id: String) -> [TrashEntry] {
+        var entries = loadTrash()
+        if let entry = entries.first(where: { $0.id == id }) {
+            if let fileName = entry.fileName {
+                try? fileManager.removeItem(at: trashDirectory.appendingPathComponent(fileName))
+            } else {
+                let files = (try? fileManager.contentsOfDirectory(at: trashDirectory, includingPropertiesForKeys: nil)) ?? []
+                for file in files where file.lastPathComponent.hasPrefix("\(id)_") {
+                    try? fileManager.removeItem(at: file)
+                }
+            }
+        }
+        entries.removeAll { $0.id == id }
+        try? saveTrashIndex(entries)
+        return entries.sorted { $0.deletedAt > $1.deletedAt }
+    }
+
+    /// Permanently deletes all trashed boards and clears `trash_index.json`.
+    @discardableResult
+    func emptyTrash() -> [TrashEntry] {
+        let files = (try? fileManager.contentsOfDirectory(at: trashDirectory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.pathExtension == "wb" {
+            try? fileManager.removeItem(at: file)
+        }
+        try? saveTrashIndex([])
+        return []
+    }
 }

@@ -573,6 +573,25 @@ final class DrawingModel {
         }
     }
 
+    /// Creates a new board immediately with a unique default name (no modal prompt).
+    @discardableResult
+    func createQuickBoard(folderId: String? = nil) -> String {
+        let base = "Untitled Doodle"
+        let existingNames = Set(boards.map(\.name))
+        var candidate = base
+        var n = 2
+        while existingNames.contains(candidate) {
+            candidate = "\(base) \(n)"
+            n += 1
+        }
+        createBoard(name: candidate, folderId: folderId)
+        return currentBoardId ?? ""
+    }
+
+    func folderName(forBoardId boardId: String) -> String? {
+        folders.first(where: { $0.boardIds.contains(boardId) })?.name
+    }
+
     func renameBoard(id: String, to newName: String) {
         guard let idx = boards.firstIndex(where: { $0.id == id }) else { return }
         boards[idx].name = newName
@@ -650,6 +669,14 @@ final class DrawingModel {
             reportError(error.localizedDescription)
             return false
         }
+    }
+
+    func permanentlyDeleteTrashedBoard(id: String) {
+        trashedBoards = store.permanentlyDeleteTrash(id: id)
+    }
+
+    func emptyTrash() {
+        trashedBoards = store.emptyTrash()
     }
 
     func loadBoard(id: String) {
@@ -1480,7 +1507,7 @@ final class DrawingModel {
             ? SaveData(strokes: strokes, placedImages: placedImages)
             : nil
         let boardStore = self.store
-        let renderSize = CGSize(width: 240, height: 320)
+        let renderSize = CGSize(width: 320, height: 240)
 
         thumbnailQueue.async { [weak self] in
             var rendered: PlatformImage?

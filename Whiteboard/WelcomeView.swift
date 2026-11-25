@@ -6,72 +6,141 @@ import AppKit
 
 struct WelcomeView: View {
     var model: DrawingModel
-    @State private var showNewName = false
+    let onStart: () -> Void
+
+    enum SidebarSelection: Hashable {
+        case all
+        case recents
+        case trash
+        case folder(String)
+    }
+
+    enum ViewMode: String, CaseIterable { case list, thumbnails }
+    enum SortMode: String, CaseIterable {
+        case modified = "Date Modified"
+        case created = "Date Created"
+        case name = "Name"
+    }
+
+    private struct TimeGroup: Identifiable {
+        let id: String
+        let title: String
+        let boards: [BoardMeta]
+    }
+
+    private struct UndoTrashToast: Equatable {
+        let message: String
+        let trashedIds: [String]
+    }
+
+    @AppStorage("viewMode") private var viewMode: ViewMode = .thumbnails
+    @AppStorage("boardSort") private var sortRaw: String = SortMode.modified.rawValue
+
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var selection: SidebarSelection = .all
+    @State private var searchText = ""
+
     @State private var showNewFolder = false
-    @State private var newName = ""
     @State private var newFolderName = ""
-    @State private var renamingId: String?
-    @State private var renameText = ""
-    @State private var hoveredBoard: String?
-    @State private var deleteBoardId: String?
-    @State private var deleteBoardName: String = ""
-    @State private var showDeleteAlert = false
     @State private var showRenameFolder = false
     @State private var renameFolderId: String?
     @State private var renameFolderText = ""
-    @State private var selectedFolder: String?
-    @State private var hoveredFolder: String?
-    @State private var searchText = ""
+
+    @State private var renamingId: String?
+    @State private var renameText = ""
+
+    @State private var hoveredBoard: String?
+    @State private var hoveredSidebar: SidebarSelection?
+    @State private var dropTargetedFolder: SidebarSelection?
+
     @State private var selectedBoardIds: Set<String> = []
-    @State private var showBulkDeleteAlert = false
-    @FocusState private var listFocused: Bool
-    let onStart: () -> Void
+    @State private var selectionAnchorId: String?
+    @State private var isSelectingOnTouch = false
+
+    @State private var showEmptyTrashAlert = false
+    @State private var permanentDeleteEntry: TrashEntry?
+
+    @State private var undoToast: UndoTrashToast?
+    @State private var toastDismissTask: DispatchWorkItem?
+
+    @FocusState private var searchFocused: Bool
+    @FocusState private var renameFocused: Bool
+    @FocusState private var contentFocused: Bool
+
+    private var sortMode: SortMode { SortMode(rawValue: sortRaw) ?? .modified }
+    private var isDark: Bool { model.appSettings.isDarkMode }
+
+    private var activeFolderId: String? {
+        if case .folder(let id) = selection { return id }
+        return nil
+    }
+
+    private var sectionTitle: String {
+        switch selection {
+        case .all: return "All Doodles"
+        case .recents: return "Recents"
+        case .trash: return "Recently Deleted"
+        case .folder(let id):
+            return model.folders.first(where: { $0.id == id })?.name ?? "Folder"
+        }
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Sidebar
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
-                .frame(width: 220)
-                .background(Color.primary.opacity(0.05))
+                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+        } detail: {
+            ZStack(alignment: .bottom) {
+                mainContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Divider()
-
-            // Main content
-            mainContent
-                .frame(maxWidth: .infinity)
+                if let toast = undoToast {
+                    undoToastView(toast)
+                        .padding(.bottom, 20)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.28, dampingFraction: 0.85), value: undoToast)
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         #if os(macOS)
-        .background(model.appSettings.isDarkMode ? Color.black : Color(.windowBackgroundColor))
+        .background(isDark ? Color(red: 18/255, green: 18/255, blue: 20/255) : Color(.windowBackgroundColor))
         #else
-        .background(model.appSettings.isDarkMode ? Color.black : Color(.systemBackground))
+        .background(isDark ? Color.black : Color(.systemBackground))
         #endif
-        .foregroundColor(model.appSettings.isDarkMode ? .white : .primary)
-        .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
-        .accentColor(model.appSettings.isDarkMode ? Color(red: 0.5, green: 0.8, blue: 1.0) : nil)
+        .foregroundColor(isDark ? .white : .primary)
+        .colorScheme(isDark ? .dark : .light)
+        .accentColor(isDark ? Color(red: 0.45, green: 0.78, blue: 1.0) : nil)
         .onAppear {
             model.loadTrash()
-            listFocused = true
+            contentFocused = true
         }
-        .onChange(of: selectedFolder) { _, newValue in
-            model.welcomeFolderName = newValue.flatMap { id in model.folders.first(where: { $0.id == id })?.name }
-        }
-        .alert("New Doodle", isPresented: $showNewName) {
-            TextField("Doodle name", text: $newName)
-            Button("Create") {
-                let name = newName.trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty { model.createBoard(name: name); newName = ""; onStart() }
+        .onChange(of: selection) { _, newSelection in
+            selectedBoardIds.removeAll()
+            selectionAnchorId = nil
+            isSelectingOnTouch = false
+            switch newSelection {
+            case .folder(let id):
+                model.welcomeFolderName = model.folders.first(where: { $0.id == id })?.name
+            case .recents:
+                model.welcomeFolderName = "Recents"
+            case .trash:
+                model.welcomeFolderName = "Recently Deleted"
+            case .all:
+                model.welcomeFolderName = nil
             }
-            Button("Cancel", role: .cancel) { newName = "" }
-        } message: { Text("Enter a name for the new doodle") }
+        }
+        .background(welcomeKeyboardShortcuts)
         .alert("New Folder", isPresented: $showNewFolder) {
             TextField("Folder name", text: $newFolderName)
             Button("Create") {
                 let name = newFolderName.trimmingCharacters(in: .whitespaces)
-                if !name.isEmpty { model.createFolder(name: name); newFolderName = "" }
+                if !name.isEmpty { model.createFolder(name: name) }
+                newFolderName = ""
             }
             Button("Cancel", role: .cancel) { newFolderName = "" }
-        } message: { Text("Enter a name for the folder") }
+        } message: { Text("Enter a name for the new folder") }
         .alert("Rename Folder", isPresented: $showRenameFolder) {
             TextField("Folder name", text: $renameFolderText)
             Button("Rename") {
@@ -81,378 +150,850 @@ struct WelcomeView: View {
             }
             Button("Cancel", role: .cancel) { renameFolderId = nil }
         } message: { Text("Enter a new name for the folder") }
-        .alert("Delete Doodle", isPresented: $showDeleteAlert) {
-            Button("Delete", role: .destructive) {
-                if let id = deleteBoardId { model.trashBoard(id: id, name: deleteBoardName) }
-            }
-            Button("Cancel", role: .cancel) { deleteBoardId = nil }
-        } message: {
-            Text("\"\(deleteBoardName)\" will be moved to trash and permanently deleted after 30 days.")
-        }
-        .alert(bulkDeleteTitle, isPresented: $showBulkDeleteAlert) {
-            Button("Delete", role: .destructive) { trashSelected() }
+        .alert("Empty Trash?", isPresented: $showEmptyTrashAlert) {
+            Button("Empty Trash", role: .destructive) { model.emptyTrash() }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("They will be moved to trash and permanently deleted after 30 days.")
+            Text("All \(model.trashedBoards.count) deleted doodles will be permanently removed. This cannot be undone.")
+        }
+        .alert("Delete Permanently?", isPresented: Binding(
+            get: { permanentDeleteEntry != nil },
+            set: { if !$0 { permanentDeleteEntry = nil } }
+        )) {
+            Button("Delete Permanently", role: .destructive) {
+                if let entry = permanentDeleteEntry {
+                    model.permanentlyDeleteTrashedBoard(id: entry.id)
+                }
+                permanentDeleteEntry = nil
+            }
+            Button("Cancel", role: .cancel) { permanentDeleteEntry = nil }
+        } message: {
+            Text("\"\(permanentDeleteEntry?.name ?? "")\" will be permanently deleted. This cannot be undone.")
         }
     }
 
-    private var bulkDeleteTitle: String {
-        selectedBoardIds.count == 1 ? "Delete Doodle?" : "Delete \(selectedBoardIds.count) Doodles?"
+    // MARK: - Keyboard Shortcuts
+
+    private var welcomeKeyboardShortcuts: some View {
+        Group {
+            Button("") { createNewDoodle() }
+                .keyboardShortcut("n", modifiers: .command)
+            Button("") { searchFocused = true }
+                .keyboardShortcut("f", modifiers: .command)
+            Button("") {
+                if selection != .trash {
+                    selectedBoardIds = Set(displayedBoards.map(\.id))
+                }
+            }
+            .keyboardShortcut("a", modifiers: .command)
+            Button("") { handleEscape() }
+                .keyboardShortcut(.escape, modifiers: [])
+        }
+        .hidden()
+        .frame(width: 0, height: 0)
+    }
+
+    private func handleEscape() {
+        if renamingId != nil {
+            renamingId = nil
+            renameFocused = false
+        } else if !selectedBoardIds.isEmpty {
+            selectedBoardIds.removeAll()
+            selectionAnchorId = nil
+        } else if !searchText.isEmpty {
+            searchText = ""
+            searchFocused = false
+        }
     }
 
     // MARK: - Sidebar
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Folders").font(.headline).foregroundColor(.secondary)
-                .padding(.horizontal, 8).padding(.top, 16)
-
-            // "All Doodles" item (drop target to remove a board from a folder)
-            Button(action: { selectedFolder = nil }) {
-                HStack {
-                    Image(systemName: "tray.full").frame(width: 20)
-                    Text("All Doodles").font(.body)
-                    Spacer()
-                    Text("\(model.boards.count)").font(.caption).foregroundColor(.secondary)
-                }
-                .padding(.vertical, 6)
-                .padding(.horizontal, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    selectedFolder == nil ? Color.accentColor.opacity(0.15) :
-                    hoveredFolder == "" ? Color.accentColor.opacity(0.12) : Color.clear
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .contentShape(Rectangle())
+        VStack(alignment: .leading, spacing: 0) {
+            // App brand header
+            HStack(spacing: 10) {
+                Image("logo")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 26, height: 26)
+                Text("Doodles")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                Spacer()
             }
-            .buttonStyle(.plain)
-            .onHover { hoveredFolder = $0 ? "" : nil }
-            .pointingHand()
-            .dropDestination(for: String.self) { ids, _ in
-                for id in ids { model.moveBoard(boardId: id, toFolder: nil) }
-                return true
-            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 12)
 
-            // Folders
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    ForEach(model.folders) { folder in
-                        folderRow(folder)
+                    sidebarSectionLabel("Library")
+
+                    sidebarRow(
+                        target: .all,
+                        icon: "square.grid.2x2",
+                        title: "All Doodles",
+                        count: model.boards.count,
+                        acceptsDrop: true,
+                        onDropBoardIds: { ids in
+                            for id in ids { model.moveBoard(boardId: id, toFolder: nil) }
+                        }
+                    )
+
+                    sidebarRow(
+                        target: .recents,
+                        icon: "clock",
+                        title: "Recents",
+                        count: recentBoards.count
+                    )
+
+                    sidebarRow(
+                        target: .trash,
+                        icon: "trash",
+                        title: "Recently Deleted",
+                        count: model.trashedBoards.count,
+                        tint: model.trashedBoards.isEmpty ? nil : .secondary
+                    )
+
+                    // Folders header with inline '+' button
+                    HStack {
+                        sidebarSectionLabel("Folders")
+                        Spacer()
+                        Button(action: { showNewFolder = true }) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .frame(width: 22, height: 22)
+                                .background(Color.primary.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 5))
+                        }
+                        .buttonStyle(.plain)
+                        .help("New Folder")
+                        .pointingHand()
+                        .padding(.trailing, 8)
+                        .padding(.top, 12)
+                    }
+
+                    if model.folders.isEmpty {
+                        Text("No folders yet")
+                            .font(.caption)
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                    } else {
+                        ForEach(model.folders) { folder in
+                            sidebarRow(
+                                target: .folder(folder.id),
+                                icon: "folder.fill",
+                                title: folder.name,
+                                count: model.boardIdsInFolder(folder.id).count,
+                                tint: .accentColor,
+                                acceptsDrop: true,
+                                onDropBoardIds: { ids in
+                                    for id in ids { model.moveBoard(boardId: id, toFolder: folder.id) }
+                                }
+                            )
+                            .contextMenu {
+                                Button("Rename") {
+                                    renameFolderId = folder.id
+                                    renameFolderText = folder.name
+                                    showRenameFolder = true
+                                }
+                                Divider()
+                                Button("Delete", role: .destructive) {
+                                    if selection == .folder(folder.id) { selection = .all }
+                                    model.deleteFolder(id: folder.id)
+                                }
+                            }
+                        }
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 16)
             }
         }
-        .padding(.horizontal, 8)
+        .background(isDark ? Color.white.opacity(0.03) : Color.primary.opacity(0.03))
     }
 
-    private func folderRow(_ folder: BoardFolder) -> some View {
-        Button(action: { selectedFolder = folder.id }) {
-            HStack {
-                Image(systemName: "folder.fill").foregroundColor(.accentColor).frame(width: 20)
-                Text(folder.name).font(.body).lineLimit(1)
+    private func sidebarSectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundColor(.secondary)
+            .textCase(.uppercase)
+            .padding(.horizontal, 8)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
+    }
+
+    @ViewBuilder
+    private func sidebarRow(
+        target: SidebarSelection,
+        icon: String,
+        title: String,
+        count: Int,
+        tint: Color? = nil,
+        acceptsDrop: Bool = false,
+        onDropBoardIds: (([String]) -> Void)? = nil
+    ) -> some View {
+        let isSelected = selection == target
+        let isHovered = hoveredSidebar == target
+        let isDropTarget = dropTargetedFolder == target
+
+        let row = Button(action: { selection = target }) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .foregroundColor(isSelected ? .accentColor : (tint ?? .secondary))
+                    .frame(width: 18)
+                Text(title)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .lineLimit(1)
                 Spacer()
-                Text("\(model.boardIdsInFolder(folder.id).count)")
-                    .font(.caption).foregroundColor(.secondary)
+                if count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundColor(isSelected ? .accentColor : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(isSelected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.06))
+                        .clipShape(Capsule())
+                }
             }
-            .padding(.vertical, 6)
+            .padding(.vertical, 7)
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                selectedFolder == folder.id ? Color.accentColor.opacity(0.15) :
-                hoveredFolder == folder.id ? Color.accentColor.opacity(0.12) : Color.clear
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(
+                        isDropTarget ? Color.accentColor.opacity(0.24) :
+                        isSelected ? Color.accentColor.opacity(0.14) :
+                        isHovered ? Color.primary.opacity(0.06) : Color.clear
+                    )
             )
-            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(
+                RoundedRectangle(cornerRadius: 7)
+                    .stroke(isDropTarget ? Color.accentColor : Color.clear, lineWidth: 1.5)
+            )
+            .scaleEffect(isDropTarget ? 1.02 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: isDropTarget)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { hoveredFolder = $0 ? folder.id : nil }
+        .onHover { hoveredSidebar = $0 ? target : nil }
         .pointingHand()
-        .dropDestination(for: String.self) { ids, _ in
-            for id in ids { model.moveBoard(boardId: id, toFolder: folder.id) }
-            return true
-        }
-        .contextMenu {
-            Button("Rename") { renameFolderId = folder.id; renameFolderText = folder.name; showRenameFolder = true }
-            Button("Delete", role: .destructive) { model.deleteFolder(id: folder.id) }
+
+        if acceptsDrop, let onDropBoardIds {
+            row.dropDestination(for: String.self) { ids, _ in
+                onDropBoardIds(ids)
+                return true
+            } isTargeted: { targeted in
+                dropTargetedFolder = targeted ? target : (dropTargetedFolder == target ? nil : dropTargetedFolder)
+            }
+        } else {
+            row
         }
     }
 
-    // MARK: - Main content
-
-    @AppStorage("viewMode") private var viewMode: ViewMode = .list
-    @AppStorage("boardSort") private var sortRaw: String = SortMode.modified.rawValue
-
-    enum ViewMode: String, CaseIterable { case list, thumbnails }
-    enum SortMode: String, CaseIterable {
-        case modified = "Date Modified"
-        case created = "Date Created"
-        case name = "Name"
-    }
-
-    private var sortMode: SortMode { SortMode(rawValue: sortRaw) ?? .modified }
+    // MARK: - Main Content
 
     private var mainContent: some View {
         VStack(spacing: 0) {
-            header
+            headerToolbar
 
-            // Bulk-selection action bar
-            if !selectedBoardIds.isEmpty {
+            Divider().opacity(0.5)
+
+            if !selectedBoardIds.isEmpty && selection != .trash {
                 bulkActionBar
                     .padding(.horizontal, 24)
-                    .padding(.top, 8)
+                    .padding(.top, 12)
+                    .transition(.move(edge: .top).combined(with: .opacity))
             }
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    // Recents
-                    if !recentBoards.isEmpty {
-                        sectionHeader("Recents")
-                        recentStrip
-                            .padding(.bottom, 16)
-                    }
-
-                    sectionHeader(selectedFolder == nil ? "All Doodles" : (model.folders.first(where: { $0.id == selectedFolder })?.name ?? "Doodles"))
-
-                    if displayedBoards.isEmpty {
-                        emptyState
-                    } else if viewMode == .thumbnails {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200, maximum: 260))], spacing: 20) {
-                            ForEach(displayedBoards) { board in
-                                thumbnailCell(board)
-                            }
-                        }
-                        .padding(.horizontal, 28)
-                        .padding(.top, 8)
-                    } else {
-                        VStack(spacing: 4) {
-                            ForEach(displayedBoards) { board in
-                                boardRow(board)
-                            }
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.top, 4)
-                    }
-
-                    if !model.trashedBoards.isEmpty {
-                        Divider().padding(.vertical, 12).padding(.horizontal, viewMode == .thumbnails ? 28 : 24)
-                        Text("Recently Deleted").font(.headline).foregroundColor(.secondary)
-                            .padding(.horizontal, viewMode == .thumbnails ? 28 : 24)
-
-                        ForEach(model.trashedBoards, id: \.id) { entry in
-                            HStack {
-                                Text(entry.name).font(.body).foregroundColor(.secondary)
-                                Spacer()
-                                Text(relativeDate(entry.deletedAt)).font(.caption).foregroundColor(.secondary)
-                                Button("Restore") {
-                                    if model.restoreBoard(id: entry.id) { model.loadTrash() }
-                                }
-                                .buttonStyle(.plain).font(.caption).foregroundColor(.accentColor).pointingHand()
-                            }
-                            .padding(.horizontal, 12).padding(.vertical, 6)
-                            .background(Color.primary.opacity(0.03))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        .padding(.horizontal, viewMode == .thumbnails ? 28 : 24)
-                        .padding(.bottom, 8)
-                    }
-                }
-                .padding(.top, 8)
-                .padding(.bottom, 24)
+            if selection == .trash {
+                trashContent
+            } else {
+                boardsContent
             }
-            .focusable()
-            .focused($listFocused)
-            .focusEffectDisabled()
-            #if os(macOS)
-            .onKeyPress(.upArrow) { moveSelection(-1); return .handled }
-            .onKeyPress(.downArrow) { moveSelection(1); return .handled }
-            .onKeyPress(.return) { openSelected(); return .handled }
-            .onKeyPress(.delete) { if !selectedBoardIds.isEmpty { showBulkDeleteAlert = true }; return .handled }
-            #endif
         }
-        .frame(maxWidth: .infinity)
+        .animation(.easeOut(duration: 0.16), value: selectedBoardIds.isEmpty)
     }
 
-    // MARK: - Header
+    // MARK: - Header Toolbar
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(spacing: 16) {
-                HStack(spacing: 10) {
-                    Image("logo")
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 32, height: 32)
-                    Text("Doodles").font(.system(size: 24, weight: .bold))
-                }
+    private var headerToolbar: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sectionTitle)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                Text(headerSubtitle)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
 
-                Spacer()
+            Spacer(minLength: 12)
 
-                // Search
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundColor(.secondary)
-                    TextField("Search doodles", text: $searchText)
+            if selection != .trash {
+                // Search pill
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    TextField("Search", text: $searchText)
                         .textFieldStyle(.plain)
-                        .frame(width: 220)
+                        .font(.system(size: 13))
+                        .focused($searchFocused)
+                        .frame(minWidth: 120, maxWidth: 200)
                     if !searchText.isEmpty {
                         Button(action: { searchText = "" }) {
-                            Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(.horizontal, 12).padding(.vertical, 9)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
                 .background(Color.primary.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(searchFocused ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
+                )
 
-                // Sort
+                // Sort menu
                 Menu {
                     ForEach(SortMode.allCases, id: \.self) { mode in
-                        Button(mode.rawValue) { sortRaw = mode.rawValue }
+                        Button {
+                            sortRaw = mode.rawValue
+                        } label: {
+                            HStack {
+                                Text(mode.rawValue)
+                                if sortMode == mode { Image(systemName: "checkmark") }
+                            }
+                        }
                     }
                 } label: {
-                    Label(sortMode.rawValue, systemImage: "arrow.up.arrow.down")
+                    Image(systemName: "arrow.up.arrow.down")
                         .font(.system(size: 13))
+                        .frame(width: 30, height: 28)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-                .help("Sort")
+                .help("Sort: \(sortMode.rawValue)")
                 .pointingHand()
 
-                // Theme
-                Button(action: { model.appSettings.isDarkMode.toggle() }) {
-                    Image(systemName: model.appSettings.isDarkMode ? "moon.fill" : "sun.max.fill")
-                        .font(.system(size: 14))
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.bordered)
-                .help(model.appSettings.isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode")
-                .pointingHand()
-
-                // View mode
+                // View mode segmented picker
                 Picker("View", selection: $viewMode) {
-                    Image(systemName: "list.bullet").tag(ViewMode.list)
                     Image(systemName: "square.grid.2x2").tag(ViewMode.thumbnails)
+                    Image(systemName: "list.bullet").tag(ViewMode.list)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 100)
+                .labelsHidden()
+                .frame(width: 74)
+
+                #if os(iOS)
+                Button(isSelectingOnTouch ? "Done" : "Select") {
+                    isSelectingOnTouch.toggle()
+                    if !isSelectingOnTouch { selectedBoardIds.removeAll() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                #endif
             }
 
-            // Actions
-            HStack(spacing: 12) {
-                Button(action: { showNewName = true }) {
+            // Theme toggle
+            Button(action: { model.appSettings.isDarkMode.toggle() }) {
+                Image(systemName: isDark ? "moon.fill" : "sun.max.fill")
+                    .font(.system(size: 13))
+                    .frame(width: 30, height: 28)
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .help(isDark ? "Switch to Light Mode" : "Switch to Dark Mode")
+            .pointingHand()
+
+            if selection == .trash {
+                if !model.trashedBoards.isEmpty {
+                    Button(role: .destructive, action: { showEmptyTrashAlert = true }) {
+                        Label("Empty Trash", systemImage: "trash")
+                            .font(.system(size: 13, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                    .pointingHand()
+                }
+            } else {
+                Button(action: { model.pendingAction = .open }) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 13))
+                        .frame(width: 30, height: 28)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .help("Open .wb File…")
+                .pointingHand()
+
+                Button(action: createNewDoodle) {
                     Label("New Doodle", systemImage: "plus")
-                        .font(.system(size: 14, weight: .medium))
-                        .padding(.horizontal, 6)
+                        .font(.system(size: 13, weight: .semibold))
+                        .padding(.horizontal, 4)
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .controlSize(.regular)
+                .help("New Doodle (⌘N)")
                 .pointingHand()
-
-                Button(action: { model.pendingAction = .open }) {
-                    Label("Open", systemImage: "folder")
-                        .font(.system(size: 14))
-                        .padding(.horizontal, 6)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .pointingHand()
-
-                Button(action: { showNewFolder = true }) {
-                    Label("New Folder", systemImage: "folder.badge.plus")
-                        .font(.system(size: 14))
-                        .padding(.horizontal, 6)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .pointingHand()
-
-                Spacer()
             }
         }
-        .padding(.horizontal, 28)
-        .padding(.top, 24)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 14)
     }
 
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.headline)
-            .foregroundColor(.secondary)
-            .padding(.horizontal, viewMode == .thumbnails ? 28 : 24)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
-    }
-
-    // MARK: - Recents
-
-    private var recentBoards: [BoardMeta] {
-        var seen = Set<String>()
-        var result: [BoardMeta] = []
-        for url in model.recentFiles {
-            let id = url.deletingPathExtension().lastPathComponent
-            guard !seen.contains(id) else { continue }
-            seen.insert(id)
-            if let board = model.boards.first(where: { $0.id == id }) {
-                result.append(board)
-            }
-            if result.count >= 5 { break }
+    private var headerSubtitle: String {
+        if selection == .trash {
+            let n = model.trashedBoards.count
+            return n == 0 ? "No deleted doodles" : "\(n) \(n == 1 ? "item" : "items") · Auto-deleted after 30 days"
         }
-        return result
+        let n = displayedBoards.count
+        return "\(n) \(n == 1 ? "doodle" : "doodles")"
     }
 
-    private var recentStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                ForEach(recentBoards) { board in
-                    recentCell(board)
-                }
-            }
-            .padding(.horizontal, 28)
-        }
-    }
+    // MARK: - Boards Grid / List
 
-    private func recentCell(_ board: BoardMeta) -> some View {
-        let _ = model.thumbnailRevision
-        let img = model.thumbnail(for: board.id, size: CGSize(width: 160, height: 120))
-        return VStack(spacing: 4) {
-            Group {
-                if let img = img {
-                    #if os(macOS)
-                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                    #else
-                    Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
-                    #endif
+    private var boardsContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if displayedBoards.isEmpty {
+                    emptyState
+                } else if viewMode == .thumbnails {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 18)],
+                        spacing: 18
+                    ) {
+                        ForEach(displayedBoards) { board in
+                            thumbnailCell(board)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 20)
                 } else {
-                    Image(systemName: "doc.text").foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 16) {
+                        if sortMode == .name {
+                            VStack(spacing: 4) {
+                                ForEach(displayedBoards) { board in
+                                    boardRow(board)
+                                }
+                            }
+                        } else {
+                            ForEach(groupedBoards) { group in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(group.title)
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(.secondary)
+                                        .padding(.horizontal, 8)
+                                        .padding(.bottom, 2)
+                                    ForEach(group.boards) { board in
+                                        boardRow(board)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 16)
                 }
             }
-            .frame(width: 120, height: 80)
-            .background(Color.primary.opacity(0.06))
-            .clipped()
-
-            Text(board.name).font(.caption).lineLimit(1)
         }
-        .frame(width: 120)
-        .contentShape(Rectangle())
-        .onTapGesture { openBoard(board) }
-        .pointingHand()
-        .onHover { hoveredBoard = $0 ? board.id : nil }
+        .focusable()
+        .focused($contentFocused)
+        .focusEffectDisabled()
+        #if os(macOS)
+        .onKeyPress(.upArrow) { moveSelection(-1); return .handled }
+        .onKeyPress(.downArrow) { moveSelection(1); return .handled }
+        .onKeyPress(.return) { openSelected(); return .handled }
+        .onKeyPress(.delete) {
+            if !selectedBoardIds.isEmpty { trashSelected() }
+            return .handled
+        }
+        #endif
     }
 
-    // MARK: - Bulk actions
+    // MARK: - Thumbnail Cell
+
+    private func thumbnailCell(_ board: BoardMeta) -> some View {
+        let _ = model.thumbnailRevision
+        let img = model.thumbnail(for: board.id)
+        let isHovered = hoveredBoard == board.id
+        let isSelected = selectedBoardIds.contains(board.id)
+        let folderBadge = (selection == .all || selection == .recents) ? model.folderName(forBoardId: board.id) : nil
+
+        return VStack(spacing: 0) {
+            // Uniform 4:3 preview area — overlay guarantees identical card height for all boards
+            ZStack(alignment: .topTrailing) {
+                Color.clear
+                    .aspectRatio(4 / 3, contentMode: .fit)
+                    .overlay {
+                        if let img {
+                            #if os(macOS)
+                            Image(nsImage: img)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                            #else
+                            Image(uiImage: img)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                            #endif
+                        } else {
+                            BlankCanvasPreview(
+                                background: model.appSettings.canvasBackground,
+                                isDarkMode: isDark
+                            )
+                        }
+                    }
+                    .clipped()
+
+                // Clean overflow menu (revealed on hover on macOS, always subtly visible on iOS)
+                #if os(macOS)
+                let showMenuButton = isHovered || isSelected
+                #else
+                let showMenuButton = true
+                #endif
+
+                if showMenuButton && renamingId != board.id {
+                    Menu {
+                        boardContextMenu(board)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .frame(width: 26, height: 26)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                            .shadow(color: .black.opacity(0.15), radius: 3, y: 1)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .padding(8)
+                    .transition(.opacity)
+                }
+
+                // Selection checkmark badge (hover-revealed on macOS or when selected for bulk actions)
+                if isSelected || (isHovered && renamingId != board.id) {
+                    Button(action: { toggleSelection(board) }) {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 18))
+                            .foregroundStyle(isSelected ? .white : .secondary, isSelected ? Color.accentColor : Color.clear)
+                            .background(isSelected ? Color.clear : Color.black.opacity(0.15))
+                            .clipShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+            }
+
+            Divider().opacity(0.45)
+
+            // Metadata footer
+            VStack(alignment: .leading, spacing: 4) {
+                if renamingId == board.id {
+                    TextField("Name", text: $renameText)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 13))
+                        .focused($renameFocused)
+                        .onSubmit { finishRename(board.id) }
+                } else {
+                    Text(board.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+
+                    HStack(spacing: 6) {
+                        Text(relativeDate(board.modified))
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 4)
+
+                        if let folderBadge {
+                            folderPill(folderBadge)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+        }
+        .background(isDark ? Color.white.opacity(0.05) : Color.primary.opacity(0.03))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(
+                    isSelected ? Color.accentColor : Color.primary.opacity(isDark ? 0.14 : 0.10),
+                    lineWidth: isSelected ? 2 : 1
+                )
+        )
+        .shadow(color: .black.opacity(isHovered ? 0.14 : 0.05), radius: isHovered ? 10 : 4, y: isHovered ? 4 : 2)
+        .scaleEffect(isHovered ? 1.015 : 1.0)
+        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            handleTap(board)
+        }
+        .draggable(board.id)
+        .onHover { hovering in
+            hoveredBoard = hovering ? board.id : nil
+            #if os(macOS)
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+            #endif
+        }
+        .contextMenu { boardContextMenu(board) }
+    }
+
+    // MARK: - List Row (with Mini Thumbnail & Folder Pill)
+
+    private func boardRow(_ board: BoardMeta) -> some View {
+        let _ = model.thumbnailRevision
+        let img = model.thumbnail(for: board.id, size: CGSize(width: 120, height: 90))
+        let isHovered = hoveredBoard == board.id
+        let isSelected = selectedBoardIds.contains(board.id)
+        let folderBadge = (selection == .all || selection == .recents) ? model.folderName(forBoardId: board.id) : nil
+
+        return HStack(spacing: 12) {
+            // Mini thumbnail (fixed 52×39 container)
+            Color.clear
+                .frame(width: 52, height: 39)
+                .overlay {
+                    if let img {
+                        #if os(macOS)
+                        Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
+                        #else
+                        Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
+                        #endif
+                    } else {
+                        BlankCanvasPreview(
+                            background: model.appSettings.canvasBackground,
+                            isDarkMode: isDark,
+                            compact: true
+                        )
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+            )
+
+            if renamingId == board.id {
+                TextField("Name", text: $renameText)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($renameFocused)
+                    .onSubmit { finishRename(board.id) }
+                Button("Save") { finishRename(board.id) }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                Button("Cancel") { renamingId = nil; renameFocused = false }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(board.name)
+                        .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                    Text(relativeDate(board.modified))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let folderBadge {
+                    folderPill(folderBadge)
+                }
+
+                #if os(macOS)
+                let showRowMenu = isHovered || isSelected
+                #else
+                let showRowMenu = true
+                #endif
+
+                if showRowMenu {
+                    Menu {
+                        boardContextMenu(board)
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                            .frame(width: 28, height: 28)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .pointingHand()
+                }
+            }
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 9)
+                .fill(
+                    isSelected ? Color.accentColor.opacity(0.16) :
+                    isHovered ? Color.primary.opacity(0.05) : Color.clear
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 9)
+                .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            handleTap(board)
+        }
+        .draggable(board.id)
+        .onHover { hovering in
+            hoveredBoard = hovering ? board.id : nil
+            #if os(macOS)
+            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+            #endif
+        }
+        .contextMenu { boardContextMenu(board) }
+    }
+
+    private func folderPill(_ name: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 9))
+            Text(name)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundColor(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.primary.opacity(0.07))
+        .clipShape(Capsule())
+    }
+
+    // MARK: - Recently Deleted View
+
+    private var trashContent: some View {
+        ScrollView {
+            if model.trashedBoards.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 40))
+                        .foregroundColor(.secondary.opacity(0.6))
+                    Text("Trash is Empty")
+                        .font(.title3.weight(.semibold))
+                    Text("Deleted doodles stay here for 30 days before being permanently removed.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 90)
+                .padding(.horizontal, 32)
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(model.trashedBoards) { entry in
+                        HStack(spacing: 12) {
+                            Image(systemName: "doc.richtext")
+                                .font(.system(size: 18))
+                                .foregroundColor(.secondary)
+                                .frame(width: 36, height: 36)
+                                .background(Color.primary.opacity(0.06))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(entry.name)
+                                    .font(.system(size: 14, weight: .medium))
+                                Text("Deleted \(relativeDate(entry.deletedAt)) · \(daysRemainingText(since: entry.deletedAt))")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Button("Restore") {
+                                if model.restoreBoard(id: entry.id) {
+                                    model.loadTrash()
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .pointingHand()
+
+                            Button(role: .destructive) {
+                                permanentDeleteEntry = entry
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 12))
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .help("Delete Permanently")
+                            .pointingHand()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(isDark ? Color.white.opacity(0.04) : Color.primary.opacity(0.03))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        )
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 18)
+            }
+        }
+    }
+
+    private func daysRemainingText(since deletedAt: Date) -> String {
+        let elapsedDays = Int(Date().timeIntervalSince(deletedAt) / (24 * 3600))
+        let remaining = max(1, 30 - elapsedDays)
+        return "\(remaining) \(remaining == 1 ? "day" : "days") left"
+    }
+
+    // MARK: - Context Menu & Bulk Bar
+
+    @ViewBuilder
+    private func boardContextMenu(_ board: BoardMeta) -> some View {
+        Button { openBoard(board) } label: { Label("Open", systemImage: "arrow.up.right.square") }
+        Button { startRename(board) } label: { Label("Rename", systemImage: "pencil") }
+        Menu {
+            Button("No Folder") { model.moveBoard(boardId: board.id, toFolder: nil) }
+            if !model.folders.isEmpty { Divider() }
+            ForEach(model.folders) { folder in
+                Button(folder.name) { model.moveBoard(boardId: board.id, toFolder: folder.id) }
+            }
+        } label: {
+            Label("Move to Folder", systemImage: "folder")
+        }
+        #if os(macOS)
+        Button { exportBoards([board.id]) } label: { Label("Export PNG", systemImage: "square.and.arrow.up") }
+        #endif
+        Divider()
+        Button(role: .destructive) { trashBoards([board]) } label: { Label("Move to Trash", systemImage: "trash") }
+    }
 
     private var bulkActionBar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Text("\(selectedBoardIds.count) selected")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.secondary)
+                .foregroundColor(.accentColor)
 
             Spacer()
 
-            // Move to folder
             Menu {
-                Button("No folder") { moveSelected(toFolder: nil) }
+                Button("No Folder") { moveSelected(toFolder: nil) }
+                if !model.folders.isEmpty { Divider() }
                 ForEach(model.folders) { folder in
                     Button(folder.name) { moveSelected(toFolder: folder.id) }
                 }
@@ -472,201 +1013,134 @@ struct WelcomeView: View {
             .controlSize(.small)
             #endif
 
-            Button(role: .destructive, action: { showBulkDeleteAlert = true }) {
-                Label("Delete", systemImage: "trash")
+            Button(role: .destructive, action: trashSelected) {
+                Label("Trash", systemImage: "trash")
                     .font(.system(size: 12))
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
 
-            Button("Clear") { selectedBoardIds.removeAll() }
-                .font(.system(size: 12))
-                .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-                .pointingHand()
+            Button("Clear") {
+                selectedBoardIds.removeAll()
+                selectionAnchorId = nil
+            }
+            .font(.system(size: 12))
+            .buttonStyle(.plain)
+            .foregroundColor(.secondary)
+            .pointingHand()
         }
-        .padding(8)
-        .background(Color.accentColor.opacity(0.08))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.accentColor.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 9))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.accentColor.opacity(0.25), lineWidth: 0.5))
     }
 
-    // MARK: - Empty state
+    // MARK: - Undo Toast
+
+    private func undoToastView(_ toast: UndoTrashToast) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "trash")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+            Text(toast.message)
+                .font(.system(size: 13, weight: .medium))
+            Button("Undo") {
+                toastDismissTask?.cancel()
+                for id in toast.trashedIds {
+                    model.restoreBoard(id: id)
+                }
+                model.loadTrash()
+                undoToast = nil
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .pointingHand()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.thickMaterial)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+    }
+
+    private func showUndoToast(message: String, trashedIds: [String]) {
+        toastDismissTask?.cancel()
+        undoToast = UndoTrashToast(message: message, trashedIds: trashedIds)
+        let task = DispatchWorkItem { undoToast = nil }
+        toastDismissTask = task
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.5, execute: task)
+    }
+
+    // MARK: - Empty State
 
     private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "square.and.pencil")
-                .font(.system(size: 44))
-                .foregroundColor(.secondary)
+        VStack(spacing: 14) {
+            Image(systemName: searchText.isEmpty ? "square.and.pencil" : "magnifyingglass")
+                .font(.system(size: 42))
+                .foregroundColor(.secondary.opacity(0.65))
             Text(searchText.isEmpty ? "No doodles yet" : "No matches for \"\(searchText)\"")
-                .font(.title3.weight(.medium))
-            Text(searchText.isEmpty ? "Create your first doodle or open an existing one" : "Try a different search")
+                .font(.title3.weight(.semibold))
+            Text(searchText.isEmpty ? "Start sketching right away or open an existing .wb file." : "Try a different search term or clear your filter.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             if searchText.isEmpty {
-                Button(action: { showNewName = true }) {
+                Button(action: createNewDoodle) {
                     Label("New Doodle", systemImage: "plus")
+                        .font(.system(size: 13, weight: .semibold))
                 }
                 .buttonStyle(.borderedProminent)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
-    }
-
-    // MARK: - Thumbnail cell
-
-    private func thumbnailCell(_ board: BoardMeta) -> some View {
-        let _ = model.thumbnailRevision
-        let img = model.thumbnail(for: board.id)
-        let isHovered = hoveredBoard == board.id
-        let isSelected = selectedBoardIds.contains(board.id)
-        return VStack(spacing: 0) {
-            // Thumbnail
-            Group {
-                if let img = img {
-                    #if os(macOS)
-                    Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                    #else
-                    Image(uiImage: img).resizable().aspectRatio(contentMode: .fill)
-                    #endif
-                } else {
-                    Image(systemName: "doc.text").font(.largeTitle).foregroundColor(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 120)
-            .aspectRatio(4/3, contentMode: .fill)
-            .background(Color.primary.opacity(0.06))
-            .clipped()
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 4) {
-                if renamingId == board.id {
-                    TextField("Name", text: $renameText)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { finishRename(board.id) }
-                } else {
-                    Text(board.name).font(.caption).lineLimit(1)
-                    Text(relativeDate(board.modified))
-                        .font(.caption2).foregroundColor(.secondary).lineLimit(1)
-                }
-
-                HStack(spacing: 6) {
-                    Button(action: { startRename(board) }) { Image(systemName: "pencil").font(.caption2) }
-                        .buttonStyle(.plain).pointingHand()
-                    #if os(macOS)
-                    Button(action: { exportBoards([board.id]) }) { Image(systemName: "square.and.arrow.up").font(.caption2) }
-                        .buttonStyle(.plain).pointingHand()
-                    #endif
-                    Spacer()
-                    Button(action: { confirmDelete(board) }) { Image(systemName: "trash").font(.caption2) }
-                        .buttonStyle(.plain).pointingHand()
-                }
-            }
-            .padding(10)
-        }
-        .frame(maxWidth: .infinity)
-        .background(Color.primary.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(isSelected ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: isSelected ? 2 : 1))
-        .shadow(color: .black.opacity(isHovered ? 0.12 : 0.04), radius: isHovered ? 8 : 3, y: isHovered ? 4 : 1)
-        .scaleEffect(isHovered ? 1.02 : 1)
-        .animation(.easeOut(duration: 0.15), value: isHovered)
-        .contentShape(Rectangle())
-        .onTapGesture { handleSelect(board) }
-        .onTapGesture(count: 2) { openBoard(board) }
-        .draggable(board.id)
-        .onHover { hovering in
-            hoveredBoard = hovering ? board.id : nil
-            #if os(macOS)
-            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-            #endif
-        }
-        .contextMenu { boardContextMenu(board) }
-    }
-
-    // MARK: - Board row
-
-    @ViewBuilder
-    private func boardRow(_ board: BoardMeta) -> some View {
-        let isSelected = selectedBoardIds.contains(board.id)
-        HStack {
-            if renamingId == board.id {
-                TextField("Name", text: $renameText)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { finishRename(board.id) }
-                Button("Save") { finishRename(board.id) }
-                    .buttonStyle(.borderedProminent).controlSize(.small)
+                .controlSize(.large)
+                .padding(.top, 4)
             } else {
-                VStack(alignment: .leading) {
-                    Text(board.name).font(.body)
-                    Text(relativeDate(board.modified))
-                        .font(.caption).foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture { handleSelect(board) }
-                .onTapGesture(count: 2) { openBoard(board) }
-                .pointingHand()
-                .onHover { hoveredBoard = $0 ? board.id : nil }
-
-                Spacer()
-
-                Button(action: { startRename(board) }) { Image(systemName: "pencil").font(.caption) }
-                    .buttonStyle(.plain).help("Rename").pointingHand()
-
-                #if os(macOS)
-                Button(action: { exportBoards([board.id]) }) { Image(systemName: "square.and.arrow.up").font(.caption) }
-                    .buttonStyle(.plain).help("Export PNG").pointingHand()
-                #endif
-
-                Button(action: { confirmDelete(board) }) { Image(systemName: "trash").font(.caption) }
-                    .buttonStyle(.plain).help("Delete").pointingHand()
+                Button("Clear Search") { searchText = "" }
+                    .buttonStyle(.bordered)
             }
         }
-        .padding(.vertical, 10).padding(.horizontal, 12)
-        .background(RoundedRectangle(cornerRadius: 6).fill(isSelected ? Color.accentColor.opacity(0.18) : (hoveredBoard == board.id ? Color.accentColor.opacity(0.12) : Color.clear)))
-        .contentShape(Rectangle())
-        .draggable(board.id)
-        .contextMenu { boardContextMenu(board) }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 80)
     }
 
-    @ViewBuilder
-    private func boardContextMenu(_ board: BoardMeta) -> some View {
-        Button("Open") { openBoard(board) }
-        Button("Rename") { startRename(board) }
-        Menu("Move to Folder") {
-            Button("No folder") { model.moveBoard(boardId: board.id, toFolder: nil) }
-            ForEach(model.folders) { folder in
-                Button(folder.name) { model.moveBoard(boardId: board.id, toFolder: folder.id) }
-            }
+    // MARK: - Interactions
+
+    private func createNewDoodle() {
+        model.createQuickBoard(folderId: activeFolderId)
+        onStart()
+    }
+
+    private func toggleSelection(_ board: BoardMeta) {
+        if selectedBoardIds.contains(board.id) {
+            selectedBoardIds.remove(board.id)
+        } else {
+            selectedBoardIds.insert(board.id)
+            selectionAnchorId = board.id
         }
-        #if os(macOS)
-        Button("Export PNG") { exportBoards([board.id]) }
-        #endif
-        Divider()
-        Button("Delete", role: .destructive) { confirmDelete(board) }
     }
 
-    // MARK: - Interaction
-
-    private func handleSelect(_ board: BoardMeta) {
+    private func handleTap(_ board: BoardMeta) {
         #if os(macOS)
         let flags = NSEvent.modifierFlags
         if flags.contains(.command) {
-            if selectedBoardIds.contains(board.id) { selectedBoardIds.remove(board.id) }
-            else { selectedBoardIds.insert(board.id) }
-        } else if flags.contains(.shift) {
-            selectedBoardIds.insert(board.id)
+            toggleSelection(board)
+        } else if flags.contains(.shift),
+                  let anchor = selectionAnchorId,
+                  let anchorIdx = displayedBoards.firstIndex(where: { $0.id == anchor }),
+                  let targetIdx = displayedBoards.firstIndex(where: { $0.id == board.id }) {
+            let range = min(anchorIdx, targetIdx)...max(anchorIdx, targetIdx)
+            selectedBoardIds = Set(displayedBoards[range].map(\.id))
+        } else if !selectedBoardIds.isEmpty {
+            // While in multi-select, clicking another card toggles its selection;
+            // plain click with no selection opens immediately.
+            toggleSelection(board)
         } else {
-            selectedBoardIds = [board.id]
+            openBoard(board)
         }
         #else
-        if selectedBoardIds.contains(board.id) {
-            selectedBoardIds = selectedBoardIds.count > 1 ? [board.id] : []
+        if isSelectingOnTouch {
+            toggleSelection(board)
         } else {
-            selectedBoardIds = [board.id]
+            openBoard(board)
         }
         #endif
     }
@@ -678,23 +1152,25 @@ struct WelcomeView: View {
 
     private func moveSelection(_ delta: Int) {
         guard !displayedBoards.isEmpty else { return }
-        let current: Int?
-        if let sel = selectedBoardIds.first {
-            current = displayedBoards.firstIndex { $0.id == sel }
-        } else {
-            current = nil
+        let currentIdx = selectionAnchorId.flatMap { anchor in
+            displayedBoards.firstIndex { $0.id == anchor }
+        } ?? selectedBoardIds.first.flatMap { sel in
+            displayedBoards.firstIndex { $0.id == sel }
         }
         let next: Int
-        if let idx = current {
+        if let idx = currentIdx {
             next = min(max(idx + delta, 0), displayedBoards.count - 1)
         } else {
             next = delta > 0 ? 0 : displayedBoards.count - 1
         }
-        selectedBoardIds = [displayedBoards[next].id]
+        let id = displayedBoards[next].id
+        selectedBoardIds = [id]
+        selectionAnchorId = id
     }
 
     private func openSelected() {
-        if let sel = selectedBoardIds.first, let board = displayedBoards.first(where: { $0.id == sel }) {
+        if let sel = selectionAnchorId ?? selectedBoardIds.first,
+           let board = displayedBoards.first(where: { $0.id == sel }) {
             openBoard(board)
         }
     }
@@ -702,15 +1178,27 @@ struct WelcomeView: View {
     private func moveSelected(toFolder folderId: String?) {
         for id in selectedBoardIds { model.moveBoard(boardId: id, toFolder: folderId) }
         selectedBoardIds.removeAll()
+        selectionAnchorId = nil
+    }
+
+    private func trashBoards(_ boardsToTrash: [BoardMeta]) {
+        guard !boardsToTrash.isEmpty else { return }
+        let ids = boardsToTrash.map(\.id)
+        for board in boardsToTrash {
+            model.trashBoard(id: board.id, name: board.name)
+            selectedBoardIds.remove(board.id)
+        }
+        let msg = boardsToTrash.count == 1
+            ? "Moved \"\(boardsToTrash[0].name)\" to Trash"
+            : "Moved \(boardsToTrash.count) doodles to Trash"
+        showUndoToast(message: msg, trashedIds: ids)
     }
 
     private func trashSelected() {
-        for id in selectedBoardIds {
-            if let board = model.boards.first(where: { $0.id == id }) {
-                model.trashBoard(id: id, name: board.name)
-            }
-        }
+        let targets = model.boards.filter { selectedBoardIds.contains($0.id) }
+        trashBoards(targets)
         selectedBoardIds.removeAll()
+        selectionAnchorId = nil
     }
 
     #if os(macOS)
@@ -737,16 +1225,37 @@ struct WelcomeView: View {
     }
     #endif
 
-    // MARK: - Computed boards
+    // MARK: - Computed Data
+
+    private var recentBoards: [BoardMeta] {
+        var seen = Set<String>()
+        var result: [BoardMeta] = []
+        for url in model.recentFiles {
+            let id = url.deletingPathExtension().lastPathComponent
+            guard !seen.contains(id) else { continue }
+            seen.insert(id)
+            if let board = model.boards.first(where: { $0.id == id }) {
+                result.append(board)
+            }
+            if result.count >= 12 { break }
+        }
+        return result
+    }
 
     private var displayedBoards: [BoardMeta] {
         let base: [BoardMeta]
-        if let folder = selectedFolder {
-            let ids = Set(model.boardIdsInFolder(folder))
-            base = model.boards.filter { ids.contains($0.id) }
-        } else {
+        switch selection {
+        case .all:
             base = model.boards
+        case .recents:
+            base = recentBoards
+        case .folder(let folderId):
+            let ids = Set(model.boardIdsInFolder(folderId))
+            base = model.boards.filter { ids.contains($0.id) }
+        case .trash:
+            base = []
         }
+
         let q = searchText.trimmingCharacters(in: .whitespaces)
         let filtered = q.isEmpty ? base : base.filter { $0.name.localizedCaseInsensitiveContains(q) }
         switch sortMode {
@@ -756,27 +1265,122 @@ struct WelcomeView: View {
         }
     }
 
+    private var groupedBoards: [TimeGroup] {
+        let cal = Calendar.current
+        let now = Date()
+        let weekAgo = cal.date(byAdding: .day, value: -7, to: now) ?? now
+
+        var today: [BoardMeta] = []
+        var yesterday: [BoardMeta] = []
+        var thisWeek: [BoardMeta] = []
+        var earlier: [BoardMeta] = []
+
+        for board in displayedBoards {
+            let date = sortMode == .created ? board.created : board.modified
+            if cal.isDateInToday(date) {
+                today.append(board)
+            } else if cal.isDateInYesterday(date) {
+                yesterday.append(board)
+            } else if date >= weekAgo {
+                thisWeek.append(board)
+            } else {
+                earlier.append(board)
+            }
+        }
+
+        var groups: [TimeGroup] = []
+        if !today.isEmpty { groups.append(TimeGroup(id: "today", title: "Today", boards: today)) }
+        if !yesterday.isEmpty { groups.append(TimeGroup(id: "yesterday", title: "Yesterday", boards: yesterday)) }
+        if !thisWeek.isEmpty { groups.append(TimeGroup(id: "week", title: "Previous 7 Days", boards: thisWeek)) }
+        if !earlier.isEmpty { groups.append(TimeGroup(id: "earlier", title: "Earlier", boards: earlier)) }
+        return groups
+    }
+
     // MARK: - Helpers
 
     private func relativeDate(_ date: Date) -> String {
         let cal = Calendar.current
-        if cal.isDateInToday(date) { return "Today" }
-        if cal.isDateInYesterday(date) { return "Yesterday" }
+        if cal.isDateInToday(date) {
+            return "Today, " + date.formatted(date: .omitted, time: .shortened)
+        }
+        if cal.isDateInYesterday(date) {
+            return "Yesterday, " + date.formatted(date: .omitted, time: .shortened)
+        }
         return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func startRename(_ board: BoardMeta) {
+        renamingId = board.id
+        renameText = board.name
+        DispatchQueue.main.async { renameFocused = true }
     }
 
     private func finishRename(_ id: String) {
         let name = renameText.trimmingCharacters(in: .whitespaces)
         if !name.isEmpty { model.renameBoard(id: id, to: name) }
         renamingId = nil
+        renameFocused = false
     }
+}
 
-    private func confirmDelete(_ board: BoardMeta) {
-        deleteBoardId = board.id; deleteBoardName = board.name; showDeleteAlert = true
-    }
+// MARK: - Miniature Blank Canvas Preview
 
-    private func startRename(_ board: BoardMeta) {
-        renamingId = board.id; renameText = board.name
+/// Renders a subtle miniature paper pattern (grid, dots, ruled, or plain)
+/// matching the user's current canvas background & theme for empty boards.
+private struct BlankCanvasPreview: View {
+    let background: CanvasBackground
+    let isDarkMode: Bool
+    var compact: Bool = false
+
+    var body: some View {
+        Canvas { context, size in
+            let bg = isDarkMode ? Color(red: 14/255, green: 14/255, blue: 16/255) : Color.white
+            let fg = isDarkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
+            context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(bg))
+
+            let spacing: CGFloat = compact ? 8 : 14
+            switch background {
+            case .none:
+                break
+            case .grid:
+                var path = Path()
+                var x = spacing
+                while x < size.width {
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: size.height))
+                    x += spacing
+                }
+                var y = spacing
+                while y < size.height {
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: size.width, y: y))
+                    y += spacing
+                }
+                context.stroke(path, with: .color(fg), lineWidth: 0.5)
+            case .dots:
+                var path = Path()
+                let r: CGFloat = compact ? 0.6 : 0.9
+                var x = spacing
+                while x < size.width {
+                    var y = spacing
+                    while y < size.height {
+                        path.addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
+                        y += spacing
+                    }
+                    x += spacing
+                }
+                context.fill(path, with: .color(fg))
+            case .ruled:
+                var path = Path()
+                var y = spacing
+                while y < size.height {
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: size.width, y: y))
+                    y += spacing
+                }
+                context.stroke(path, with: .color(fg), lineWidth: 0.5)
+            }
+        }
     }
 }
 
