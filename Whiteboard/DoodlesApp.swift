@@ -16,6 +16,9 @@ struct DoodlesApp: App {
                 }
                 #if os(macOS)
                 .background(WindowAccessor(model: model))
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    model.flushAutoSave()
+                }
                 #endif
         }
         .commands {
@@ -63,12 +66,6 @@ struct DoodlesApp: App {
         NSApp.windows.first?.title = t
         #endif
     }
-
-    #if os(macOS)
-    private func setupWindowDelegate() {
-        // already handled via NSApp delegate method below
-    }
-    #endif
 }
 
 
@@ -88,6 +85,7 @@ struct WindowAccessor: NSViewRepresentable {
         let model: DrawingModel
         init(model: DrawingModel) { self.model = model }
         func windowShouldClose(_ sender: NSWindow) -> Bool {
+            model.flushAutoSave()
             if !model.showWelcome { model.closeBoard(); return false }
             return true
         }

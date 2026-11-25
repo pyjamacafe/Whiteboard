@@ -24,7 +24,7 @@ struct ToolSettingsView: View {
 
     private func squarePresetRow(presets: Binding<[Color]>, selected: Binding<Color>, selectedIndex: Binding<Int>, lastTapIndex: Binding<Int?>) -> some View {
         HStack(spacing: 4) {
-            ForEach(0..<8, id: \.self) { i in
+            ForEach(presets.wrappedValue.indices, id: \.self) { i in
                 let color = presets.wrappedValue[i]
                 ZStack {
                     RoundedRectangle(cornerRadius: 4)
@@ -55,9 +55,11 @@ struct ToolSettingsView: View {
             }
         }
         .sheet(isPresented: $showColorPicker) {
-            if let idx = colorPickerIndex {
+            if let idx = colorPickerIndex, presets.wrappedValue.indices.contains(idx) {
                 ColorPickerView(currentColor: presets.wrappedValue[idx]) { newColor in
-                    presets.wrappedValue[idx] = newColor
+                    if presets.wrappedValue.indices.contains(idx) {
+                        presets.wrappedValue[idx] = newColor
+                    }
                 }
             }
         }

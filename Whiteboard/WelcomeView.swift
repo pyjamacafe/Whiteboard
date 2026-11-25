@@ -147,7 +147,7 @@ struct WelcomeView: View {
         .padding(.horizontal, 8)
     }
 
-    private func folderRow(_ folder: DrawingModel.BoardFolder) -> some View {
+    private func folderRow(_ folder: BoardFolder) -> some View {
         Button(action: { selectedFolder = folder.id }) {
             HStack {
                 Image(systemName: "folder.fill").foregroundColor(.accentColor).frame(width: 20)
@@ -386,9 +386,9 @@ struct WelcomeView: View {
 
     // MARK: - Recents
 
-    private var recentBoards: [DrawingModel.BoardMeta] {
+    private var recentBoards: [BoardMeta] {
         var seen = Set<String>()
-        var result: [DrawingModel.BoardMeta] = []
+        var result: [BoardMeta] = []
         for url in model.recentFiles {
             let id = url.deletingPathExtension().lastPathComponent
             guard !seen.contains(id) else { continue }
@@ -412,7 +412,8 @@ struct WelcomeView: View {
         }
     }
 
-    private func recentCell(_ board: DrawingModel.BoardMeta) -> some View {
+    private func recentCell(_ board: BoardMeta) -> some View {
+        let _ = model.thumbnailRevision
         let img = model.thumbnail(for: board.id, size: CGSize(width: 160, height: 120))
         return VStack(spacing: 4) {
             Group {
@@ -514,7 +515,8 @@ struct WelcomeView: View {
 
     // MARK: - Thumbnail cell
 
-    private func thumbnailCell(_ board: DrawingModel.BoardMeta) -> some View {
+    private func thumbnailCell(_ board: BoardMeta) -> some View {
+        let _ = model.thumbnailRevision
         let img = model.thumbnail(for: board.id)
         let isHovered = hoveredBoard == board.id
         let isSelected = selectedBoardIds.contains(board.id)
@@ -587,7 +589,7 @@ struct WelcomeView: View {
     // MARK: - Board row
 
     @ViewBuilder
-    private func boardRow(_ board: DrawingModel.BoardMeta) -> some View {
+    private func boardRow(_ board: BoardMeta) -> some View {
         let isSelected = selectedBoardIds.contains(board.id)
         HStack {
             if renamingId == board.id {
@@ -631,7 +633,7 @@ struct WelcomeView: View {
     }
 
     @ViewBuilder
-    private func boardContextMenu(_ board: DrawingModel.BoardMeta) -> some View {
+    private func boardContextMenu(_ board: BoardMeta) -> some View {
         Button("Open") { openBoard(board) }
         Button("Rename") { startRename(board) }
         Menu("Move to Folder") {
@@ -649,7 +651,7 @@ struct WelcomeView: View {
 
     // MARK: - Interaction
 
-    private func handleSelect(_ board: DrawingModel.BoardMeta) {
+    private func handleSelect(_ board: BoardMeta) {
         #if os(macOS)
         let flags = NSEvent.modifierFlags
         if flags.contains(.command) {
@@ -669,7 +671,7 @@ struct WelcomeView: View {
         #endif
     }
 
-    private func openBoard(_ board: DrawingModel.BoardMeta) {
+    private func openBoard(_ board: BoardMeta) {
         model.loadBoard(id: board.id)
         onStart()
     }
@@ -723,8 +725,13 @@ struct WelcomeView: View {
             for id in ids {
                 guard let name = model.boards.first(where: { $0.id == id })?.name,
                       let data = model.pngData(forBoardId: id) else { continue }
-                let file = dir.appendingPathComponent(name).appendingPathExtension("png")
-                try? data.write(to: file)
+                let safeName = name.replacingOccurrences(of: "/", with: "-")
+                let file = dir.appendingPathComponent(safeName).appendingPathExtension("png")
+                do {
+                    try data.write(to: file, options: .atomic)
+                } catch {
+                    model.lastErrorMessage = "Failed to export \(name): \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -732,8 +739,8 @@ struct WelcomeView: View {
 
     // MARK: - Computed boards
 
-    private var displayedBoards: [DrawingModel.BoardMeta] {
-        let base: [DrawingModel.BoardMeta]
+    private var displayedBoards: [BoardMeta] {
+        let base: [BoardMeta]
         if let folder = selectedFolder {
             let ids = Set(model.boardIdsInFolder(folder))
             base = model.boards.filter { ids.contains($0.id) }
@@ -764,11 +771,11 @@ struct WelcomeView: View {
         renamingId = nil
     }
 
-    private func confirmDelete(_ board: DrawingModel.BoardMeta) {
+    private func confirmDelete(_ board: BoardMeta) {
         deleteBoardId = board.id; deleteBoardName = board.name; showDeleteAlert = true
     }
 
-    private func startRename(_ board: DrawingModel.BoardMeta) {
+    private func startRename(_ board: BoardMeta) {
         renamingId = board.id; renameText = board.name
     }
 }

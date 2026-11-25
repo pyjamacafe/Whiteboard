@@ -6,6 +6,7 @@ import UIKit
 
 struct ContentView: View {
     @EnvironmentObject var model: DrawingModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var hoveredTool: String?
     @State private var settingsTool: Tool?
     @State private var lastTapTime: Date = .distantPast
@@ -120,28 +121,49 @@ struct ContentView: View {
             #if os(iOS) && !targetEnvironment(macCatalyst)
             .statusBarHidden()
             #endif
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase != .active {
+                    model.flushAutoSave()
+                }
+            }
             .onChange(of: model.pendingAction) { _, newValue in
                 guard let newValue else { return }
-                if newValue == .open { showImporter = true }
-                if newValue == .importImage { showImporter = true }
+                switch newValue {
+                case .open, .importImage:
+                    showImporter = true
+                case .export(let format):
+                    exportFormat = format == .png ? .png : .pdf
+                    exportAction()
+                }
                 model.pendingAction = nil
             }
+            #if os(iOS)
             .background(shortcutButtons)
-            .fileExporter(isPresented: $showingExporter, document: ExportDocument(data: exportData ?? Data()), contentType: exportType, defaultFilename: exportName) { _ in }
+            #endif
+            .fileExporter(isPresented: $showingExporter, document: ExportDocument(data: exportData ?? Data()), contentType: exportType, defaultFilename: exportName) { result in
+                if case .failure(let error) = result {
+                    model.lastErrorMessage = "Export failed: \(error.localizedDescription)"
+                }
+            }
             .fileImporter(isPresented: $showImporter, allowedContentTypes: [.data]) { result in
-                if case .success(let url) = result {
+                switch result {
+                case .success(let url):
                     let shouldStop = url.startAccessingSecurityScopedResource()
                     defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
-                    // Check if it's an image or a .wb file
                     let ext = url.pathExtension.lowercased()
                     if ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "heic" || ext == "gif" {
                         model.addImage(url: url)
                     } else {
-                        if let data = try? Data(contentsOf: url) {
+                        do {
+                            let data = try Data(contentsOf: url)
                             model.loadData(data)
                             model.openFileURL = url
+                        } catch {
+                            model.lastErrorMessage = "Could not open file: \(error.localizedDescription)"
                         }
                     }
+                case .failure(let error):
+                    model.lastErrorMessage = "Import failed: \(error.localizedDescription)"
                 }
             }
             .sheet(isPresented: $showHelp) { HelpView() }
@@ -151,6 +173,14 @@ struct ContentView: View {
                 Button("Cancel", role: .cancel) { }
             } message: {
                 Text("This will permanently delete all strokes and images.")
+            }
+            .alert("Error", isPresented: Binding(
+                get: { model.lastErrorMessage != nil },
+                set: { if !$0 { model.lastErrorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { model.lastErrorMessage = nil }
+            } message: {
+                Text(model.lastErrorMessage ?? "")
             }
     }
 
@@ -304,7 +334,7 @@ struct ContentView: View {
                 #endif
             }
 
-            Button(action: { model.showWelcome = true }) {
+            Button(action: { model.closeBoard() }) {
                 Image(systemName: "house")
                     .font(.title3)
                     .frame(width: 32, height: 32)
@@ -357,7 +387,7 @@ struct ContentView: View {
                         ("doc.on.clipboard", "Paste", { model.paste() }, false),
                         ("photo", "Import Image", { showImporter = true }, false),
                         ("viewfinder", "Center", { model.needsRecenter = true }, false),
-                        ("house", "Home", { model.showWelcome = true }, false),
+                        ("house", "Home", { model.closeBoard() }, false),
                     ])
 
                     Divider().padding(.horizontal)
@@ -373,6 +403,12 @@ struct ContentView: View {
 
                     Toggle(isOn: $model.appSettings.revealSettingsOnSingleTap) {
                         Label("Reveal Options on Single Tap", systemImage: model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+
+                    Toggle(isOn: $model.appSettings.pencilOnly) {
+                        Label("Draw with Apple Pencil Only", systemImage: "applepencil")
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -488,7 +524,7 @@ struct ContentView: View {
                 Button(action: { model.paste() }) { Label("Paste", systemImage: "doc.on.clipboard") }
                 Button(action: { showImporter = true }) { Label("Import Image", systemImage: "photo") }
                 Button(action: { model.needsRecenter = true }) { Label("Center", systemImage: "viewfinder") }
-                Button(action: { model.showWelcome = true }) { Label("Home", systemImage: "house") }
+                Button(action: { model.closeBoard() }) { Label("Home", systemImage: "house") }
             }
 
             Divider()
@@ -500,6 +536,10 @@ struct ContentView: View {
 
                 Toggle(isOn: $model.appSettings.revealSettingsOnSingleTap) {
                     Label("Show Options on Single Tap", systemImage: model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap")
+                }
+
+                Toggle(isOn: $model.appSettings.pencilOnly) {
+                    Label("Draw with Apple Pencil Only", systemImage: "applepencil")
                 }
 
                 Picker("Background", selection: $model.appSettings.canvasBackground) {
@@ -547,41 +587,27 @@ struct ContentView: View {
     }
 
     private func exportAction() {
-        let (size, offset) = canvasRect()
+        let (size, offset) = model.canvasBoundingRect()
+        let baseName = model.currentBoardId.flatMap { id in model.boards.first(where: { $0.id == id })?.name } ?? "Untitled"
         switch exportFormat {
         case .wb:
             exportData = model.saveData()
-            exportType = .init(filenameExtension: "wb") ?? .data
-            exportName = model.currentBoardId.flatMap { id in model.boards.first(where: { $0.id == id })?.name } ?? "Untitled"
+            exportType = ExportDocument.wbType
+            exportName = baseName
         case .png:
             exportData = model.pngData(size: size, offset: offset, scale: 4)
             exportType = .png
-            exportName = (model.currentBoardId.flatMap { id in model.boards.first(where: { $0.id == id })?.name } ?? "Untitled") + ".png"
+            exportName = baseName + ".png"
         case .pdf:
             exportData = model.pdfData(size: size, offset: offset)
             exportType = .pdf
-            exportName = (model.currentBoardId.flatMap { id in model.boards.first(where: { $0.id == id })?.name } ?? "Untitled") + ".pdf"
+            exportName = baseName + ".pdf"
+        }
+        guard exportData != nil else {
+            model.lastErrorMessage = "Failed to generate export data."
+            return
         }
         showingExporter = true
-    }
-
-    private func canvasRect() -> (size: CGSize, offset: CGPoint) {
-        var minX: CGFloat = .greatestFiniteMagnitude, maxX: CGFloat = 0
-        var minY: CGFloat = .greatestFiniteMagnitude, maxY: CGFloat = 0
-        var hasContent = false
-        for s in model.strokes {
-            for p in s.points {
-                minX = min(minX, p.x); maxX = max(maxX, p.x)
-                minY = min(minY, p.y); maxY = max(maxY, p.y)
-                hasContent = true
-            }
-        }
-        guard hasContent else { return (CGSize(width: 1000, height: 1000), .zero) }
-        let pad: CGFloat = 40
-        return (
-            CGSize(width: maxX - minX + pad * 2, height: maxY - minY + pad * 2),
-            CGPoint(x: minX - pad, y: minY - pad)
-        )
     }
 }
 

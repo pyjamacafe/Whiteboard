@@ -8,14 +8,18 @@ struct HelpView: View {
             List {
                 Section("Tools") {
                     ShortcutRow("Pen", key: "P")
+                    ShortcutRow("Sharpie", key: "S")
                     ShortcutRow("Eraser", key: "E")
-                    ShortcutRow("Selection", key: "S")
-                    ShortcutRow("Pen color 1–8", key: "1 – 8")
+                    ShortcutRow("Selection", key: "⇧S")
+                    ShortcutRow("Color preset 1–8", key: "1 – 8")
                 }
 
                 Section("Edit") {
                     ShortcutRow("Undo", key: "⌘Z")
                     ShortcutRow("Redo", key: "⌘⇧Z")
+                    ShortcutRow("Copy", key: "⌘C")
+                    ShortcutRow("Paste", key: "⌘V")
+                    ShortcutRow("Import image", key: "⌘I")
                     ShortcutRow("Delete selected", key: "⌫")
                 }
 

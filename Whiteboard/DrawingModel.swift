@@ -19,7 +19,16 @@ struct Stroke: Identifiable, Codable {
     let isCatmullRom: Bool
     let isSharpie: Bool
 
-    init(id: UUID = UUID(), points: [CGPoint], color: Color, lineWidth: CGFloat, isEraser: Bool, presetIndex: Int = -1, isCatmullRom: Bool = false, isSharpie: Bool = false) {
+    init(
+        id: UUID = UUID(),
+        points: [CGPoint],
+        color: Color,
+        lineWidth: CGFloat,
+        isEraser: Bool,
+        presetIndex: Int = -1,
+        isCatmullRom: Bool = false,
+        isSharpie: Bool = false
+    ) {
         self.id = id
         self.points = points
         self.color = CodableColor(color)
@@ -49,19 +58,15 @@ struct Stroke: Identifiable, Codable {
     var uiColor: Color { color.color }
 
     func displayColor(for model: DrawingModel) -> Color {
-        if presetIndex >= 0 {
-            if isSharpie {
-                guard presetIndex < model.sharpiePresets.count else { return color.color }
-                return model.sharpiePresets[presetIndex]
-            }
-            guard presetIndex < model.penPresets.count else { return color.color }
-            return model.penPresets[presetIndex]
-        }
-        return color.color
+        StrokeRenderer.resolveDisplayColor(
+            for: self,
+            penPresets: model.penPresets,
+            sharpiePresets: model.sharpiePresets
+        )
     }
 }
 
-struct CodableColor: Codable {
+struct CodableColor: Codable, Equatable {
     let r: Double
     let g: Double
     let b: Double
@@ -74,11 +79,7 @@ struct CodableColor: Codable {
         let c = NSColor(color).usingColorSpace(.sRGB) ?? NSColor.black
         #endif
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-        #if os(iOS)
         c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #else
-        c.getRed(&r, green: &g, blue: &b, alpha: &a)
-        #endif
         self.r = Double(r); self.g = Double(g); self.b = Double(b); self.a = Double(a)
     }
 
@@ -102,7 +103,7 @@ struct PlacedImage: Identifiable, Codable {
     var cgSize: CGSize { CGSize(width: size.cgPoint.x, height: size.cgPoint.y) }
 }
 
-struct CodablePoint: Codable {
+struct CodablePoint: Codable, Equatable {
     let x: Double
     let y: Double
     init(_ p: CGPoint) { x = Double(p.x); y = Double(p.y) }
@@ -120,10 +121,15 @@ enum CanvasBackground: String, CaseIterable {
 struct AppSettings {
     var canvasBackground: CanvasBackground = .grid
     var revealSettingsOnSingleTap: Bool = true
+    #if os(macOS)
+    var pencilOnly: Bool = false
+    #else
+    var pencilOnly: Bool = true
+    #endif
     var isDarkMode: Bool = false {
         didSet {
             #if os(macOS)
-            NSApp.appearance = isDarkMode ? NSAppearance(named: .darkAqua) : nil
+            NSApp?.appearance = isDarkMode ? NSAppearance(named: .darkAqua) : nil
             #endif
         }
     }
@@ -200,57 +206,144 @@ struct EraserSettings {
     var eraseTarget: EraseTarget = .all
 }
 
-typealias CanvasSnapshot = (strokes: [Stroke], selectedStrokeIds: Set<UUID>, selectedImageIds: Set<UUID>)
-
 class DrawingModel: ObservableObject {
     @Published var strokes: [Stroke] = []
+    @Published var placedImages: [PlacedImage] = []
     @Published var currentTool: Tool = .pen
     @Published var canUndo: Bool = false
     @Published var canRedo: Bool = false
 
-    var currentStroke: Stroke?
-    var previousTool: Tool = .pen
     @Published var penPresetIndex: Int = 0
     @Published var sharpiePresetIndex: Int = 0
     @Published var penSettings = PenSettings()
     @Published var sharpieSettings = SharpieSettings()
     @Published var eraserSettings = EraserSettings()
     @Published var appSettings = AppSettings()
+
+    @Published var recentFiles: [URL] = []
+    @Published var boards: [BoardMeta] = []
+    @Published var folders: [BoardFolder] = []
+    @Published var trashedBoards: [TrashEntry] = []
+    @Published var currentBoardId: String?
+
+    @Published var selectionLasso: [CGPoint] = []
+    @Published var selectionBoundary: [CGPoint] = []
+    @Published var selectedStrokeIds: Set<UUID> = []
+    @Published var selectedImageIds: Set<UUID> = []
+
+    @Published var pendingAction: PendingAction?
+    @Published var showDeleteMenu: Bool = false
+    @Published var deleteMenuLocation: CGPoint = .zero
+    @Published var showClearConfirmation: Bool = false
+    @Published var isToolbarVisible: Bool = true
+    @Published var showWelcome: Bool = true
+    @Published var needsRecenter: Bool = false
+    @Published var welcomeFolderName: String?
+    @Published var lastErrorMessage: String?
+    /// Incremented when background thumbnail generation finishes so WelcomeView refreshes.
+    @Published private(set) var thumbnailRevision: Int = 0
+
+    var currentStroke: Stroke?
+    var previousTool: Tool = .pen
+    var lastCanvasTapLocation: CGPoint = .zero
+    var imageCache: [UUID: PlatformImage] = [:]
+
     var openFileURL: URL? {
         didSet {
             if let url = openFileURL { addRecent(url) }
         }
     }
 
-    @Published var recentFiles: [URL] = []
+    let store: BoardStore
+    private let userDefaults: UserDefaults
+    private var history = CanvasHistory(maxSnapshots: 100)
 
     private let recentKey = "recentFiles"
     private let maxRecent = 5
+    private let defaultsKey = "savedDefaults"
 
-    /// Coalesces settings changes and persists them automatically so tool,
-    /// theme, and canvas preferences survive relaunch.
     private var settingsSaveSubscription: AnyCancellable?
+    private var saveWorkItem: DispatchWorkItem?
+    private var pendingAutoSaveBoardId: String?
 
-    init() {
+    // Async thumbnail cache + in-flight deduplication
+    private let thumbnailCache = NSCache<NSString, PlatformImage>()
+    private var thumbnailKeys: Set<String> = []
+    private var inFlightThumbnails: Set<String> = []
+    private let thumbnailQueue = DispatchQueue(label: "com.whiteboard.thumbnails", qos: .userInitiated)
+
+    // Move / Resize state
+    var isMoving: Bool = false
+    var isResizing: Bool = false
+    var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft
+    var resizeImageId: UUID?
+    var resizeStartRect: CGRect = .zero
+    var lastMovePoint: CGPoint = .zero
+    private var moveSnapshotTaken: Bool = false
+
+    enum PendingAction: Equatable {
+        case open
+        case export(ExportFormat)
+        case importImage
+    }
+
+    enum ExportFormat: String { case png, pdf }
+
+    init(store: BoardStore = BoardStore(), userDefaults: UserDefaults = .standard) {
+        self.store = store
+        self.userDefaults = userDefaults
+        thumbnailCache.countLimit = 128
+
         loadDefaults()
         loadRecents()
         loadBoards()
-        settingsSaveSubscription = objectWillChange
+
+        // Only observe actual settings publishers rather than all objectWillChange events
+        // so drawing strokes doesn't trigger UserDefaults writes.
+        let settingsChanges = Publishers.MergeMany([
+            $penSettings.map { _ in () }.eraseToAnyPublisher(),
+            $sharpieSettings.map { _ in () }.eraseToAnyPublisher(),
+            $eraserSettings.map { _ in () }.eraseToAnyPublisher(),
+            $appSettings.map { _ in () }.eraseToAnyPublisher(),
+            $currentTool.map { _ in () }.eraseToAnyPublisher(),
+        ])
+        settingsSaveSubscription = settingsChanges
+            .dropFirst(5) // ignore initial values emitted on subscription
             .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .sink { [weak self] in
                 self?.saveDefaults()
             }
     }
 
+    private func reportError(_ message: String) {
+        if Thread.isMainThread {
+            lastErrorMessage = message
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.lastErrorMessage = message
+            }
+        }
+    }
+
+    // MARK: - Recents
+
     private func loadRecents() {
-        guard let data = UserDefaults.standard.data(forKey: recentKey) else { return }
-        let urls = (try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSURL.self], from: data)) as? [URL] ?? []
-        recentFiles = urls
+        guard let data = userDefaults.data(forKey: recentKey) else { return }
+        if let paths = try? JSONDecoder().decode([String].self, from: data) {
+            recentFiles = paths.map { URL(fileURLWithPath: $0) }
+            return
+        }
+        // Backward compatibility with legacy NSKeyedArchiver storage
+        if let urls = (try? NSKeyedUnarchiver.unarchivedObject(ofClasses: [NSURL.self], from: data)) as? [URL] {
+            recentFiles = urls
+        }
     }
 
     private func saveRecents() {
-        let data = try? NSKeyedArchiver.archivedData(withRootObject: recentFiles, requiringSecureCoding: false)
-        UserDefaults.standard.set(data, forKey: recentKey)
+        let paths = recentFiles.map(\.path)
+        if let data = try? JSONEncoder().encode(paths) {
+            userDefaults.set(data, forKey: recentKey)
+        }
     }
 
     private func addRecent(_ url: URL) {
@@ -263,8 +356,6 @@ class DrawingModel: ObservableObject {
     }
 
     // MARK: - Default Settings
-
-    private let defaultsKey = "savedDefaults"
 
     struct SettingsSnapshot: Codable {
         let penLightColor: CodableColor
@@ -279,17 +370,21 @@ class DrawingModel: ObservableObject {
         let canvasBg: String
         let isDarkMode: Bool
         let revealSettingsOnSingleTap: Bool
+        let pencilOnly: Bool?
         let currentTool: String
 
         enum CodingKeys: String, CodingKey {
             case penLightColor, penDarkColor, penThickness,
                  sharpieLightColor, sharpieDarkColor, sharpieThickness,
-                 eraserSize, eraserMode, eraseTarget, canvasBg, isDarkMode, revealSettingsOnSingleTap, currentTool
+                 eraserSize, eraserMode, eraseTarget, canvasBg, isDarkMode, revealSettingsOnSingleTap, pencilOnly, currentTool
         }
 
-        init(penLightColor: CodableColor, penDarkColor: CodableColor, penThickness: CGFloat,
-             sharpieLightColor: CodableColor?, sharpieDarkColor: CodableColor?, sharpieThickness: CGFloat?,
-             eraserSize: CGFloat, eraserMode: String, eraseTarget: String?, canvasBg: String, isDarkMode: Bool, revealSettingsOnSingleTap: Bool, currentTool: String) {
+        init(
+            penLightColor: CodableColor, penDarkColor: CodableColor, penThickness: CGFloat,
+            sharpieLightColor: CodableColor?, sharpieDarkColor: CodableColor?, sharpieThickness: CGFloat?,
+            eraserSize: CGFloat, eraserMode: String, eraseTarget: String?, canvasBg: String,
+            isDarkMode: Bool, revealSettingsOnSingleTap: Bool, pencilOnly: Bool?, currentTool: String
+        ) {
             self.penLightColor = penLightColor
             self.penDarkColor = penDarkColor
             self.penThickness = penThickness
@@ -302,6 +397,7 @@ class DrawingModel: ObservableObject {
             self.canvasBg = canvasBg
             self.isDarkMode = isDarkMode
             self.revealSettingsOnSingleTap = revealSettingsOnSingleTap
+            self.pencilOnly = pencilOnly
             self.currentTool = currentTool
         }
 
@@ -319,6 +415,7 @@ class DrawingModel: ObservableObject {
             canvasBg = try c.decode(String.self, forKey: .canvasBg)
             isDarkMode = try c.decode(Bool.self, forKey: .isDarkMode)
             revealSettingsOnSingleTap = try c.decodeIfPresent(Bool.self, forKey: .revealSettingsOnSingleTap) ?? true
+            pencilOnly = try c.decodeIfPresent(Bool.self, forKey: .pencilOnly)
             currentTool = try c.decodeIfPresent(String.self, forKey: .currentTool) ?? Tool.pen.rawValue
         }
     }
@@ -337,15 +434,16 @@ class DrawingModel: ObservableObject {
             canvasBg: appSettings.canvasBackground.rawValue,
             isDarkMode: appSettings.isDarkMode,
             revealSettingsOnSingleTap: appSettings.revealSettingsOnSingleTap,
+            pencilOnly: appSettings.pencilOnly,
             currentTool: currentTool.rawValue
         )
         if let data = try? JSONEncoder().encode(s) {
-            UserDefaults.standard.set(data, forKey: defaultsKey)
+            userDefaults.set(data, forKey: defaultsKey)
         }
     }
 
     func loadDefaults() {
-        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+        guard let data = userDefaults.data(forKey: defaultsKey),
               let s = try? JSONDecoder().decode(SettingsSnapshot.self, from: data) else { return }
         penSettings.lightColor = s.penLightColor.color
         penSettings.darkColor = s.penDarkColor.color
@@ -354,16 +452,17 @@ class DrawingModel: ObservableObject {
         if let sd = s.sharpieDarkColor { sharpieSettings.darkColor = sd.color }
         if let st = s.sharpieThickness { sharpieSettings.thickness = st }
         eraserSettings.size = s.eraserSize
-        eraserSettings.mode = EraserMode(rawValue: s.eraserMode) ?? .partial
+        eraserSettings.mode = EraserMode(rawValue: s.eraserMode) ?? .full
         if let et = s.eraseTarget { eraserSettings.eraseTarget = EraseTarget(rawValue: et) ?? .all }
         appSettings.canvasBackground = CanvasBackground(rawValue: s.canvasBg) ?? .grid
         appSettings.isDarkMode = s.isDarkMode
         appSettings.revealSettingsOnSingleTap = s.revealSettingsOnSingleTap
+        if let po = s.pencilOnly { appSettings.pencilOnly = po }
         currentTool = Tool(rawValue: s.currentTool) ?? .pen
     }
 
     func resetToFactory() {
-        UserDefaults.standard.removeObject(forKey: defaultsKey)
+        userDefaults.removeObject(forKey: defaultsKey)
         penSettings = PenSettings()
         sharpieSettings = SharpieSettings()
         eraserSettings = EraserSettings()
@@ -375,74 +474,49 @@ class DrawingModel: ObservableObject {
     }
 
     var hasDefaults: Bool {
-        UserDefaults.standard.data(forKey: defaultsKey) != nil
+        userDefaults.data(forKey: defaultsKey) != nil
     }
 
     // MARK: - Board Storage
 
-    private var boardsDir: URL {
-        let fm = FileManager.default
-        #if os(macOS)
-        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        #else
-        let appSupport = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
-        #endif
-        let dir = appSupport.appendingPathComponent("com.whiteboard.boards")
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
-    }
-
-    private var indexURL: URL { boardsDir.appendingPathComponent("boards.json") }
-
-    struct BoardMeta: Codable, Identifiable {
-        var id: String
-        var name: String
-        var created: Date
-        var modified: Date
-    }
-
-    @Published var boards: [BoardMeta] = []
-    @Published var folders: [BoardFolder] = []
-    @Published var currentBoardId: String?
-
-    struct BoardFolder: Codable, Identifiable {
-        var id: String
-        var name: String
-        var boardIds: [String]
-    }
-
     func loadBoards() {
-        guard let data = try? Data(contentsOf: indexURL),
-              let list = try? JSONDecoder().decode(BoardIndex.self, from: data) else {
-            boards = []; folders = []; return
+        do {
+            let index = try store.loadIndex()
+            boards = index.boards
+            folders = index.folders
+        } catch {
+            boards = []
+            folders = []
+            reportError(error.localizedDescription)
         }
-        boards = list.boards.sorted { $0.modified > $1.modified }
-        folders = list.folders
-    }
-
-    private struct BoardIndex: Codable {
-        var boards: [BoardMeta]
-        var folders: [BoardFolder]
     }
 
     private func saveBoards() {
-        let index = BoardIndex(boards: boards, folders: folders)
-        if let data = try? JSONEncoder().encode(index) {
-            try? data.write(to: indexURL, options: .atomic)
+        do {
+            try store.saveIndex(BoardIndex(boards: boards, folders: folders))
+        } catch {
+            reportError(error.localizedDescription)
         }
     }
 
     func createBoard(name: String, folderId: String? = nil) {
-        let id = UUID().uuidString.prefix(8).lowercased()
-        let meta = BoardMeta(id: String(id), name: name, created: Date(), modified: Date())
+        flushAutoSave()
+        let id = String(UUID().uuidString.prefix(8).lowercased())
+        let meta = BoardMeta(id: id, name: name, created: Date(), modified: Date())
         boards.insert(meta, at: 0)
         if let fid = folderId, let idx = folders.firstIndex(where: { $0.id == fid }) {
-            folders[idx].boardIds.insert(String(id), at: 0)
+            folders[idx].boardIds.insert(id, at: 0)
         }
         saveBoards()
         currentBoardId = meta.id
-        openFileURL = boardURL(for: meta.id)
-        clear()
+        openFileURL = store.boardURL(for: meta.id)
+        resetCanvasState()
+        // Persist initial empty board file immediately so it exists on disk.
+        do {
+            try store.saveBoardSync(id: meta.id, saveData: SaveData(strokes: [], placedImages: []))
+        } catch {
+            reportError(error.localizedDescription)
+        }
     }
 
     func renameBoard(id: String, to newName: String) {
@@ -455,8 +529,8 @@ class DrawingModel: ObservableObject {
     // MARK: - Folders
 
     func createFolder(name: String) {
-        let id = UUID().uuidString.prefix(8).lowercased()
-        folders.append(BoardFolder(id: String(id), name: name, boardIds: []))
+        let id = String(UUID().uuidString.prefix(8).lowercased())
+        folders.append(BoardFolder(id: id, name: name, boardIds: []))
         saveBoards()
     }
 
@@ -483,108 +557,61 @@ class DrawingModel: ObservableObject {
         folders.first(where: { $0.id == folderId })?.boardIds ?? []
     }
 
-    func deleteBoard(id: String) {
-        let src = boardURL(for: id)
-        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
-        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-        let dst = trashDir.appendingPathComponent("\(id)_\(Date().timeIntervalSince1970).wb")
-        try? FileManager.default.moveItem(at: src, to: dst)
-        boards.removeAll { $0.id == id }
-        for fi in folders.indices { folders[fi].boardIds.removeAll { $0 == id } }
-        saveBoards()
-        if currentBoardId == id { currentBoardId = nil }
-        cleanTrash()
-    }
-
-    func restoreBoard(id: String) -> Bool {
-        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
-        guard let files = try? FileManager.default.contentsOfDirectory(at: trashDir, includingPropertiesForKeys: nil) else { return false }
-        let match = files.first { $0.lastPathComponent.hasPrefix("\(id)_") }
-        guard let src = match else { return false }
-        guard let data = try? Data(contentsOf: src) else { return false }
-        // Extract original name from the board index (or use a fallback)
-        let indexURL = trashDir.appendingPathComponent("trash_index.json")
-        var trashIndex: [TrashEntry] = (try? JSONDecoder().decode([TrashEntry].self, from: Data(contentsOf: indexURL))) ?? []
-        let entry = trashIndex.first(where: { $0.id == id })
-        let name = entry?.name ?? "Restored Board"
-        createBoard(name: name)
-        if let current = currentBoardId {
-            let dst = boardURL(for: current)
-            try? data.write(to: dst, options: .atomic)
-            loadBoard(id: current)
-            // Reload from the written file
-            if let reload = try? Data(contentsOf: dst),
-               let saved = try? JSONDecoder().decode(SaveData.self, from: reload) {
-                strokes = saved.strokes
-            }
-        }
-        try? FileManager.default.removeItem(at: src)
-        trashIndex.removeAll { $0.id == id }
-        if let updated = try? JSONEncoder().encode(trashIndex) { try? updated.write(to: indexURL) }
-        return true
-    }
-
-    struct TrashEntry: Codable {
-        let id: String
-        let name: String
-        let deletedAt: Date
-    }
-
-    @Published var trashedBoards: [TrashEntry] = []
+    // MARK: - Trash & Restore
 
     func loadTrash() {
-        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
-        let indexURL = trashDir.appendingPathComponent("trash_index.json")
-        guard let data = try? Data(contentsOf: indexURL),
-              let list = try? JSONDecoder().decode([TrashEntry].self, from: data) else {
-            trashedBoards = []; return
-        }
-        trashedBoards = list.sorted { $0.deletedAt > $1.deletedAt }
-    }
-
-    private func cleanTrash() {
-        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
-        let indexURL = trashDir.appendingPathComponent("trash_index.json")
-        let index: [TrashEntry] = (try? JSONDecoder().decode([TrashEntry].self, from: Data(contentsOf: indexURL))) ?? []
-        let cutoff = Date().addingTimeInterval(-30 * 24 * 3600)
-        let remaining = index.filter { $0.deletedAt > cutoff }
-        // Remove files older than 30 days
-        for entry in index where entry.deletedAt <= cutoff {
-            let file = trashDir.appendingPathComponent("\(entry.id)_\(entry.deletedAt.timeIntervalSince1970).wb")
-            try? FileManager.default.removeItem(at: file)
-        }
-        if remaining.count != index.count {
-            if let data = try? JSONEncoder().encode(remaining) { try? data.write(to: indexURL) }
-        }
-        loadTrash()
+        trashedBoards = store.cleanTrash()
     }
 
     func trashBoard(id: String, name: String) {
-        let entry = TrashEntry(id: id, name: name, deletedAt: Date())
-        let trashDir = boardsDir.appendingPathComponent(".trash", isDirectory: true)
-        try? FileManager.default.createDirectory(at: trashDir, withIntermediateDirectories: true)
-        let indexURL = trashDir.appendingPathComponent("trash_index.json")
-        var index: [TrashEntry] = (try? JSONDecoder().decode([TrashEntry].self, from: Data(contentsOf: indexURL))) ?? []
-        index.append(entry)
-        if let data = try? JSONEncoder().encode(index) { try? data.write(to: indexURL) }
-        deleteBoard(id: id)
+        if currentBoardId == id {
+            cancelPendingAutoSave()
+            currentBoardId = nil
+        }
+        do {
+            trashedBoards = try store.trashBoard(id: id, name: name)
+        } catch {
+            reportError(error.localizedDescription)
+            return
+        }
+        boards.removeAll { $0.id == id }
+        for fi in folders.indices { folders[fi].boardIds.removeAll { $0 == id } }
+        invalidateThumbnail(for: id)
+        saveBoards()
+    }
+
+    @discardableResult
+    func restoreBoard(id: String) -> Bool {
+        let newId = String(UUID().uuidString.prefix(8).lowercased())
+        do {
+            let restored = try store.restoreBoard(id: id, newBoardId: newId)
+            let now = Date()
+            let meta = BoardMeta(id: newId, name: restored.name, created: now, modified: now)
+            boards.insert(meta, at: 0)
+            saveBoards()
+            trashedBoards = restored.remainingTrash
+            invalidateThumbnail(for: newId)
+            return true
+        } catch {
+            reportError(error.localizedDescription)
+            return false
+        }
     }
 
     func loadBoard(id: String) {
-        let url = boardURL(for: id)
-        guard let data = try? Data(contentsOf: url),
-              let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return }
-        saveState()
-        strokes = save.strokes
-        placedImages = save.placedImages
-        imageCache.removeAll()
-        currentBoardId = id
-        openFileURL = url
-        updateUndoRedo()
-    }
-
-    private func boardURL(for id: String) -> URL {
-        boardsDir.appendingPathComponent("\(id).wb")
+        flushAutoSave()
+        do {
+            let save = try store.loadBoard(id: id)
+            resetCanvasState()
+            strokes = save.strokes
+            placedImages = save.placedImages
+            currentBoardId = id
+            openFileURL = store.boardURL(for: id)
+            migratePresetIndices()
+            updateUndoRedo()
+        } catch {
+            reportError(error.localizedDescription)
+        }
     }
 
     func openBoardByID(_ id: String) {
@@ -593,54 +620,120 @@ class DrawingModel: ObservableObject {
 
     // MARK: - Auto-save
 
-    private var saveWorkItem: DispatchWorkItem?
+    private func cancelPendingAutoSave() {
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        pendingAutoSaveBoardId = nil
+    }
 
     private func scheduleAutoSave() {
+        guard let boardId = currentBoardId else { return }
         saveWorkItem?.cancel()
-        let item = DispatchWorkItem { [weak self] in self?.performAutoSave() }
+        pendingAutoSaveBoardId = boardId
+        let item = DispatchWorkItem { [weak self] in
+            self?.performAutoSave(for: boardId)
+        }
         saveWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
     }
 
-    private func performAutoSave() {
-        guard let id = currentBoardId, let data = saveData() else { return }
-        try? data.write(to: boardURL(for: id), options: .atomic)
-        invalidateThumbnail(for: id)
-        if let idx = boards.firstIndex(where: { $0.id == id }) {
+    private func performAutoSave(for boardId: String) {
+        guard currentBoardId == boardId else { return }
+        saveWorkItem = nil
+        pendingAutoSaveBoardId = nil
+
+        let snapshot = SaveData(strokes: strokes, placedImages: placedImages)
+        invalidateThumbnail(for: boardId)
+        if let idx = boards.firstIndex(where: { $0.id == boardId }) {
             boards[idx].modified = Date()
             saveBoards()
         }
+
+        store.saveBoardAsync(id: boardId, saveData: snapshot) { [weak self] result in
+            if case .failure(let error) = result {
+                self?.reportError(error.localizedDescription)
+            }
+        }
     }
 
-    // Theme-aware colors
+    /// Synchronously flushes any pending debounced auto-save before switching
+    /// boards, closing a board, or terminating the app.
+    func flushAutoSave() {
+        guard let boardId = pendingAutoSaveBoardId ?? (saveWorkItem != nil ? currentBoardId : nil) else {
+            store.drainPendingWrites()
+            return
+        }
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        pendingAutoSaveBoardId = nil
+
+        guard currentBoardId == boardId else {
+            store.drainPendingWrites()
+            return
+        }
+
+        let snapshot = SaveData(strokes: strokes, placedImages: placedImages)
+        invalidateThumbnail(for: boardId)
+        if let idx = boards.firstIndex(where: { $0.id == boardId }) {
+            boards[idx].modified = Date()
+            saveBoards()
+        }
+        do {
+            try store.saveBoardSync(id: boardId, saveData: snapshot)
+        } catch {
+            reportError(error.localizedDescription)
+        }
+        store.drainPendingWrites()
+    }
+
+    // MARK: - Theme-aware colors
+
     var penColor: Color { appSettings.isDarkMode ? penSettings.darkColor : penSettings.lightColor }
     var penPresets: [Color] { appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets }
     var sharpieColor: Color { appSettings.isDarkMode ? sharpieSettings.darkColor : sharpieSettings.lightColor }
     var sharpiePresets: [Color] { appSettings.isDarkMode ? sharpieSettings.darkPresets : sharpieSettings.lightPresets }
-    @Published var selectionLasso: [CGPoint] = []
-    @Published var selectionBoundary: [CGPoint] = []
-    @Published var selectedStrokeIds: Set<UUID> = []
-    @Published var selectedImageIds: Set<UUID> = []
-    @Published var placedImages: [PlacedImage] = []
-    var imageCache: [UUID: Any] = [:]  // UIImage on iOS, NSImage on macOS
-    private var thumbnailCache: [String: PlatformImage] = [:]  // key: "boardId|isDark"
-    var lastCanvasTapLocation: CGPoint = .zero
 
-    private var undoStack: [CanvasSnapshot] = []
-    private var redoStack: [CanvasSnapshot] = []
+    // MARK: - History Helpers
+
+    private func makeSnapshot() -> CanvasSnapshot {
+        CanvasSnapshot(
+            strokes: strokes,
+            placedImages: placedImages,
+            selectedStrokeIds: selectedStrokeIds,
+            selectedImageIds: selectedImageIds,
+            selectionBoundary: selectionBoundary
+        )
+    }
 
     private func saveState() {
-        undoStack.append((strokes, selectedStrokeIds, selectedImageIds))
-        redoStack.removeAll()
-        canUndo = true
-        canRedo = false
+        history.push(makeSnapshot())
+        updateUndoRedo()
         scheduleAutoSave()
     }
 
     private func updateUndoRedo() {
-        canUndo = !undoStack.isEmpty
-        canRedo = !redoStack.isEmpty
+        canUndo = history.canUndo
+        canRedo = history.canRedo
     }
+
+    private func resetCanvasState() {
+        strokes.removeAll()
+        placedImages.removeAll()
+        imageCache.removeAll()
+        currentStroke = nil
+        selectedStrokeIds.removeAll()
+        selectedImageIds.removeAll()
+        selectionLasso.removeAll()
+        selectionBoundary.removeAll()
+        isMoving = false
+        isResizing = false
+        resizeImageId = nil
+        moveSnapshotTaken = false
+        history.clear()
+        updateUndoRedo()
+    }
+
+    // MARK: - Strokes
 
     func beginStroke(at point: CGPoint, isEraser: Bool) {
         let isSharpie = currentTool == .sharpie
@@ -664,18 +757,31 @@ class DrawingModel: ObservableObject {
     }
 
     func endStroke() {
-        guard let stroke = currentStroke else { currentStroke = nil; return }
+        guard let stroke = currentStroke else { return }
         currentStroke = nil
 
-        saveState()
-
         if stroke.isEraser {
-            erase(stroke)
+            let updated = GeometryEngine.erase(
+                strokes: strokes,
+                with: stroke,
+                mode: eraserSettings.mode,
+                target: eraserSettings.eraseTarget
+            )
+            // Only push undo snapshot if the eraser actually changed something.
+            if updated.count != strokes.count || !zip(updated, strokes).allSatisfy({ $0.id == $1.id && $0.points.count == $1.points.count }) {
+                saveState()
+                strokes = updated
+                updateUndoRedo()
+                scheduleAutoSave()
+            }
             return
-        } else if stroke.points.count >= 2 {
-            strokes.append(stroke)
         }
+
+        guard stroke.points.count >= 2 else { return }
+        saveState()
+        strokes.append(stroke)
         updateUndoRedo()
+        scheduleAutoSave()
     }
 
     // MARK: - Lasso Selection
@@ -685,14 +791,8 @@ class DrawingModel: ObservableObject {
     }
 
     func addLassoPoint(_ point: CGPoint) {
-        // Skip if too close to the last point (avoids accidental lassos from stationary taps)
-        if let last = selectionLasso.last, distance(last, point) < 5 { return }
+        if let last = selectionLasso.last, GeometryEngine.distance(last, point) < 5 { return }
         selectionLasso.append(point)
-    }
-
-    private func distance(_ a: CGPoint, _ b: CGPoint) -> CGFloat {
-        let dx = a.x - b.x, dy = a.y - b.y
-        return sqrt(dx * dx + dy * dy)
     }
 
     func endLasso() {
@@ -711,11 +811,9 @@ class DrawingModel: ObservableObject {
         selectedImageIds.removeAll()
 
         for stroke in strokes where !stroke.isEraser {
-            for p in stroke.points {
-                if path.contains(p) {
-                    selectedStrokeIds.insert(stroke.id)
-                    break
-                }
+            for p in stroke.points where path.contains(p) {
+                selectedStrokeIds.insert(stroke.id)
+                break
             }
         }
 
@@ -732,41 +830,37 @@ class DrawingModel: ObservableObject {
         updateUndoRedo()
     }
 
-    // MARK: - Move Selection
-
-    var isMoving: Bool = false
-    var isResizing: Bool = false
-    var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft
-    var resizeImageId: UUID?
-    var resizeStartRect: CGRect = .zero
-    var lastMovePoint: CGPoint = .zero
-    private var moveDidChange: Bool = false
+    // MARK: - Move & Resize Selection
 
     func isPointOnSelectedItem(_ point: CGPoint) -> Bool {
-        let threshold: CGFloat = 15
+        let thresholdSq: CGFloat = 15 * 15
         for s in strokes where selectedStrokeIds.contains(s.id) {
-            for i in 0..<s.points.count - 1 {
-                let d = pointSegDist(point, s.points[i], s.points[i + 1])
-                if d < threshold { return true }
+            guard s.points.count >= 2 else { continue }
+            for i in 0..<(s.points.count - 1) {
+                if GeometryEngine.pointSegmentDistanceSquared(point, s.points[i], s.points[i + 1]) < thresholdSq {
+                    return true
+                }
             }
         }
         for img in placedImages where selectedImageIds.contains(img.id) {
-            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
-            if rect.contains(point) { return true }
+            if CGRect(origin: img.cgPosition, size: img.cgSize).contains(point) {
+                return true
+            }
         }
         return false
     }
 
     func hitTestImage(_ point: CGPoint) -> UUID? {
-        for img in placedImages {
-            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
-            if rect.contains(point) { return img.id }
+        for img in placedImages.reversed() {
+            if CGRect(origin: img.cgPosition, size: img.cgSize).contains(point) {
+                return img.id
+            }
         }
         return nil
     }
 
     func isPointInSelectionBoundary(_ point: CGPoint) -> Bool {
-        pointInPolygon(point, selectionBoundary)
+        GeometryEngine.pointInPolygon(point, selectionBoundary)
     }
 
     func hitTestResizeHandle(_ point: CGPoint) -> (imgId: UUID, corner: Int)? {
@@ -788,197 +882,105 @@ class DrawingModel: ObservableObject {
     }
 
     func beginMove(at point: CGPoint) {
-        // Check for resize handle hit on a selected image
         if let hit = hitTestResizeHandle(point) {
             isResizing = true
             resizeCorner = hit.corner
             resizeImageId = hit.imgId
             lastMovePoint = point
-            moveDidChange = false
+            moveSnapshotTaken = false
             if let img = placedImages.first(where: { $0.id == hit.imgId }) {
                 resizeStartRect = CGRect(origin: img.cgPosition, size: img.cgSize)
             }
             return
         }
-        // If there's a selection boundary and the tap is inside it, treat as move
-        if !selectionBoundary.isEmpty && pointInPolygon(point, selectionBoundary) {
+        if !selectionBoundary.isEmpty && GeometryEngine.pointInPolygon(point, selectionBoundary) {
             isMoving = true
             lastMovePoint = point
-            moveDidChange = false
+            moveSnapshotTaken = false
             return
         }
         guard isPointOnSelectedItem(point) else {
             selectedStrokeIds.removeAll()
+            selectedImageIds.removeAll()
             selectionBoundary.removeAll()
             beginLasso(at: point)
             return
         }
         isMoving = true
         lastMovePoint = point
-        moveDidChange = false
+        moveSnapshotTaken = false
     }
 
     func commitMove() {
-        if isResizing {
-            isResizing = false
-            if moveDidChange {
-                saveState()
-                updateUndoRedo()
-            }
-            return
-        }
-        guard isMoving else { return }
+        let didMutate = moveSnapshotTaken
+        isResizing = false
         isMoving = false
-        if moveDidChange {
-            saveState()
+        resizeImageId = nil
+        moveSnapshotTaken = false
+        if didMutate {
             updateUndoRedo()
+            scheduleAutoSave()
         }
     }
 
     func moveSelected(by offset: CGSize) {
+        guard offset != .zero else { return }
+
         if isResizing {
-            guard let imgId = resizeImageId, offset != .zero else { return }
-            moveDidChange = true
-            let start = resizeStartRect
-            let aspect = start.width / start.height
-            var newRect = start
-            // Lock aspect ratio: size changes driven by the larger drag axis
-            let dragX = abs(offset.width) >= abs(offset.height)
-            switch resizeCorner {
-            case 0: // top-left
-                if dragX {
-                    let newW = max(10, start.width - offset.width)
-                    let newH = newW / aspect
-                    newRect = CGRect(x: start.maxX - newW, y: start.maxY - newH, width: newW, height: newH)
-                } else {
-                    let newH = max(10, start.height - offset.height)
-                    let newW = newH * aspect
-                    newRect = CGRect(x: start.maxX - newW, y: start.maxY - newH, width: newW, height: newH)
-                }
-            case 1: // top-right
-                if dragX {
-                    let newW = max(10, start.width + offset.width)
-                    let newH = newW / aspect
-                    newRect = CGRect(x: start.minX, y: start.maxY - newH, width: newW, height: newH)
-                } else {
-                    let newH = max(10, start.height - offset.height)
-                    let newW = newH * aspect
-                    newRect = CGRect(x: start.minX, y: start.maxY - newH, width: newW, height: newH)
-                }
-            case 2: // bottom-right
-                if dragX {
-                    let newW = max(10, start.width + offset.width)
-                    let newH = newW / aspect
-                    newRect = CGRect(x: start.minX, y: start.minY, width: newW, height: newH)
-                } else {
-                    let newH = max(10, start.height + offset.height)
-                    let newW = newH * aspect
-                    newRect = CGRect(x: start.minX, y: start.minY, width: newW, height: newH)
-                }
-            case 3: // bottom-left
-                if dragX {
-                    let newW = max(10, start.width - offset.width)
-                    let newH = newW / aspect
-                    newRect = CGRect(x: start.maxX - newW, y: start.minY, width: newW, height: newH)
-                } else {
-                    let newH = max(10, start.height + offset.height)
-                    let newW = newH * aspect
-                    newRect = CGRect(x: start.maxX - newW, y: start.minY, width: newW, height: newH)
-                }
-            default: break
+            guard let imgId = resizeImageId,
+                  let newRect = GeometryEngine.resizedRect(start: resizeStartRect, corner: resizeCorner, offset: offset) else {
+                return
             }
-            if newRect.width >= 10 && newRect.height >= 10 {
-                placedImages = placedImages.map { img in
-                    guard img.id == imgId else { return img }
-                    return PlacedImage(id: img.id, position: newRect.origin, size: newRect.size, imageData: img.imageData)
-                }
-                resizeStartRect = newRect
+            if !moveSnapshotTaken {
+                saveState()
+                moveSnapshotTaken = true
             }
+            placedImages = placedImages.map { img in
+                guard img.id == imgId else { return img }
+                return PlacedImage(id: img.id, position: newRect.origin, size: newRect.size, imageData: img.imageData)
+            }
+            resizeStartRect = newRect
             return
         }
-        guard isMoving, offset != .zero else { return }
-        moveDidChange = true
+
+        guard isMoving else { return }
+        if !moveSnapshotTaken {
+            saveState()
+            moveSnapshotTaken = true
+        }
         strokes = strokes.map { s in
             guard selectedStrokeIds.contains(s.id) else { return s }
-            return Stroke(id: s.id, points: s.points.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) },
-                           color: s.uiColor, lineWidth: s.lineWidth, isEraser: s.isEraser, presetIndex: s.presetIndex, isCatmullRom: s.isCatmullRom, isSharpie: s.isSharpie)
+            return Stroke(
+                id: s.id,
+                points: s.points.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) },
+                color: s.uiColor,
+                lineWidth: s.lineWidth,
+                isEraser: s.isEraser,
+                presetIndex: s.presetIndex,
+                isCatmullRom: s.isCatmullRom,
+                isSharpie: s.isSharpie
+            )
         }
         placedImages = placedImages.map { img in
             guard selectedImageIds.contains(img.id) else { return img }
-            return PlacedImage(id: img.id, position: CGPoint(x: img.cgPosition.x + offset.width, y: img.cgPosition.y + offset.height), size: img.cgSize, imageData: img.imageData)
+            return PlacedImage(
+                id: img.id,
+                position: CGPoint(x: img.cgPosition.x + offset.width, y: img.cgPosition.y + offset.height),
+                size: img.cgSize,
+                imageData: img.imageData
+            )
         }
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) }
         }
     }
 
-    // MARK: - Delete Selected
-
-    func pointInPolygon(_ point: CGPoint, _ polygon: [CGPoint]) -> Bool {
-        guard polygon.count >= 3 else { return false }
-        var inside = false
-        var j = polygon.count - 1
-        for i in 0..<polygon.count {
-            let pi = polygon[i], pj = polygon[j]
-            if ((pi.y > point.y) != (pj.y > point.y)) &&
-                (point.x < (pj.x - pi.x) * (point.y - pi.y) / (pj.y - pi.y) + pi.x) {
-                inside = !inside
-            }
-            j = i
-        }
-        return inside
-    }
-
-    private func pointSegDist(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
-        let dx = b.x - a.x, dy = b.y - a.y
-        let lenSq = dx * dx + dy * dy
-        guard lenSq != 0 else { return sqrt((p.x - a.x) * (p.x - a.x) + (p.y - a.y) * (p.y - a.y)) }
-        let t = max(0, min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq))
-        let px = a.x + t * dx, py = a.y + t * dy
-        return sqrt((p.x - px) * (p.x - px) + (p.y - py) * (p.y - py))
-    }
-
     func smoothCatmullRom(_ points: [CGPoint]) -> [CGPoint] {
-        guard points.count >= 3 else { return points }
-
-        // Gaussian-weighted moving average (window radius 2)
-        let gaussWeights: [CGFloat] = [0.061, 0.242, 0.394, 0.242, 0.061]
-        var smoothed = points
-        for i in 0..<points.count {
-            var sx: CGFloat = 0, sy: CGFloat = 0, sw: CGFloat = 0
-            for w in -2...2 {
-                let idx = i + w
-                guard idx >= 0, idx < points.count else { continue }
-                let weight = gaussWeights[w + 2]
-                sx += points[idx].x * weight
-                sy += points[idx].y * weight
-                sw += weight
-            }
-            if sw > 0 {
-                smoothed[i] = CGPoint(x: sx / sw, y: sy / sw)
-            }
-        }
-
-        // Catmull-Rom to cubic Bezier
-        // For each segment [p1, p2] with neighbors p0, p3:
-        //   cp1 = p1 + (p2 - p0) / 6
-        //   cp2 = p2 - (p3 - p1) / 6
-        var result: [CGPoint] = [smoothed[0]]
-        for i in 0..<smoothed.count - 1 {
-            let p0 = i > 0 ? smoothed[i - 1] : smoothed[i]
-            let p1 = smoothed[i]
-            let p2 = smoothed[i + 1]
-            let p3 = i + 2 < smoothed.count ? smoothed[i + 2] : smoothed[i + 1]
-            let cp1 = CGPoint(x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6)
-            let cp2 = CGPoint(x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6)
-            result.append(cp1)
-            result.append(cp2)
-            result.append(p2)
-        }
-        return result
+        GeometryEngine.smoothCatmullRom(points)
     }
 
     func deleteSelected() {
+        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectionBoundary.isEmpty else { return }
         saveState()
         if !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty {
             strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
@@ -992,84 +994,28 @@ class DrawingModel: ObservableObject {
         scheduleAutoSave()
     }
 
-    // MARK: - Eraser
-
-    private func erase(_ eraser: Stroke) {
-        let threshold = eraser.lineWidth / 2
-        let oldStrokes = strokes
-
-        let isTargeted: (Stroke) -> Bool = { pen in
-            switch self.eraserSettings.eraseTarget {
-            case .all: return true
-            case .pen: return !pen.isSharpie
-            case .sharpie: return pen.isSharpie
-            }
-        }
-        let hitByEraser: (Stroke) -> Bool = { pen in
-            pen.points.contains { pp in
-                eraser.points.contains { ep in
-                    let dx = pp.x - ep.x, dy = pp.y - ep.y
-                    return sqrt(dx * dx + dy * dy) < threshold
-                }
-            }
-        }
-
-        if self.eraserSettings.mode == .full {
-            self.strokes = oldStrokes.filter { $0.isEraser || !isTargeted($0) || !hitByEraser($0) }
-        } else {
-            var newStrokes: [Stroke] = []
-            for pen in oldStrokes {
-                if pen.isEraser || !isTargeted(pen) {
-                    newStrokes.append(pen)
-                    continue
-                }
-                var segment: [CGPoint] = []
-                for pp in pen.points {
-                    let isErased = eraser.points.contains { ep in
-                        let dx = pp.x - ep.x, dy = pp.y - ep.y
-                        return sqrt(dx * dx + dy * dy) < threshold
-                    }
-                    if isErased {
-                        if segment.count >= 2 {
-                            newStrokes.append(Stroke(points: segment, color: pen.uiColor, lineWidth: pen.lineWidth, isEraser: false, presetIndex: pen.presetIndex, isCatmullRom: pen.isCatmullRom, isSharpie: pen.isSharpie))
-                        }
-                        segment = []
-                    } else {
-                        segment.append(pp)
-                    }
-                }
-                if segment.count >= 2 {
-                    newStrokes.append(Stroke(points: segment, color: pen.uiColor, lineWidth: pen.lineWidth, isEraser: false, presetIndex: pen.presetIndex, isCatmullRom: pen.isCatmullRom, isSharpie: pen.isSharpie))
-                }
-            }
-            self.strokes = newStrokes
-        }
-
-        self.updateUndoRedo()
-        self.scheduleAutoSave()
-    }
-
     // MARK: - Copy / Paste
 
     func copySelected() {
         guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty else { return }
         let copiedStrokes = try? JSONEncoder().encode(strokes.filter { selectedStrokeIds.contains($0.id) })
         let copiedImages = try? JSONEncoder().encode(placedImages.filter { selectedImageIds.contains($0.id) })
+        let copiedBoundary = try? JSONEncoder().encode(selectionBoundary)
+
+        #if os(iOS)
         let data: [String: Any] = [
             "strokes": copiedStrokes ?? Data(),
             "images": copiedImages ?? Data(),
-            "boundary": (try? JSONEncoder().encode(selectionBoundary)) ?? Data(),
+            "boundary": copiedBoundary ?? Data(),
         ]
-        #if os(iOS)
-        UIPasteboard.general.items = [data as [String: Any]]
+        UIPasteboard.general.items = [data]
         #else
         let pb = NSPasteboard.general
         pb.clearContents()
-        // Convert Data values to base64 strings for JSONSerialization compatibility
         let stringData: [String: String] = [
             "strokes": (copiedStrokes ?? Data()).base64EncodedString(),
             "images": (copiedImages ?? Data()).base64EncodedString(),
-            "boundary": ((try? JSONEncoder().encode(selectionBoundary)) ?? Data()).base64EncodedString(),
+            "boundary": (copiedBoundary ?? Data()).base64EncodedString(),
         ]
         if let json = try? JSONSerialization.data(withJSONObject: stringData, options: .fragmentsAllowed) {
             pb.setData(json, forType: .string)
@@ -1091,114 +1037,144 @@ class DrawingModel: ObservableObject {
         let boundaryData = Data(base64Encoded: item["boundary"] ?? "") ?? Data()
         #endif
 
+        let decodedStrokes = (try? JSONDecoder().decode([Stroke].self, from: strokesData)) ?? []
+        let decodedImages = (try? JSONDecoder().decode([PlacedImage].self, from: imagesData)) ?? []
+        guard !decodedStrokes.isEmpty || !decodedImages.isEmpty else { return }
+
         saveState()
 
-        // Compute offset to paste at the last tap location
         let pasteOrigin = lastCanvasTapLocation == .zero ? CGPoint(x: 100, y: 100) : lastCanvasTapLocation
-
-        // Compute unified bounding box of all pasted content
         var minX = CGFloat.infinity, minY = CGFloat.infinity
-        if let pastedStrokes2 = try? JSONDecoder().decode([Stroke].self, from: strokesData) {
-            for s in pastedStrokes2 {
-                for p in s.points {
-                    if p.x < minX { minX = p.x }
-                    if p.y < minY { minY = p.y }
-                }
+        for s in decodedStrokes {
+            for p in s.points {
+                minX = min(minX, p.x)
+                minY = min(minY, p.y)
             }
         }
-        if let pastedImages2 = try? JSONDecoder().decode([PlacedImage].self, from: imagesData) {
-            for img in pastedImages2 {
-                if img.cgPosition.x < minX { minX = img.cgPosition.x }
-                if img.cgPosition.y < minY { minY = img.cgPosition.y }
-            }
+        for img in decodedImages {
+            minX = min(minX, img.cgPosition.x)
+            minY = min(minY, img.cgPosition.y)
         }
-        let dx = (minX == .infinity) ? 0 : pasteOrigin.x - minX
-        let dy = (minY == .infinity) ? 0 : pasteOrigin.y - minY
+        let dx = minX.isFinite ? pasteOrigin.x - minX : 0
+        let dy = minY.isFinite ? pasteOrigin.y - minY : 0
 
         var pastedStrokeIds = Set<UUID>()
         var pastedImageIds = Set<UUID>()
 
-        if let pastedStrokes = try? JSONDecoder().decode([Stroke].self, from: strokesData) {
-            for s in pastedStrokes {
-                let newPoints = s.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
-                let newStroke = Stroke(points: newPoints, color: s.uiColor, lineWidth: s.lineWidth, isEraser: false, presetIndex: s.presetIndex, isCatmullRom: s.isCatmullRom, isSharpie: s.isSharpie)
-                pastedStrokeIds.insert(newStroke.id)
-                strokes.append(newStroke)
-            }
+        for s in decodedStrokes {
+            let newPoints = s.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+            let newStroke = Stroke(
+                points: newPoints,
+                color: s.uiColor,
+                lineWidth: s.lineWidth,
+                isEraser: false,
+                presetIndex: s.presetIndex,
+                isCatmullRom: s.isCatmullRom,
+                isSharpie: s.isSharpie
+            )
+            pastedStrokeIds.insert(newStroke.id)
+            strokes.append(newStroke)
         }
-        if let pastedImages = try? JSONDecoder().decode([PlacedImage].self, from: imagesData) {
-            for img in pastedImages {
-                let newPos = CGPoint(x: img.cgPosition.x + dx, y: img.cgPosition.y + dy)
-                let newImg = PlacedImage(position: newPos, size: img.cgSize, imageData: img.imageData)
-                pastedImageIds.insert(newImg.id)
-                placedImages.append(newImg)
-            }
+        for img in decodedImages {
+            let newPos = CGPoint(x: img.cgPosition.x + dx, y: img.cgPosition.y + dy)
+            let newImg = PlacedImage(position: newPos, size: img.cgSize, imageData: img.imageData)
+            pastedImageIds.insert(newImg.id)
+            placedImages.append(newImg)
         }
-        // Select pasted items so they can be moved immediately
         selectedStrokeIds = pastedStrokeIds
         selectedImageIds = pastedImageIds
-        // Restore selection boundary from copied boundary polygon
         if let boundary = try? JSONDecoder().decode([CGPoint].self, from: boundaryData), !boundary.isEmpty {
             selectionBoundary = boundary.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
         } else {
             selectionBoundary.removeAll()
         }
+        updateUndoRedo()
+        scheduleAutoSave()
     }
 
+    // MARK: - Images
+
     func addImage(url: URL) {
-        guard let data = try? Data(contentsOf: url) else { return }
+        guard let data = try? Data(contentsOf: url) else {
+            reportError("Could not read image file \(url.lastPathComponent).")
+            return
+        }
         #if os(iOS)
-        guard let uiImg = UIImage(data: data) else { return }
+        guard let uiImg = UIImage(data: data), uiImg.size.width > 0, uiImg.size.height > 0 else {
+            reportError("Unsupported or empty image file.")
+            return
+        }
         let originalSize = uiImg.size
         #else
-        guard let nsImg = NSImage(data: data) else { return }
+        guard let nsImg = NSImage(data: data), nsImg.size.width > 0, nsImg.size.height > 0 else {
+            reportError("Unsupported or empty image file.")
+            return
+        }
         let originalSize = nsImg.size
         #endif
+
         let maxWidth: CGFloat = 400
+        let width = min(originalSize.width, maxWidth)
         let aspect = originalSize.height / originalSize.width
-        let finalSize = CGSize(width: min(originalSize.width, maxWidth), height: min(originalSize.width, maxWidth) * aspect)
-        // Resize image data to display size so rendering is fast
+        let finalSize = CGSize(width: width, height: max(1, width * aspect))
+
         let resizedData: Data = {
             #if os(iOS)
-            let s = UIScreen.main.scale
-            UIGraphicsBeginImageContextWithOptions(finalSize, false, s)
-            uiImg.draw(in: CGRect(origin: .zero, size: finalSize))
-            let resized = UIGraphicsGetImageFromCurrentImageContext()
-            UIGraphicsEndImageContext()
-            return resized?.pngData() ?? data
-            #else
-            let resized = NSImage(size: finalSize)
-            resized.lockFocus()
-            nsImg.draw(in: NSRect(origin: .zero, size: finalSize), from: NSRect(origin: .zero, size: nsImg.size), operation: .copy, fraction: 1)
-            resized.unlockFocus()
-            if let tiffData = resized.tiffRepresentation {
-                let bitmap = NSBitmapImageRep(data: tiffData)
-                if let pngData = bitmap?.representation(using: .png, properties: [:]) { return pngData }
+            let renderer = UIGraphicsImageRenderer(size: finalSize)
+            let resized = renderer.image { _ in
+                uiImg.draw(in: CGRect(origin: .zero, size: finalSize))
             }
-            return data
+            return resized.pngData() ?? data
+            #else
+            let targetSize = NSSize(width: finalSize.width, height: finalSize.height)
+            guard let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: Int(targetSize.width.rounded()),
+                pixelsHigh: Int(targetSize.height.rounded()),
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0
+            ) else { return data }
+            NSGraphicsContext.saveGraphicsState()
+            if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
+                NSGraphicsContext.current = ctx
+                nsImg.draw(in: NSRect(origin: .zero, size: targetSize), from: NSRect(origin: .zero, size: originalSize), operation: .copy, fraction: 1)
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            return rep.representation(using: .png, properties: [:]) ?? data
             #endif
         }()
+
         let pos = lastCanvasTapLocation == .zero ? CGPoint(x: 100, y: 100) : lastCanvasTapLocation
         saveState()
         let img = PlacedImage(position: pos, size: finalSize, imageData: resizedData)
         placedImages.append(img)
-        // Auto-select the newly imported image and switch to selection tool
         selectTool(.select)
         selectedImageIds = [img.id]
         selectedStrokeIds.removeAll()
         selectionBoundary.removeAll()
         updateUndoRedo()
+        scheduleAutoSave()
     }
 
     func resizeSelectedImages(by factor: CGFloat) {
-        guard !selectedImageIds.isEmpty else { return }
+        guard !selectedImageIds.isEmpty, factor > 0, factor.isFinite else { return }
         saveState()
         placedImages = placedImages.map { img in
             guard selectedImageIds.contains(img.id) else { return img }
-            return PlacedImage(id: img.id, position: img.cgPosition, size: CGSize(width: img.cgSize.width * factor, height: img.cgSize.height * factor), imageData: img.imageData)
+            let newW = max(10, img.cgSize.width * factor)
+            let newH = max(10, img.cgSize.height * factor)
+            return PlacedImage(id: img.id, position: img.cgPosition, size: CGSize(width: newW, height: newH), imageData: img.imageData)
         }
         updateUndoRedo()
+        scheduleAutoSave()
     }
+
+    // MARK: - Tool, Undo, Redo, Clear
 
     func selectTool(_ tool: Tool) {
         currentTool = tool
@@ -1212,23 +1188,32 @@ class DrawingModel: ObservableObject {
     }
 
     func undo() {
-        guard !undoStack.isEmpty else { return }
-        redoStack.append((strokes, selectedStrokeIds, selectedImageIds))
-        let prev = undoStack.removeLast()
+        guard let prev = history.undo(current: makeSnapshot()) else { return }
         strokes = prev.strokes
+        placedImages = prev.placedImages
         selectedStrokeIds = prev.selectedStrokeIds
         selectedImageIds = prev.selectedImageIds
+        selectionBoundary = prev.selectionBoundary
+        pruneImageCache()
         updateUndoRedo()
+        scheduleAutoSave()
     }
 
     func redo() {
-        guard !redoStack.isEmpty else { return }
-        undoStack.append((strokes, selectedStrokeIds, selectedImageIds))
-        let next = redoStack.removeLast()
+        guard let next = history.redo(current: makeSnapshot()) else { return }
         strokes = next.strokes
+        placedImages = next.placedImages
         selectedStrokeIds = next.selectedStrokeIds
         selectedImageIds = next.selectedImageIds
+        selectionBoundary = next.selectionBoundary
+        pruneImageCache()
         updateUndoRedo()
+        scheduleAutoSave()
+    }
+
+    private func pruneImageCache() {
+        let activeIds = Set(placedImages.map(\.id))
+        imageCache = imageCache.filter { activeIds.contains($0.key) }
     }
 
     func clear() {
@@ -1241,32 +1226,11 @@ class DrawingModel: ObservableObject {
         selectedImageIds.removeAll()
         selectionLasso.removeAll()
         selectionBoundary.removeAll()
-        undoStack.removeAll()
-        redoStack.removeAll()
         updateUndoRedo()
+        scheduleAutoSave()
     }
 
     // MARK: - Save / Load / Export
-
-    private struct SaveData: Codable {
-        let strokes: [Stroke]
-        let placedImages: [PlacedImage]
-
-        enum CodingKeys: String, CodingKey {
-            case strokes, placedImages
-        }
-
-        init(strokes: [Stroke], placedImages: [PlacedImage]) {
-            self.strokes = strokes
-            self.placedImages = placedImages
-        }
-
-        init(from decoder: Decoder) throws {
-            let c = try decoder.container(keyedBy: CodingKeys.self)
-            strokes = try c.decode([Stroke].self, forKey: .strokes)
-            placedImages = try c.decodeIfPresent([PlacedImage].self, forKey: .placedImages) ?? []
-        }
-    }
 
     func saveData() -> Data? {
         let data = SaveData(strokes: strokes, placedImages: placedImages)
@@ -1283,38 +1247,37 @@ class DrawingModel: ObservableObject {
             migratePresetIndices()
             updateUndoRedo()
         } catch {
-            print("[loadData] error: \(error)")
+            reportError("Failed to open file: \(error.localizedDescription)")
         }
     }
 
-    private func migratePresetIndices() {
-        let penPresets = appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets
-        let sharpiePresets = appSettings.isDarkMode ? sharpieSettings.darkPresets : sharpieSettings.lightPresets
+    func migratePresetIndices() {
+        let penCandidates = appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets
+        let sharpieCandidates = appSettings.isDarkMode ? sharpieSettings.darkPresets : sharpieSettings.lightPresets
+
         for i in strokes.indices where strokes[i].presetIndex == -1 && !strokes[i].isEraser {
             let s = strokes[i]
-            let candidates = s.isSharpie ? sharpiePresets : penPresets
-            #if os(iOS)
-            let target = UIColor(s.color.color)
-            #else
-            guard let target = NSColor(s.color.color).usingColorSpace(.sRGB) else { continue }
-            #endif
-            var tr: CGFloat = 0, tg: CGFloat = 0, tb: CGFloat = 0, ta: CGFloat = 0
-            target.getRed(&tr, green: &tg, blue: &tb, alpha: &ta)
+            let candidates = s.isSharpie ? sharpieCandidates : penCandidates
+            let tr = s.color.r, tg = s.color.g, tb = s.color.b
             var bestIdx = -1
-            var bestDist = CGFloat.infinity
+            var bestDist = Double.infinity
+
             for (j, c) in candidates.enumerated() {
-                #if os(iOS)
-                let pc = UIColor(c)
-                #else
-                guard let pc = NSColor(c).usingColorSpace(.sRGB) else { continue }
-                #endif
-                var pr: CGFloat = 0, pg: CGFloat = 0, pb: CGFloat = 0, pa: CGFloat = 0
-                pc.getRed(&pr, green: &pg, blue: &pb, alpha: &pa)
-                let d = (tr - pr) * (tr - pr) + (tg - pg) * (tg - pg) + (tb - pb) * (tb - pb)
+                let pc = CodableColor(c)
+                let d = (tr - pc.r) * (tr - pc.r) + (tg - pc.g) * (tg - pc.g) + (tb - pc.b) * (tb - pc.b)
                 if d < bestDist { bestDist = d; bestIdx = j }
             }
             if bestIdx >= 0 {
-                strokes[i] = Stroke(id: s.id, points: s.points, color: s.uiColor, lineWidth: s.lineWidth, isEraser: s.isEraser, presetIndex: bestIdx, isCatmullRom: s.isCatmullRom, isSharpie: s.isSharpie)
+                strokes[i] = Stroke(
+                    id: s.id,
+                    points: s.points,
+                    color: s.uiColor,
+                    lineWidth: s.lineWidth,
+                    isEraser: s.isEraser,
+                    presetIndex: bestIdx,
+                    isCatmullRom: s.isCatmullRom,
+                    isSharpie: s.isSharpie
+                )
             }
         }
     }
@@ -1323,288 +1286,140 @@ class DrawingModel: ObservableObject {
         guard let url = openFileURL else { return }
         let shouldStop = url.startAccessingSecurityScopedResource()
         defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
-        if let data = saveData() {
-            try? data.write(to: url, options: .atomic)
+        guard let data = saveData() else {
+            reportError("Failed to encode board data.")
+            return
+        }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            reportError("Failed to save file: \(error.localizedDescription)")
         }
     }
 
-    // MARK: - Menu command helpers (triggered by menu bar or keyboard)
+    // MARK: - Menu command helpers
 
     func openCmd() { pendingAction = .open }
-    func closeBoard() { showWelcome = true }
+    func closeBoard() {
+        flushAutoSave()
+        showWelcome = true
+    }
     func exportPNG() { pendingAction = .export(.png) }
     func exportPDF() { pendingAction = .export(.pdf) }
 
-    enum PendingAction: Equatable {
-        case open
-        case export(ExportFormat)
-        case importImage
+    func canvasBoundingRect(padding: CGFloat = 40) -> (size: CGSize, offset: CGPoint) {
+        guard let box = GeometryEngine.boundingBox(of: strokes, images: placedImages, padding: padding) else {
+            return (CGSize(width: 1000, height: 1000), .zero)
+        }
+        return (box.size, box.origin)
     }
 
-    enum ExportFormat: String { case png, pdf }
-    @Published var pendingAction: PendingAction?
-    @Published var showDeleteMenu: Bool = false
-    @Published var deleteMenuLocation: CGPoint = .zero
-    @Published var showClearConfirmation: Bool = false
-    @Published var isToolbarVisible: Bool = true
-    @Published var showWelcome: Bool = true
-    @Published var needsRecenter: Bool = false
-    @Published var welcomeFolderName: String?
-
     func pngData(size: CGSize, offset: CGPoint = .zero, scale: CGFloat = 3) -> Data? {
-        let w = Int(size.width * scale)
-        let h = Int(size.height * scale)
-        guard w > 0, h > 0, w <= 8192, h <= 8192 else { return nil }
-
-        var pixels = [UInt8](repeating: 0, count: w * h * 4)
-        guard let ctx = CGContext(
-            data: &pixels, width: w, height: h,
-            bitsPerComponent: 8, bytesPerRow: w * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        // No background fill — PNG exports with transparent background.
-        // Map canvas (y-down) → bitmap (CG y-up) so content top-left is at output origin
-        ctx.translateBy(x: -offset.x * scale, y: CGFloat(h) + offset.y * scale)
-        ctx.scaleBy(x: scale, y: -scale)
-
-        // Render placed images
-        for img in placedImages {
-            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
-            #if os(iOS)
-            if let uiImg = UIImage(data: img.imageData) {
-                uiImg.draw(in: rect)
-            }
-            #endif
-        }
-
-        // Render strokes
-        renderStrokesForExport(strokes, ctx: ctx)
-
-        guard let image = ctx.makeImage() else { return nil }
-        let cfData = CFDataCreateMutable(nil, 0)
-        guard let dest = CGImageDestinationCreateWithData(cfData!, UTType.png.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(dest, image, nil)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return cfData! as Data
+        StrokeRenderer.pngData(
+            strokes: strokes,
+            placedImages: placedImages,
+            penPresets: penPresets,
+            sharpiePresets: sharpiePresets,
+            isDarkMode: appSettings.isDarkMode,
+            size: size,
+            offset: offset,
+            scale: scale
+        )
     }
 
     /// Renders an arbitrary board (loaded from disk) to PNG data, used by the
     /// homescreen's bulk-export action.
     func pngData(forBoardId id: String) -> Data? {
-        let url = boardURL(for: id)
-        guard let data = try? Data(contentsOf: url),
-              let save = try? JSONDecoder().decode(SaveData.self, from: data) else { return nil }
-        let strokes = save.strokes
-
-        var minX: CGFloat = .greatestFiniteMagnitude, maxX: CGFloat = -.greatestFiniteMagnitude
-        var minY: CGFloat = .greatestFiniteMagnitude, maxY: CGFloat = -.greatestFiniteMagnitude
-        for s in strokes { for p in s.points {
-            minX = min(minX, p.x); maxX = max(maxX, p.x)
-            minY = min(minY, p.y); maxY = max(maxY, p.y)
-        } }
-        guard maxX > minX, maxY > minY else { return nil }
-
-        let pad: CGFloat = 40
-        let size = CGSize(width: maxX - minX + pad * 2, height: maxY - minY + pad * 2)
-        let offset = CGPoint(x: minX - pad, y: minY - pad)
-        let scale: CGFloat = 3
-        let w = Int(size.width * scale), h = Int(size.height * scale)
-        guard w > 0, h > 0, w <= 8192, h <= 8192 else { return nil }
-
-        var pixels = [UInt8](repeating: 0, count: w * h * 4)
-        guard let ctx = CGContext(
-            data: &pixels, width: w, height: h,
-            bitsPerComponent: 8, bytesPerRow: w * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        ctx.translateBy(x: -offset.x * scale, y: CGFloat(h) + offset.y * scale)
-        ctx.scaleBy(x: scale, y: -scale)
-        renderStrokesForExport(strokes, ctx: ctx)
-
-        guard let image = ctx.makeImage() else { return nil }
-        let cfData = CFDataCreateMutable(nil, 0)
-        guard let dest = CGImageDestinationCreateWithData(cfData!, UTType.png.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(dest, image, nil)
-        guard CGImageDestinationFinalize(dest) else { return nil }
-        return cfData! as Data
-    }
-
-    private func renderStrokesForExport(_ strokes: [Stroke], ctx: CGContext) {
-        for s in strokes { renderStrokeForExport(s, ctx: ctx) }
-    }
-
-    private func renderStrokeForExport(_ s: Stroke, ctx: CGContext) {
-        guard s.points.count >= 2 else { return }
-        ctx.saveGState()
-        ctx.setLineCap(.round)
-        ctx.setLineJoin(.round)
-        if s.isEraser {
-            ctx.setBlendMode(.clear)
-            ctx.setLineWidth(s.lineWidth)
+        let save: SaveData
+        if id == currentBoardId {
+            save = SaveData(strokes: strokes, placedImages: placedImages)
+        } else if let loaded = store.loadBoardData(id: id) {
+            save = loaded
         } else {
-            ctx.setBlendMode(.normal)
-            ctx.setStrokeColor(s.uiColor.cgColor ?? CGColor(gray: 0, alpha: 1))
-            ctx.setLineWidth(s.lineWidth)
+            return nil
         }
-        ctx.addLines(between: s.points)
-        ctx.strokePath()
-        ctx.restoreGState()
+        guard let box = GeometryEngine.boundingBox(of: save.strokes, images: save.placedImages, padding: 40) else {
+            return nil
+        }
+        return StrokeRenderer.pngData(
+            strokes: save.strokes,
+            placedImages: save.placedImages,
+            penPresets: penPresets,
+            sharpiePresets: sharpiePresets,
+            isDarkMode: appSettings.isDarkMode,
+            size: box.size,
+            offset: box.origin,
+            scale: 3
+        )
     }
 
     func pdfData(size: CGSize, offset: CGPoint = .zero) -> Data? {
-        let rect = CGRect(origin: .zero, size: size)
-        let cfData = CFDataCreateMutable(nil, 0)
-        guard let consumer = CGDataConsumer(data: cfData!) else { return nil }
-        var mediaBox = rect
-        guard let pdf = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { return nil }
-        pdf.beginPDFPage(nil)
-        renderToContext(pdf, size: size, offset: offset)
-        pdf.endPDFPage()
-        pdf.closePDF()
-        return cfData! as Data
+        StrokeRenderer.pdfData(
+            strokes: strokes,
+            placedImages: placedImages,
+            penPresets: penPresets,
+            sharpiePresets: sharpiePresets,
+            isDarkMode: appSettings.isDarkMode,
+            size: size,
+            offset: offset
+        )
     }
 
-    private func drawCanvasBackground(in ctx: CGContext, canvasRect: CGRect, scale: CGFloat) {
-        let isDark = appSettings.isDarkMode
-        ctx.setFillColor((isDark ? CGColor(gray: 0, alpha: 1) : CGColor(gray: 1, alpha: 1)))
-        ctx.fill(canvasRect)
-        let gray: CGFloat = isDark ? 56/255 : 0.85
-        let fg = CGColor(gray: gray, alpha: 1)
-        let spacing: CGFloat = 30
-        switch appSettings.canvasBackground {
-        case .none: break
-        case .grid:
-            ctx.setStrokeColor(fg)
-            ctx.setLineWidth(0.5 / scale)
-            let startX = (canvasRect.minX / spacing).rounded(.down) * spacing
-            let startY = (canvasRect.minY / spacing).rounded(.down) * spacing
-            var x = startX
-            while x <= canvasRect.maxX {
-                ctx.move(to: CGPoint(x: x, y: canvasRect.minY - spacing))
-                ctx.addLine(to: CGPoint(x: x, y: canvasRect.maxY + spacing))
-                x += spacing
-            }
-            var y = startY
-            while y <= canvasRect.maxY {
-                ctx.move(to: CGPoint(x: canvasRect.minX - spacing, y: y))
-                ctx.addLine(to: CGPoint(x: canvasRect.maxX + spacing, y: y))
-                y += spacing
-            }
-            ctx.strokePath()
-        case .dots:
-            ctx.setFillColor(fg)
-            let r = max(1.5 / scale, 1)
-            let startX = (canvasRect.minX / spacing).rounded(.down) * spacing
-            let startY = (canvasRect.minY / spacing).rounded(.down) * spacing
-            var x = startX
-            while x <= canvasRect.maxX {
-                var y = startY
-                while y <= canvasRect.maxY {
-                    ctx.addEllipse(in: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
-                    y += spacing
-                }
-                x += spacing
-            }
-            ctx.fillPath()
-        case .ruled:
-            ctx.setStrokeColor(fg)
-            ctx.setLineWidth(0.5 / scale)
-            let startY = (canvasRect.minY / spacing).rounded(.down) * spacing
-            var y = startY
-            while y <= canvasRect.maxY {
-                ctx.move(to: CGPoint(x: canvasRect.minX - spacing, y: y))
-                ctx.addLine(to: CGPoint(x: canvasRect.maxX + spacing, y: y))
-                y += spacing
-            }
-            ctx.strokePath()
-        }
-    }
+    // MARK: - Async Thumbnails
 
-    private func renderToContext(_ ctx: CGContext, size: CGSize, offset: CGPoint = .zero) {
-        ctx.setFillColor(gray: 1, alpha: 1)
-        ctx.fill(CGRect(origin: .zero, size: size))
-        ctx.translateBy(x: -offset.x, y: size.height + offset.y)
-        ctx.scaleBy(x: 1, y: -1)
-
-        for s in strokes { renderStrokeForExport(s, ctx: ctx) }
-    }
-
-    // MARK: - Thumbnail
-
+    /// Returns a cached thumbnail immediately if available, or schedules background
+    /// decoding/rendering and bumps `thumbnailRevision` when ready.
     func thumbnail(for boardId: String, size: CGSize = CGSize(width: 240, height: 320)) -> PlatformImage? {
-        // Cache per board + theme + size so thumbnails aren't re-decoded/re-rendered on
-        // every view update (hover, selection, etc.).
-        let key = "\(boardId)|\(appSettings.isDarkMode ? 1 : 0)|\(Int(size.width))x\(Int(size.height))"
-        if let cached = thumbnailCache[key] { return cached }
+        let isDark = appSettings.isDarkMode
+        let key = "\(boardId)|\(isDark ? 1 : 0)|\(Int(size.width))x\(Int(size.height))"
+        if let cached = thumbnailCache.object(forKey: key as NSString) {
+            return cached
+        }
+        guard !inFlightThumbnails.contains(key) else { return nil }
+        inFlightThumbnails.insert(key)
 
-        let image: PlatformImage?
-        if boardId == currentBoardId {
-            image = strokes.isEmpty ? nil : renderThumbnail(strokes: strokes, size: size)
-        } else {
-            let url = boardURL(for: boardId)
-            if let data = try? Data(contentsOf: url),
-               let save = try? JSONDecoder().decode(SaveData.self, from: data) {
-                image = renderThumbnail(strokes: save.strokes, size: size)
+        let penP = penPresets
+        let sharpieP = sharpiePresets
+        let inMemorySave: SaveData? = (boardId == currentBoardId)
+            ? SaveData(strokes: strokes, placedImages: placedImages)
+            : nil
+        let boardStore = self.store
+
+        thumbnailQueue.async { [weak self] in
+            let save = inMemorySave ?? boardStore.loadBoardData(id: boardId)
+            let rendered: PlatformImage?
+            if let save, (!save.strokes.isEmpty || !save.placedImages.isEmpty) {
+                rendered = StrokeRenderer.renderThumbnail(
+                    strokes: save.strokes,
+                    placedImages: save.placedImages,
+                    penPresets: penP,
+                    sharpiePresets: sharpieP,
+                    isDarkMode: isDark,
+                    size: size
+                )
             } else {
-                image = nil
+                rendered = nil
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.inFlightThumbnails.remove(key)
+                if let rendered {
+                    self.thumbnailCache.setObject(rendered, forKey: key as NSString)
+                    self.thumbnailKeys.insert(key)
+                    self.thumbnailRevision &+= 1
+                }
             }
         }
-        if let image { thumbnailCache[key] = image } else { thumbnailCache.removeValue(forKey: key) }
-        return image
+        return nil
     }
 
     func invalidateThumbnail(for boardId: String) {
         let prefix = "\(boardId)|"
-        thumbnailCache = thumbnailCache.filter { !$0.key.hasPrefix(prefix) }
-    }
-
-    private func renderThumbnail(strokes: [Stroke], size: CGSize) -> PlatformImage? {
-        let isDark = appSettings.isDarkMode
-        let w = Int(size.width), h = Int(size.height)
-        var pixels = [UInt8](repeating: 255, count: w * h * 4)
-        guard let ctx = CGContext(
-            data: &pixels, width: w, height: h,
-            bitsPerComponent: 8, bytesPerRow: w * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        if isDark {
-            ctx.setFillColor(gray: 0, alpha: 1)
-        } else {
-            ctx.setFillColor(gray: 1, alpha: 1)
+        for key in thumbnailKeys where key.hasPrefix(prefix) {
+            thumbnailCache.removeObject(forKey: key as NSString)
         }
-        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
-
-        var minX: CGFloat = .greatestFiniteMagnitude, maxX: CGFloat = 0
-        var minY: CGFloat = .greatestFiniteMagnitude, maxY: CGFloat = 0
-        for s in strokes { for p in s.points { minX = min(minX, p.x); maxX = max(maxX, p.x); minY = min(minY, p.y); maxY = max(maxY, p.y) } }
-        guard maxX > minX, maxY > minY else { return nil }
-
-        let pad: CGFloat = 10, cw = maxX - minX + pad * 2, ch = maxY - minY + pad * 2
-        let sc = min(CGFloat(w) / cw, CGFloat(h) / ch) * 0.9
-        let ox = (CGFloat(w) - cw * sc) / 2 - (minX - pad) * sc
-        let oy = (CGFloat(h) - ch * sc) / 2 - (minY - pad) * sc
-
-        ctx.translateBy(x: ox, y: oy + CGFloat(h))
-        ctx.scaleBy(x: sc, y: -sc)
-
-        for s in strokes where !s.isEraser {
-            ctx.saveGState(); ctx.setLineCap(CGLineCap.round); ctx.setLineJoin(CGLineJoin.round)
-            ctx.setStrokeColor(s.uiColor.cgColor ?? CGColor(gray: 0, alpha: 1))
-            ctx.setLineWidth(max(s.lineWidth, 1))
-            ctx.addLines(between: s.points); ctx.strokePath(); ctx.restoreGState()
-        }
-
-        guard let cgImage = ctx.makeImage() else { return nil }
-        #if os(macOS)
-        return NSImage(cgImage: cgImage, size: size)
-        #else
-        return UIImage(cgImage: cgImage)
-        #endif
+        thumbnailKeys = thumbnailKeys.filter { !$0.hasPrefix(prefix) }
+        inFlightThumbnails = inFlightThumbnails.filter { !$0.hasPrefix(prefix) }
     }
 }
