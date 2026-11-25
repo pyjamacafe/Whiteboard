@@ -293,6 +293,7 @@ final class DrawingModel {
     var showDeleteMenu: Bool = false
     var deleteMenuLocation: CGPoint = .zero
     var showClearConfirmation: Bool = false
+    var showAbout: Bool = false
     var isToolbarVisible: Bool = true
     var showWelcome: Bool = true
     var needsRecenter: Bool = false

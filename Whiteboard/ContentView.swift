@@ -168,6 +168,7 @@ struct ContentView: View {
                 }
             }
             .sheet(isPresented: $showHelp) { HelpView() }
+            .sheet(isPresented: $model.showAbout) { AboutView() }
             .animation(.easeOut(duration: 0.15), value: model.showDeleteMenu)
             .confirmationDialog("Clear Canvas?", isPresented: $model.showClearConfirmation, titleVisibility: .visible) {
                 Button("Clear", role: .destructive) { model.clear() }
@@ -451,6 +452,7 @@ struct ContentView: View {
 
                     settingsGroup(title: nil, items: [
                         ("questionmark.circle", "Help", { showHelp = true }, false),
+                        ("info.circle", "About Doodles", { model.showAbout = true }, false),
                     ])
                 }
                 .padding()
@@ -571,6 +573,7 @@ struct ContentView: View {
 
             Section {
                 Button(action: { showHelp = true }) { Label("Help", systemImage: "questionmark.circle") }
+                Button(action: { model.showAbout = true }) { Label("About Doodles", systemImage: "info.circle") }
             }
         }
 

@@ -22,6 +22,9 @@ struct DoodlesApp: App {
                 #endif
         }
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Doodles") { model.showAbout = true }
+            }
             CommandGroup(after: .saveItem) {
                 Button("Open…") { model.openCmd() }
                     .keyboardShortcut("o", modifiers: .command)

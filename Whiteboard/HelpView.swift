@@ -51,6 +51,19 @@ struct HelpView: View {
                     FeatureRow("Auto-save", "All boards are saved automatically to the central board library.")
                     FeatureRow("Welcome screen", "Create, rename, delete, and open boards from the welcome screen.")
                 }
+
+                Section("About & License") {
+                    Link(destination: AboutView.repoURL) {
+                        HStack {
+                            Label("GitHub Repository", systemImage: "link")
+                            Spacer()
+                            Text("pyjamacafe/Whiteboard")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    FeatureRow("MIT License", "Copyright © 2025-2026 Piyush Itankar. Open-source under the MIT License.")
+                }
             }
             #if os(macOS)
             .listStyle(.bordered)
