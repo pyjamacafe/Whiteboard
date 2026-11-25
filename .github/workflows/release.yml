@@ -1,6 +1,8 @@
 name: Build & Release
 
 on:
+  release:
+    types: [published]
   push:
     tags:
       - "v*"
@@ -8,6 +10,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -21,7 +27,7 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Build Whiteboard (Release, arm64)
+      - name: Build Whiteboard (Release, macOS arm64)
         run: |
           xcodebuild \
             -project Whiteboard.xcodeproj \
@@ -31,14 +37,18 @@ jobs:
             -derivedDataPath build/DerivedData \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=14.0 \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             clean build
 
-      - name: Package DMG, ZIP, and checksums
+      - name: Package macOS DMG, ZIP, and checksums
         run: |
           APP_PATH="build/DerivedData/Build/Products/Release/Whiteboard.app"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            RAW_TAG="${{ github.event.release.tag_name }}"
+            VERSION="${RAW_TAG#v}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
             SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo '1.0')"
@@ -53,8 +63,8 @@ jobs:
           ln -s /Applications "$DMG_STAGE/Applications"
           cp LICENSE "$DMG_STAGE/"
 
-          DMG_NAME="Doodles-${VERSION}-arm64.dmg"
-          ZIP_NAME="Doodles-${VERSION}-arm64.zip"
+          DMG_NAME="Doodles-${VERSION}-macOS-arm64.dmg"
+          ZIP_NAME="Doodles-${VERSION}-macOS-arm64.zip"
 
           hdiutil create \
             -volname "Doodles ${VERSION}" \
@@ -66,13 +76,14 @@ jobs:
 
           (cd "$DIST_DIR" && shasum -a 256 "$DMG_NAME" "$ZIP_NAME" > SHA256SUMS.txt)
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Upload assets to GitHub Release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
           generate_release_notes: true
           body: |
-            ## Installation (Apple Silicon, macOS 14+)
+            ## Installation (macOS 14+, Apple Silicon)
 
             1. Download the `.dmg` (or `.zip`) below and copy **Whiteboard.app** to `/Applications`.
             2. Because this build is ad-hoc signed (not notarized with an Apple Developer ID), macOS Gatekeeper may block it on first launch. To allow it, either:
@@ -90,5 +101,5 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: Doodles-arm64
+          name: Doodles-macOS-arm64
           path: build/dist/*
