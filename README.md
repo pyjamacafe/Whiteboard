@@ -9,9 +9,10 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 ### Drawing Tools
 - **Pen (`P`)** — Smooth vector strokes with Gaussian pre-filtering and centripetal Catmull-Rom spline interpolation. Adjustable width (2–4 pt) and 8 theme-adaptive color presets.
 - **Sharpie (`S`)** — Two-pass glow/core stroke style with its own color presets and width options.
-- **Fill (`F`)** — Fast local scanline flood fill converted into crisp vector polygons (supporting interior holes via the even-odd fill rule and sharp corner preservation). Includes zero-bleeding open-shape detection, visual opacity swatches (`25%`–`100%`), an icon-only gap-closing cycle button (**Strict**, **Auto**, **Wide**), an icon-only **Replace / Blend** mode toggle (Replace by default so refilling swaps colors cleanly without blending), and theme-adaptive colors.
-- **Eraser (`E`)** — Full-stroke or partial erase modes with adjustable size and segment-to-segment hit testing. Choose the erase target (**All**, **Pen**, or **Sharpie**); erasing **All** also removes touched fills.
-- **Select (`⇧S`)** — Lasso-select strokes, fills, and placed images. Move, copy/paste, resize images with corner handles, or double-tap for quick actions.
+- **Fill (`F`)** — Fast local scanline flood fill converted into crisp vector polygons (supporting interior holes via the even-odd fill rule and sharp corner preservation). Includes zero-bleeding open-shape detection, a single cycling opacity swatch (`25% → 50% → 75% → 100%`), an icon-only gap-closing cycle button (**Strict**, **Auto**, **Wide**), an icon-only **Replace / Blend** mode toggle (Replace by default so refilling swaps colors cleanly without blending), and theme-adaptive colors.
+- **Eraser (`E`)** — Full-stroke or partial erase modes with adjustable size and segment-to-segment hit testing. Cycle the erase target with a single icon or `E` followed by `0`–`3` (**All**, **Pen**, **Sharpie**, or **Fill** only).
+- **Select (`⇧S`)** — Lasso-select strokes, fills, and placed images. Move, copy/paste (including fills, selecting only the newly pasted copy), resize images with corner handles, or double-tap for quick actions.
+- **Scenes (`⇧X`, `,` / `.`)** — Freeform-style viewport bookmarks saved inside each `.wb` tissue. Add scenes from the toolbar, smoothly pan & zoom between them with **`‹` / `›`** (or `,` / `.`), swipe left to delete, swipe right to rename, and hold-and-drag to reorder.
 
 ### Canvas
 - Infinite pannable/zoomable canvas with spatial-indexed viewport culling and cached vector paths.
@@ -33,9 +34,11 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 | `P` | Pen |
 | `S` | Sharpie |
 | `F` | Fill |
-| `E` | Eraser |
+| `E`, then `0`–`3` | Eraser target: `0` All, `1` Pen, `2` Sharpie, `3` Fill |
 | `⇧S` | Select |
-| `1`–`8` | Select color preset |
+| `⇧X` | Add Scene (bookmark current view) |
+| `,` / `.` | Previous / Next Scene |
+| `1`–`8` | Select color preset (Pen / Sharpie / Fill) |
 | `⌘Z` / `⌘⇧Z` | Undo / Redo |
 | `⌘C` / `⌘V` | Copy / Paste selection |
 | `⌘I` | Import image |

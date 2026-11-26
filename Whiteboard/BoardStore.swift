@@ -1,19 +1,48 @@
 import Foundation
 
+/// A bookmarked viewport region ("Scene") on the infinite canvas, stored as the
+/// canvas-space center point and zoom scale so it frames the same area across
+/// different screen sizes (Mac and iPad).
+nonisolated struct CanvasScene: Identifiable, Codable, Equatable, Sendable {
+    var id: UUID
+    var name: String
+    var centerX: Double
+    var centerY: Double
+    var scale: Double
+
+    init(id: UUID = UUID(), name: String, center: CGPoint, scale: CGFloat) {
+        self.id = id
+        self.name = name
+        self.centerX = Double(center.x)
+        self.centerY = Double(center.y)
+        self.scale = Double(scale)
+    }
+
+    var center: CGPoint {
+        CGPoint(x: centerX, y: centerY)
+    }
+
+    var cgScale: CGFloat {
+        CGFloat(scale)
+    }
+}
+
 /// Portable serialized contents of a `.wb` board file (JSON-compatible for export/import).
 nonisolated struct SaveData: Codable, Sendable {
     let strokes: [Stroke]
     let placedImages: [PlacedImage]
     let fills: [FillShape]
+    let scenes: [CanvasScene]
 
     enum CodingKeys: String, CodingKey {
-        case strokes, placedImages, fills
+        case strokes, placedImages, fills, scenes
     }
 
-    init(strokes: [Stroke], placedImages: [PlacedImage], fills: [FillShape] = []) {
+    init(strokes: [Stroke], placedImages: [PlacedImage], fills: [FillShape] = [], scenes: [CanvasScene] = []) {
         self.strokes = strokes
         self.placedImages = placedImages
         self.fills = fills
+        self.scenes = scenes
     }
 
     init(from decoder: Decoder) throws {
@@ -21,6 +50,7 @@ nonisolated struct SaveData: Codable, Sendable {
         strokes = try c.decode([Stroke].self, forKey: .strokes)
         placedImages = try c.decodeIfPresent([PlacedImage].self, forKey: .placedImages) ?? []
         fills = try c.decodeIfPresent([FillShape].self, forKey: .fills) ?? []
+        scenes = try c.decodeIfPresent([CanvasScene].self, forKey: .scenes) ?? []
     }
 }
 
@@ -37,16 +67,18 @@ private nonisolated struct BinaryBoardData: Codable, Sendable {
     let strokes: [Stroke]
     let imageRefs: [StoredImageRef]
     let fills: [FillShape]
+    let scenes: [CanvasScene]
 
     enum CodingKeys: String, CodingKey {
-        case version, strokes, imageRefs, fills
+        case version, strokes, imageRefs, fills, scenes
     }
 
-    init(version: Int, strokes: [Stroke], imageRefs: [StoredImageRef], fills: [FillShape] = []) {
+    init(version: Int, strokes: [Stroke], imageRefs: [StoredImageRef], fills: [FillShape] = [], scenes: [CanvasScene] = []) {
         self.version = version
         self.strokes = strokes
         self.imageRefs = imageRefs
         self.fills = fills
+        self.scenes = scenes
     }
 
     init(from decoder: Decoder) throws {
@@ -55,6 +87,7 @@ private nonisolated struct BinaryBoardData: Codable, Sendable {
         strokes = try c.decode([Stroke].self, forKey: .strokes)
         imageRefs = try c.decode([StoredImageRef].self, forKey: .imageRefs)
         fills = try c.decodeIfPresent([FillShape].self, forKey: .fills) ?? []
+        scenes = try c.decodeIfPresent([CanvasScene].self, forKey: .scenes) ?? []
     }
 }
 
@@ -236,7 +269,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
                     ))
                 }
             }
-            return SaveData(strokes: binary.strokes, placedImages: images, fills: binary.fills)
+            return SaveData(strokes: binary.strokes, placedImages: images, fills: binary.fills, scenes: binary.scenes)
         }
         return try JSONDecoder().decode(SaveData.self, from: data)
     }
@@ -254,7 +287,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
         let refs = saveData.placedImages.map {
             StoredImageRef(id: $0.id, position: $0.position, size: $0.size)
         }
-        let payload = BinaryBoardData(version: 3, strokes: saveData.strokes, imageRefs: refs, fills: saveData.fills)
+        let payload = BinaryBoardData(version: 4, strokes: saveData.strokes, imageRefs: refs, fills: saveData.fills, scenes: saveData.scenes)
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         return try encoder.encode(payload)

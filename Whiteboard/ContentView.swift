@@ -11,6 +11,9 @@ struct ContentView: View {
     @State private var settingsTool: Tool?
     @State private var lastTapTime: Date = .distantPast
     @State private var showSettings: Bool = false
+    @State private var showScenes: Bool = false
+    @State private var renamingSceneId: UUID?
+    @State private var renameSceneText: String = ""
     @State private var showImporter = false
     @State private var showingExporter = false
     @State private var showHelp = false
@@ -46,7 +49,7 @@ struct ContentView: View {
                     .allowsHitTesting(false)
 
                     #if os(iOS)
-                    CanvasView(model: model, onBeginDraw: { showSettings = false })
+                    CanvasView(model: model, onBeginDraw: { showSettings = false; showScenes = false })
                         .ignoresSafeArea()
                         .onPencilDoubleTap { _ in
                             model.toggleEraserFromPencil()
@@ -57,7 +60,7 @@ struct ContentView: View {
                             }
                         }
                     #else
-                    CanvasView(model: model, onBeginDraw: { showSettings = false })
+                    CanvasView(model: model, onBeginDraw: { showSettings = false; showScenes = false })
                         .ignoresSafeArea()
                     #endif
 
@@ -169,6 +172,7 @@ struct ContentView: View {
         }
 
         return content
+            .preferredColorScheme(model.appSettings.isDarkMode ? .dark : .light)
             #if os(iOS) && !targetEnvironment(macCatalyst)
             .statusBarHidden()
             #endif
@@ -217,8 +221,14 @@ struct ContentView: View {
                     model.lastErrorMessage = "Import failed: \(error.localizedDescription)"
                 }
             }
-            .sheet(isPresented: $showHelp) { HelpView() }
-            .sheet(isPresented: $model.showAbout) { AboutView() }
+            .sheet(isPresented: $showHelp) {
+                HelpView()
+                    .preferredColorScheme(model.appSettings.isDarkMode ? .dark : .light)
+            }
+            .sheet(isPresented: $model.showAbout) {
+                AboutView()
+                    .preferredColorScheme(model.appSettings.isDarkMode ? .dark : .light)
+            }
             .animation(.easeOut(duration: 0.15), value: model.showDeleteMenu)
             .confirmationDialog("Clear Canvas?", isPresented: $model.showClearConfirmation, titleVisibility: .visible) {
                 Button("Clear", role: .destructive) { model.clear() }
@@ -258,6 +268,39 @@ struct ContentView: View {
                 .keyboardShortcut("w", modifiers: .command)
             Button("") { showImporter = true }
                 .keyboardShortcut("i", modifiers: .command)
+            Button("") { model.addScene() }
+                .keyboardShortcut("x", modifiers: .shift)
+            Button("") { model.goToPreviousScene() }
+                .keyboardShortcut(",", modifiers: [])
+            Button("") { model.goToNextScene() }
+                .keyboardShortcut(".", modifiers: [])
+            Button("") {
+                let prior = model.currentTool
+                model.selectTool(.eraser)
+                switch prior {
+                case .pen: model.eraserSettings.eraseTarget = .pen
+                case .sharpie: model.eraserSettings.eraseTarget = .sharpie
+                case .fill: model.eraserSettings.eraseTarget = .fill
+                default: model.eraserSettings.eraseTarget = .all
+                }
+            }
+            .keyboardShortcut("e", modifiers: [])
+            Button("") {
+                if model.currentTool == .eraser { model.eraserSettings.eraseTarget = .all }
+            }
+            .keyboardShortcut("0", modifiers: [])
+            Button("") {
+                if model.currentTool == .eraser { model.eraserSettings.eraseTarget = .pen }
+            }
+            .keyboardShortcut("1", modifiers: [])
+            Button("") {
+                if model.currentTool == .eraser { model.eraserSettings.eraseTarget = .sharpie }
+            }
+            .keyboardShortcut("2", modifiers: [])
+            Button("") {
+                if model.currentTool == .eraser { model.eraserSettings.eraseTarget = .fill }
+            }
+            .keyboardShortcut("3", modifiers: [])
         }
         .hidden()
         .frame(width: 0, height: 0)
@@ -349,39 +392,37 @@ struct ContentView: View {
             Divider()
                 .frame(height: 24)
 
-            Button(action: { model.undo() }) {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.title3)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .frame(minWidth: 38, minHeight: 36)
-                    .background(hoveredTool == "undo" ? Color.primary.opacity(0.12) : .clear)
-                    .foregroundColor(model.canUndo ? .primary : .secondary)
-                    .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .disabled(!model.canUndo)
-            .onHover { hovering in
-                hoveredTool = hovering ? "undo" : nil
-            }
-            .pointingHand()
+            HStack(spacing: 2) {
+                Button(action: { model.goToPreviousScene() }) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 26, height: 36)
+                        .background(hoveredTool == "prevScene" ? Color.primary.opacity(0.12) : .clear)
+                        .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.scenes.isEmpty)
+                .help("Previous Scene")
+                .onHover { hovering in hoveredTool = hovering ? "prevScene" : nil }
+                .pointingHand()
 
-            Button(action: { model.redo() }) {
-                Image(systemName: "arrow.uturn.forward")
-                    .font(.title3)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .frame(minWidth: 38, minHeight: 36)
-                    .background(hoveredTool == "redo" ? Color.primary.opacity(0.12) : .clear)
-                    .foregroundColor(model.canRedo ? .primary : .secondary)
-                    .clipShape(Capsule())
+                scenesMenu
+
+                Button(action: { model.goToNextScene() }) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                        .frame(width: 26, height: 36)
+                        .background(hoveredTool == "nextScene" ? Color.primary.opacity(0.12) : .clear)
+                        .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.scenes.isEmpty)
+                .help("Next Scene")
+                .onHover { hovering in hoveredTool = hovering ? "nextScene" : nil }
+                .pointingHand()
             }
-            .buttonStyle(.plain)
-            .disabled(!model.canRedo)
-            .onHover { hovering in
-                hoveredTool = hovering ? "redo" : nil
-            }
-            .pointingHand()
 
             Button(action: { model.closeBoard() }) {
                 Image(systemName: "house")
@@ -394,6 +435,7 @@ struct ContentView: View {
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
+            .help("Home")
             .onHover { hovering in
                 hoveredTool = hovering ? "home" : nil
             }
@@ -567,6 +609,225 @@ struct ContentView: View {
     }
     #endif
 
+    // MARK: - Scenes Popover & Floating Navigator
+
+    private var scenesMenu: some View {
+        #if os(iOS)
+        let popoverArrowEdge: Edge = .top
+        #else
+        let popoverArrowEdge: Edge = .bottom
+        #endif
+        let maxPopoverHeight = max(220, windowHeight - 130)
+
+        return Button(action: {
+            showSettings = false
+            showScenes.toggle()
+        }) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "rectangle.stack")
+                    .font(.title3)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(minWidth: 38, minHeight: 36)
+                    .background(hoveredTool == "scenes" || showScenes ? Color.primary.opacity(0.12) : .clear)
+                    .foregroundColor(showScenes ? .accentColor : .primary)
+                    .clipShape(Capsule())
+
+                if !model.scenes.isEmpty {
+                    Text("\(model.scenes.count)")
+                        .font(.system(size: 9, weight: .bold).monospacedDigit())
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor)
+                        .clipShape(Capsule())
+                        .offset(x: 2, y: -1)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .help("Scenes")
+        .onHover { hovering in
+            hoveredTool = hovering ? "scenes" : nil
+        }
+        .pointingHand()
+        .popover(isPresented: $showScenes, attachmentAnchor: .rect(.bounds), arrowEdge: popoverArrowEdge) {
+            VStack(spacing: 0) {
+                // Header
+                HStack {
+                    Text("Scenes")
+                        .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Button(action: { model.addScene() }) {
+                        Label("Add", systemImage: "plus")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.accentColor.opacity(0.16))
+                            .foregroundColor(.accentColor)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Save Current View as Scene")
+                    .pointingHand()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+
+                Divider().opacity(0.45)
+
+                if model.scenes.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "rectangle.stack")
+                            .font(.system(size: 24))
+                            .foregroundColor(.secondary.opacity(0.7))
+                        Text("No Scenes Yet")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("Bookmark regions of your tissue to jump between ideas like slides.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                        Button(action: { model.addScene() }) {
+                            Label("Add Current View", systemImage: "plus")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                        }
+                        .liquidGlassProminentButton()
+                        .pointingHand()
+                        .padding(.top, 2)
+                    }
+                    .padding(16)
+                } else {
+                    let listHeight = min(CGFloat(model.scenes.count) * 48 + 12, maxPopoverHeight - 50)
+                    List {
+                        ForEach(Array(model.scenes.enumerated()), id: \.element.id) { index, scene in
+                            sceneRow(scene: scene, index: index)
+                                .listRowBackground(Color.clear)
+                                .listRowSeparator(.hidden)
+                                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) {
+                                        model.deleteScene(id: scene.id)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
+                                }
+                                .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                                    Button {
+                                        renameSceneText = scene.name
+                                        renamingSceneId = scene.id
+                                    } label: {
+                                        Label("Rename", systemImage: "pencil")
+                                    }
+                                    .tint(.accentColor)
+                                }
+                        }
+                        .onMove { source, destination in
+                            model.moveScenes(fromOffsets: source, toOffset: destination)
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .frame(height: max(56, listHeight))
+                }
+            }
+            .frame(width: 240)
+            .preferredColorScheme(model.appSettings.isDarkMode ? .dark : .light)
+            .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
+        }
+    }
+
+    private func sceneRow(scene: CanvasScene, index: Int) -> some View {
+        let isActive = model.activeSceneId == scene.id
+        return HStack(spacing: 8) {
+            Text("\(index + 1)")
+                .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                .foregroundColor(isActive ? .white : .secondary)
+                .frame(width: 20, height: 20)
+                .background(isActive ? Color.accentColor : Color.primary.opacity(0.08))
+                .clipShape(Circle())
+
+            if renamingSceneId == scene.id {
+                TextField("Scene name", text: $renameSceneText)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .onSubmit {
+                        model.renameScene(id: scene.id, to: renameSceneText)
+                        renamingSceneId = nil
+                    }
+            } else {
+                Button(action: {
+                    model.goToScene(scene)
+                    showScenes = false
+                }) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(scene.name)
+                            .font(.system(size: 12.5, weight: isActive ? .semibold : .regular))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                        Text("\(Int((scene.cgScale * 100).rounded()))%")
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointingHand()
+            }
+
+            Menu {
+                Button {
+                    model.updateSceneToCurrentView(id: scene.id)
+                } label: {
+                    Label("Update to Current View", systemImage: "viewfinder")
+                }
+                Button {
+                    renameSceneText = scene.name
+                    renamingSceneId = scene.id
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                if index > 0 {
+                    Button {
+                        model.moveScene(id: scene.id, direction: -1)
+                    } label: {
+                        Label("Move Up", systemImage: "arrow.up")
+                    }
+                }
+                if index < model.scenes.count - 1 {
+                    Button {
+                        model.moveScene(id: scene.id, direction: 1)
+                    } label: {
+                        Label("Move Down", systemImage: "arrow.down")
+                    }
+                }
+                Divider()
+                Button(role: .destructive) {
+                    model.deleteScene(id: scene.id)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .pointingHand()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isActive ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.03))
+        )
+    }
+
     private var settingsMenu: some View {
         let maxPopoverHeight = max(200, windowHeight - 110)
         let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
@@ -706,6 +967,7 @@ struct ContentView: View {
                 .padding(10)
             }
             .frame(maxHeight: maxPopoverHeight)
+            .preferredColorScheme(model.appSettings.isDarkMode ? .dark : .light)
             .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
         }
     }

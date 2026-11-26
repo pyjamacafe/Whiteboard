@@ -233,6 +233,7 @@ enum EraseTarget: String, CaseIterable {
     case all = "All"
     case pen = "Pen"
     case sharpie = "Sharpie"
+    case fill = "Fill"
 }
 
 struct EraserSettings {
@@ -288,6 +289,9 @@ final class DrawingModel {
     var folders: [BoardFolder] = []
     var trashedBoards: [TrashEntry] = []
     var currentBoardId: String?
+    var scenes: [CanvasScene] = []
+    var activeSceneId: UUID?
+    var pendingSceneNavigation: CanvasScene?
 
     var selectionLasso: [CGPoint] = []
     var selectionBoundary: [CGPoint] = []
@@ -315,6 +319,8 @@ final class DrawingModel {
     @ObservationIgnored var currentStroke: Stroke?
     @ObservationIgnored var previousTool: Tool = .pen
     @ObservationIgnored var lastCanvasTapLocation: CGPoint = .zero
+    @ObservationIgnored var currentViewportCenter: CGPoint = .zero
+    @ObservationIgnored var currentViewportScale: CGFloat = 1.0
     @ObservationIgnored var imageCache: [UUID: PlatformImage] = [:]
     @ObservationIgnored let spatialGrid = SpatialHashGrid(cellSize: 256)
 
@@ -734,6 +740,7 @@ final class DrawingModel {
             strokes = save.strokes
             placedImages = save.placedImages
             fills = save.fills
+            scenes = save.scenes
             currentBoardId = id
             openFileURL = store.boardURL(for: id)
             migratePresetIndices()
@@ -772,7 +779,7 @@ final class DrawingModel {
         saveWorkItem = nil
         pendingAutoSaveBoardId = nil
 
-        let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
+        let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes)
         invalidateThumbnail(for: boardId)
         if let idx = boards.firstIndex(where: { $0.id == boardId }) {
             boards[idx].modified = Date()
@@ -793,7 +800,7 @@ final class DrawingModel {
         pendingAutoSaveBoardId = nil
 
         if let boardId, currentBoardId == boardId {
-            let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
+            let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes)
             invalidateThumbnail(for: boardId)
             if let idx = boards.firstIndex(where: { $0.id == boardId }) {
                 boards[idx].modified = Date()
@@ -930,6 +937,9 @@ final class DrawingModel {
         strokes.removeAll()
         placedImages.removeAll()
         fills.removeAll()
+        scenes.removeAll()
+        activeSceneId = nil
+        pendingSceneNavigation = nil
         imageCache.removeAll()
         spatialGrid.invalidate()
         currentStroke = nil
@@ -982,15 +992,20 @@ final class DrawingModel {
         currentStroke = nil
 
         if stroke.isEraser {
-            let updatedStrokes = GeometryEngine.erase(
-                strokes: strokes,
-                with: stroke,
-                mode: eraserSettings.mode,
-                target: eraserSettings.eraseTarget,
-                spatialGrid: spatialGrid
-            )
+            let updatedStrokes: [Stroke]
+            if eraserSettings.eraseTarget == .fill {
+                updatedStrokes = strokes
+            } else {
+                updatedStrokes = GeometryEngine.erase(
+                    strokes: strokes,
+                    with: stroke,
+                    mode: eraserSettings.mode,
+                    target: eraserSettings.eraseTarget,
+                    spatialGrid: spatialGrid
+                )
+            }
             let updatedFills: [FillShape]
-            if eraserSettings.eraseTarget == .all && !fills.isEmpty {
+            if (eraserSettings.eraseTarget == .all || eraserSettings.eraseTarget == .fill) && !fills.isEmpty {
                 updatedFills = fills.filter { fill in
                     let path = fill.makeCGPath()
                     return !stroke.points.contains { path.contains($0, using: .evenOdd) }
@@ -1158,6 +1173,7 @@ final class DrawingModel {
         guard isPointOnSelectedItem(point) else {
             selectedStrokeIds.removeAll()
             selectedImageIds.removeAll()
+            selectedFillIds.removeAll()
             selectionBoundary.removeAll()
             beginLasso(at: point)
             return
@@ -1266,15 +1282,17 @@ final class DrawingModel {
     // MARK: - Copy / Paste
 
     func copySelected() {
-        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty else { return }
+        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty else { return }
         let copiedStrokes = try? JSONEncoder().encode(strokes.filter { selectedStrokeIds.contains($0.id) })
         let copiedImages = try? JSONEncoder().encode(placedImages.filter { selectedImageIds.contains($0.id) })
+        let copiedFills = try? JSONEncoder().encode(fills.filter { selectedFillIds.contains($0.id) })
         let copiedBoundary = try? JSONEncoder().encode(selectionBoundary)
 
         #if os(iOS)
         let data: [String: Any] = [
             "strokes": copiedStrokes ?? Data(),
             "images": copiedImages ?? Data(),
+            "fills": copiedFills ?? Data(),
             "boundary": copiedBoundary ?? Data(),
         ]
         UIPasteboard.general.items = [data]
@@ -1284,6 +1302,7 @@ final class DrawingModel {
         let stringData: [String: String] = [
             "strokes": (copiedStrokes ?? Data()).base64EncodedString(),
             "images": (copiedImages ?? Data()).base64EncodedString(),
+            "fills": (copiedFills ?? Data()).base64EncodedString(),
             "boundary": (copiedBoundary ?? Data()).base64EncodedString(),
         ]
         if let json = try? JSONSerialization.data(withJSONObject: stringData, options: .fragmentsAllowed) {
@@ -1297,22 +1316,24 @@ final class DrawingModel {
         guard let item = UIPasteboard.general.items.first else { return }
         let strokesData = item["strokes"] as? Data ?? Data()
         let imagesData = item["images"] as? Data ?? Data()
+        let fillsData = item["fills"] as? Data ?? Data()
         let boundaryData = item["boundary"] as? Data ?? Data()
         #else
         guard let json = NSPasteboard.general.data(forType: .string),
               let item = try? JSONSerialization.jsonObject(with: json) as? [String: String] else { return }
         let strokesData = Data(base64Encoded: item["strokes"] ?? "") ?? Data()
         let imagesData = Data(base64Encoded: item["images"] ?? "") ?? Data()
+        let fillsData = Data(base64Encoded: item["fills"] ?? "") ?? Data()
         let boundaryData = Data(base64Encoded: item["boundary"] ?? "") ?? Data()
         #endif
 
         let decodedStrokes = (try? JSONDecoder().decode([Stroke].self, from: strokesData)) ?? []
         let decodedImages = (try? JSONDecoder().decode([PlacedImage].self, from: imagesData)) ?? []
-        guard !decodedStrokes.isEmpty || !decodedImages.isEmpty else { return }
+        let decodedFills = (try? JSONDecoder().decode([FillShape].self, from: fillsData)) ?? []
+        guard !decodedStrokes.isEmpty || !decodedImages.isEmpty || !decodedFills.isEmpty else { return }
 
         saveState()
 
-        let pasteOrigin = lastCanvasTapLocation == .zero ? CGPoint(x: 100, y: 100) : lastCanvasTapLocation
         var minX = CGFloat.infinity, minY = CGFloat.infinity
         for s in decodedStrokes {
             for p in s.points {
@@ -1324,11 +1345,29 @@ final class DrawingModel {
             minX = min(minX, img.cgPosition.x)
             minY = min(minY, img.cgPosition.y)
         }
-        let dx = minX.isFinite ? pasteOrigin.x - minX : 0
-        let dy = minY.isFinite ? pasteOrigin.y - minY : 0
+        for fill in decodedFills {
+            let box = fill.boundingBox()
+            if !box.isNull {
+                minX = min(minX, box.minX)
+                minY = min(minY, box.minY)
+            }
+        }
+
+        // If the user hasn't tapped elsewhere since copying, offset slightly (+24, +24)
+        // so the pasted copy is clearly separated from the original selection.
+        let dx: CGFloat
+        let dy: CGFloat
+        if lastCanvasTapLocation == .zero || (!selectionBoundary.isEmpty && GeometryEngine.pointInPolygon(lastCanvasTapLocation, selectionBoundary)) {
+            dx = 24
+            dy = 24
+        } else {
+            dx = minX.isFinite ? lastCanvasTapLocation.x - minX : 0
+            dy = minY.isFinite ? lastCanvasTapLocation.y - minY : 0
+        }
 
         var pastedStrokeIds = Set<UUID>()
         var pastedImageIds = Set<UUID>()
+        var pastedFillIds = Set<UUID>()
 
         for s in decodedStrokes {
             let newPoints = s.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
@@ -1350,13 +1389,30 @@ final class DrawingModel {
             pastedImageIds.insert(newImg.id)
             placedImages.append(newImg)
         }
+        for fill in decodedFills {
+            let shiftedContours = fill.contours.map { loop in
+                loop.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+            }
+            let newFill = FillShape(
+                contours: shiftedContours,
+                color: fill.uiColor,
+                opacity: fill.opacity,
+                presetIndex: fill.presetIndex
+            )
+            pastedFillIds.insert(newFill.id)
+            fills.append(newFill)
+        }
+
+        // Replace selection exclusively with the newly pasted items so dragging moves ONLY the paste.
         selectedStrokeIds = pastedStrokeIds
         selectedImageIds = pastedImageIds
+        selectedFillIds = pastedFillIds
         if let boundary = try? JSONDecoder().decode([CGPoint].self, from: boundaryData), !boundary.isEmpty {
             selectionBoundary = boundary.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
         } else {
             selectionBoundary.removeAll()
         }
+        currentTool = .select
         spatialGrid.rebuild(with: strokes)
         updateUndoRedo()
         scheduleAutoSave()
@@ -1473,6 +1529,7 @@ final class DrawingModel {
             switch prior {
             case .pen: eraserSettings.eraseTarget = .pen
             case .sharpie: eraserSettings.eraseTarget = .sharpie
+            case .fill: eraserSettings.eraseTarget = .fill
             default: eraserSettings.eraseTarget = .all
             }
         }
@@ -1541,11 +1598,93 @@ final class DrawingModel {
         scheduleAutoSave()
     }
 
+    // MARK: - Scenes (Viewport Bookmarks)
+
+    @discardableResult
+    func addScene(name: String? = nil) -> CanvasScene {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = (trimmed?.isEmpty == false) ? trimmed! : "Scene \(scenes.count + 1)"
+        let scene = CanvasScene(
+            name: title,
+            center: currentViewportCenter,
+            scale: max(currentViewportScale, 0.1)
+        )
+        scenes.append(scene)
+        activeSceneId = scene.id
+        scheduleAutoSave()
+        return scene
+    }
+
+    func goToScene(_ scene: CanvasScene) {
+        activeSceneId = scene.id
+        pendingSceneNavigation = scene
+    }
+
+    func goToNextScene() {
+        guard !scenes.isEmpty else { return }
+        if let activeId = activeSceneId,
+           let idx = scenes.firstIndex(where: { $0.id == activeId }) {
+            let next = scenes[(idx + 1) % scenes.count]
+            goToScene(next)
+        } else {
+            goToScene(scenes[0])
+        }
+    }
+
+    func goToPreviousScene() {
+        guard !scenes.isEmpty else { return }
+        if let activeId = activeSceneId,
+           let idx = scenes.firstIndex(where: { $0.id == activeId }) {
+            let prev = scenes[(idx - 1 + scenes.count) % scenes.count]
+            goToScene(prev)
+        } else {
+            goToScene(scenes[scenes.count - 1])
+        }
+    }
+
+    func updateSceneToCurrentView(id: UUID) {
+        guard let idx = scenes.firstIndex(where: { $0.id == id }) else { return }
+        scenes[idx].centerX = Double(currentViewportCenter.x)
+        scenes[idx].centerY = Double(currentViewportCenter.y)
+        scenes[idx].scale = Double(max(currentViewportScale, 0.1))
+        activeSceneId = id
+        scheduleAutoSave()
+    }
+
+    func renameScene(id: UUID, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let idx = scenes.firstIndex(where: { $0.id == id }) else { return }
+        scenes[idx].name = trimmed
+        scheduleAutoSave()
+    }
+
+    func deleteScene(id: UUID) {
+        scenes.removeAll { $0.id == id }
+        if activeSceneId == id {
+            activeSceneId = nil
+        }
+        scheduleAutoSave()
+    }
+
+    func moveScene(id: UUID, direction: Int) {
+        guard let idx = scenes.firstIndex(where: { $0.id == id }) else { return }
+        let target = idx + direction
+        guard target >= 0 && target < scenes.count else { return }
+        let item = scenes.remove(at: idx)
+        scenes.insert(item, at: target)
+        scheduleAutoSave()
+    }
+
+    func moveScenes(fromOffsets source: IndexSet, toOffset destination: Int) {
+        scenes.move(fromOffsets: source, toOffset: destination)
+        scheduleAutoSave()
+    }
+
     // MARK: - Save / Load / Export
 
     /// Portable JSON `.wb` export payload (always embeds images for single-file sharing).
     func saveData() -> Data? {
-        let data = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
+        let data = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes)
         return try? JSONEncoder().encode(data)
     }
 
@@ -1556,6 +1695,8 @@ final class DrawingModel {
             strokes = save.strokes
             placedImages = save.placedImages
             fills = save.fills
+            scenes = save.scenes
+            activeSceneId = nil
             imageCache.removeAll()
             migratePresetIndices()
             spatialGrid.rebuild(with: strokes)

@@ -227,6 +227,24 @@ struct ToolSettingsView: View {
         return "arrow.left.and.right"
     }
 
+    private var eraseTargetIcon: String {
+        switch model.eraserSettings.eraseTarget {
+        case .all: return "square.stack.3d.up"
+        case .pen: return "pencil.tip"
+        case .sharpie: return "pencil"
+        case .fill: return "drop.fill"
+        }
+    }
+
+    private func cycleEraseTarget() {
+        let all = EraseTarget.allCases
+        if let idx = all.firstIndex(of: model.eraserSettings.eraseTarget) {
+            model.eraserSettings.eraseTarget = all[(idx + 1) % all.count]
+        } else {
+            model.eraserSettings.eraseTarget = .all
+        }
+    }
+
     private func cycleFillOpacity() {
         let options = model.fillSettings.opacityOptions
         guard !options.isEmpty else { return }
@@ -268,21 +286,18 @@ struct ToolSettingsView: View {
 
             Divider().frame(height: 24)
 
-            // Target picker: All / Pen / Sharpie
-            HStack(spacing: 4) {
-                ForEach(EraseTarget.allCases, id: \.self) { target in
-                    Button(action: { model.eraserSettings.eraseTarget = target }) {
-                        Text(target.rawValue)
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .frame(height: 32)
-                            .background(model.eraserSettings.eraseTarget == target ? Color.accentColor : Color.clear)
-                            .foregroundColor(model.eraserSettings.eraseTarget == target ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                    .buttonStyle(.plain)
-                }
+            // Single icon-only cycle button for Erase Target: All -> Pen -> Sharpie -> Fill
+            Button(action: cycleEraseTarget) {
+                Image(systemName: eraseTargetIcon)
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 32, height: 32)
+                    .background(model.eraserSettings.eraseTarget == .all ? Color.primary.opacity(0.08) : Color.accentColor)
+                    .foregroundColor(model.eraserSettings.eraseTarget == .all ? .primary : .white)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
             }
+            .buttonStyle(.plain)
+            .help("Erase Target: \(model.eraserSettings.eraseTarget.rawValue) (tap to cycle All / Pen / Sharpie / Fill)")
+            .pointingHand()
 
             Divider().frame(height: 24)
 

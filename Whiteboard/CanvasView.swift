@@ -74,6 +74,7 @@ struct CanvasView: UIViewRepresentable {
         let _ = model.selectionLasso.count
         let _ = model.selectedImageIds.count
         let _ = model.needsRecenter
+        let _ = model.pendingSceneNavigation?.id
         uiView.refresh()
     }
 }
@@ -376,6 +377,7 @@ class DrawingCanvasView: UIView {
             gridView.offset = offset
             committedLayer.offset = offset
             liveOverlay.offset = offset
+            reportViewport()
         }
     }
     private var scale: CGFloat = 1.0 {
@@ -383,7 +385,30 @@ class DrawingCanvasView: UIView {
             gridView.scale = scale
             committedLayer.scale = scale
             liveOverlay.scale = scale
+            reportViewport()
         }
+    }
+
+    private var sceneAnimLink: CADisplayLink?
+    private var sceneAnimStart: CFTimeInterval = 0
+    private var sceneAnimFromOffset: CGSize = .zero
+    private var sceneAnimToOffset: CGSize = .zero
+    private var sceneAnimFromScale: CGFloat = 1.0
+    private var sceneAnimToScale: CGFloat = 1.0
+
+    private func reportViewport() {
+        guard let model, bounds.width > 0, bounds.height > 0 else { return }
+        let safeScale = max(scale, 0.01)
+        model.currentViewportCenter = CGPoint(
+            x: (bounds.width / 2 - offset.width) / safeScale,
+            y: (bounds.height / 2 - offset.height) / safeScale
+        )
+        model.currentViewportScale = safeScale
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        reportViewport()
     }
 
     private let gridView = CanvasGridView()
@@ -436,12 +461,14 @@ class DrawingCanvasView: UIView {
 
     deinit {
         stopDashAnimation()
+        stopSceneAnimation()
     }
 
     override func willMove(toWindow newWindow: UIWindow?) {
         super.willMove(toWindow: newWindow)
         if newWindow == nil {
             stopDashAnimation()
+            stopSceneAnimation()
         } else {
             syncDashAnimationState()
         }
@@ -569,6 +596,10 @@ class DrawingCanvasView: UIView {
             centerOnContent()
             model.needsRecenter = false
         }
+        if let model = model, let targetScene = model.pendingSceneNavigation {
+            model.pendingSceneNavigation = nil
+            animateToScene(targetScene)
+        }
         committedLayer.model = model
         liveOverlay.model = model
         gridView.model = model
@@ -579,8 +610,55 @@ class DrawingCanvasView: UIView {
     }
 
     private func centerOnContent() {
+        stopSceneAnimation()
         offset = .zero
         scale = 1.0
+    }
+
+    private func animateToScene(_ scene: CanvasScene) {
+        stopSceneAnimation()
+        let targetScale = min(max(scene.cgScale, 0.3), 5.0)
+        let targetOffset = CGSize(
+            width: bounds.width / 2 - scene.center.x * targetScale,
+            height: bounds.height / 2 - scene.center.y * targetScale
+        )
+        guard window != nil else {
+            scale = targetScale
+            offset = targetOffset
+            return
+        }
+        sceneAnimFromOffset = offset
+        sceneAnimToOffset = targetOffset
+        sceneAnimFromScale = scale
+        sceneAnimToScale = targetScale
+        sceneAnimStart = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(stepSceneAnimation(_:)))
+        link.add(to: .main, forMode: .common)
+        sceneAnimLink = link
+    }
+
+    private func stopSceneAnimation() {
+        sceneAnimLink?.invalidate()
+        sceneAnimLink = nil
+    }
+
+    @objc private func stepSceneAnimation(_ link: CADisplayLink) {
+        let duration: CFTimeInterval = 0.32
+        let rawT = min(max((CACurrentMediaTime() - sceneAnimStart) / duration, 0), 1)
+        // Smooth cubic ease-in-out
+        let t = rawT < 0.5 ? 4 * rawT * rawT * rawT : 1 - pow(-2 * rawT + 2, 3) / 2
+        let f = CGFloat(t)
+        scale = sceneAnimFromScale + (sceneAnimToScale - sceneAnimFromScale) * f
+        offset = CGSize(
+            width: sceneAnimFromOffset.width + (sceneAnimToOffset.width - sceneAnimFromOffset.width) * f,
+            height: sceneAnimFromOffset.height + (sceneAnimToOffset.height - sceneAnimFromOffset.height) * f
+        )
+        gridView.setNeedsDisplay()
+        committedLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
+        if rawT >= 1 {
+            stopSceneAnimation()
+        }
     }
 
     // MARK: - Touch Handling
@@ -612,7 +690,7 @@ class DrawingCanvasView: UIView {
                 liveOverlay.setNeedsDisplay()
                 return
             }
-            if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectionBoundary.isEmpty {
+            if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
                 if model.hitTestResizeHandle(cp) != nil {
                     let now = Date()
                     if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
@@ -644,6 +722,7 @@ class DrawingCanvasView: UIView {
                 } else {
                     model.selectedStrokeIds.removeAll()
                     model.selectedImageIds.removeAll()
+                    model.selectedFillIds.removeAll()
                     model.selectionBoundary.removeAll()
                     syncDashAnimationState()
                     liveOverlay.setNeedsDisplay()
@@ -1146,6 +1225,7 @@ struct CanvasView: View {
     @State private var keyMonitor: Any?
     @State private var scrollMonitor: Any?
     @State private var changeModeMonitor: Any?
+    @State private var sceneAnimTimer: Timer?
     @State private var viewSize: CGSize?
     @State private var pathCache = StrokePathCache()
     @State private var incrementalPath = IncrementalStrokePath()
@@ -1198,16 +1278,28 @@ struct CanvasView: View {
             )
         }
         .overlay(DrawingInputOverlay(handler: pointerHandler, currentTool: model.currentTool))
+        .onChange(of: offset) { _, _ in reportMacViewport() }
+        .onChange(of: scale) { _, _ in reportMacViewport() }
+        .onChange(of: viewSize) { _, _ in reportMacViewport() }
         .onChange(of: model.needsRecenter) { _, needs in
             if needs, let size = viewSize {
                 centerOnContent(canvasSize: size)
                 model.needsRecenter = false
             }
         }
+        .onChange(of: model.pendingSceneNavigation) { _, scene in
+            if let scene {
+                model.pendingSceneNavigation = nil
+                animateMacToScene(scene)
+            }
+        }
         .onAppear {
             installMonitors()
+            reportMacViewport()
         }
         .onDisappear {
+            sceneAnimTimer?.invalidate()
+            sceneAnimTimer = nil
             removeMonitors()
         }
     }
@@ -1281,11 +1373,34 @@ struct CanvasView: View {
                     switch prior {
                     case .pen: model.eraserSettings.eraseTarget = .pen
                     case .sharpie: model.eraserSettings.eraseTarget = .sharpie
+                    case .fill: model.eraserSettings.eraseTarget = .fill
                     default: model.eraserSettings.eraseTarget = .all
                     }
                     return nil
+                case "x" where hasShift:
+                    model.addScene()
+                    return nil
+                case "," where !hasShift:
+                    model.goToPreviousScene()
+                    return nil
+                case "." where !hasShift:
+                    model.goToNextScene()
+                    return nil
+                case "0":
+                    if model.currentTool == .eraser {
+                        model.eraserSettings.eraseTarget = .all
+                        return nil
+                    }
                 case "1", "2", "3", "4", "5", "6", "7", "8":
                     if let c = char, let digit = Int(c) {
+                        if model.currentTool == .eraser {
+                            switch digit {
+                            case 1: model.eraserSettings.eraseTarget = .pen; return nil
+                            case 2: model.eraserSettings.eraseTarget = .sharpie; return nil
+                            case 3: model.eraserSettings.eraseTarget = .fill; return nil
+                            default: break
+                            }
+                        }
                         let idx = digit - 1
                         switch model.currentTool {
                         case .pen where idx < model.penPresets.count:
@@ -1347,8 +1462,52 @@ struct CanvasView: View {
     }
 
     private func centerOnContent(canvasSize: CGSize) {
+        sceneAnimTimer?.invalidate()
+        sceneAnimTimer = nil
         offset = .zero
         scale = 1.0
+        reportMacViewport()
+    }
+
+    private func reportMacViewport() {
+        guard let size = viewSize, size.width > 0, size.height > 0 else { return }
+        let safeScale = max(scale, 0.01)
+        model.currentViewportCenter = CGPoint(
+            x: (size.width / 2 - offset.width) / safeScale,
+            y: (size.height / 2 - offset.height) / safeScale
+        )
+        model.currentViewportScale = safeScale
+    }
+
+    private func animateMacToScene(_ scene: CanvasScene) {
+        sceneAnimTimer?.invalidate()
+        sceneAnimTimer = nil
+        let size = viewSize ?? CGSize(width: 1000, height: 700)
+        let fromOffset = offset
+        let fromScale = scale
+        let toScale = min(max(scene.cgScale, 0.3), 5.0)
+        let toOffset = CGSize(
+            width: size.width / 2 - scene.center.x * toScale,
+            height: size.height / 2 - scene.center.y * toScale
+        )
+        let startTime = CACurrentMediaTime()
+        let duration: CFTimeInterval = 0.32
+        sceneAnimTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { timer in
+            let rawT = min(max((CACurrentMediaTime() - startTime) / duration, 0), 1)
+            let t = rawT < 0.5 ? 4 * rawT * rawT * rawT : 1 - pow(-2 * rawT + 2, 3) / 2
+            let f = CGFloat(t)
+            MainActor.assumeIsolated {
+                scale = fromScale + (toScale - fromScale) * f
+                offset = CGSize(
+                    width: fromOffset.width + (toOffset.width - fromOffset.width) * f,
+                    height: fromOffset.height + (toOffset.height - fromOffset.height) * f
+                )
+                if rawT >= 1 {
+                    timer.invalidate()
+                    sceneAnimTimer = nil
+                }
+            }
+        }
     }
 }
 
@@ -1585,7 +1744,7 @@ struct CanvasPointerHandler {
                 let delta = CGSize(width: canvas.x - model.lastMovePoint.x, height: canvas.y - model.lastMovePoint.y)
                 model.moveSelected(by: delta)
                 model.lastMovePoint = canvas
-            } else if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectionBoundary.isEmpty {
+            } else if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
                 if model.hitTestResizeHandle(canvas) != nil {
                     model.beginMove(at: canvas)
                     return
@@ -1604,6 +1763,7 @@ struct CanvasPointerHandler {
                 } else {
                     model.selectedStrokeIds.removeAll()
                     model.selectedImageIds.removeAll()
+                    model.selectedFillIds.removeAll()
                     model.selectionBoundary.removeAll()
                 }
             } else if model.selectionLasso.isEmpty {

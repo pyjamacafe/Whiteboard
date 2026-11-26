@@ -34,13 +34,16 @@ struct HelpView: View {
                                      detail: "Bold two-pass glow/core stroke with its own independent color presets.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "drop.fill", color: .teal, title: "Fill", key: "F",
-                                     detail: "Tap inside any closed shape to fill it cleanly without bleeding. Adjust opacity, cycle gap-closing (Strict / Auto / Wide), and toggle Replace vs. Blend mode.")
+                                     detail: "Tap inside any closed shape to fill it cleanly without bleeding. Tap the swatch to cycle opacity (25%–100%), or use the icons to cycle gap-closing (Strict / Auto / Wide) and Replace vs. Blend mode.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "eraser", color: .pink, title: "Eraser", key: "E",
-                                     detail: "Switch between Full Stroke and Partial erase, or target All, Pen, or Sharpie only.")
+                                     detail: "Switch between Full Stroke and Partial erase, tap the layer icon (or press 0–3) to target All, Pen, Sharpie, or Fill.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "cursorarrow.click", color: .purple, title: "Select", key: "⇧S",
                                      detail: "Draw a lasso to select strokes, fills, and images. Drag to move, double-tap for Copy/Paste/Delete.")
+                        Divider().opacity(0.4)
+                        ToolGuideRow(icon: "rectangle.stack", color: .indigo, title: "Scenes", key: "⇧X",
+                                     detail: "Bookmark regions of your tissue to jump between views like slides. Use ‹ / › (or , / .) to navigate; swipe left to delete, swipe right to rename, or hold and drag to reorder.")
                     }
 
                     // Keyboard Shortcuts
@@ -48,6 +51,9 @@ struct HelpView: View {
                         VStack(alignment: .leading, spacing: 10) {
                             shortcutSubgroup("Canvas & Colors", rows: [
                                 ("Color preset 1–8", "1 – 8"),
+                                ("Eraser target (All / Pen / Sharpie / Fill)", "E, 0–3"),
+                                ("Add scene", "⇧X"),
+                                ("Previous / Next scene", ", / ."),
                                 ("Toggle toolbar", "Tab"),
                                 ("Undo / Redo", "⌘Z / ⌘⇧Z"),
                                 ("Copy / Paste", "⌘C / ⌘V"),

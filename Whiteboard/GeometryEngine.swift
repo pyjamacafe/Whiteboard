@@ -429,7 +429,7 @@ nonisolated enum GeometryEngine {
         target: EraseTarget,
         spatialGrid: SpatialHashGrid? = nil
     ) -> [Stroke] {
-        guard !eraser.points.isEmpty else { return strokes }
+        guard !eraser.points.isEmpty, target != .fill else { return strokes }
 
         let radius = max(eraser.lineWidth / 2, 0.5)
         let radiusSq = radius * radius
@@ -448,6 +448,7 @@ nonisolated enum GeometryEngine {
             case .all: return true
             case .pen: return !stroke.isSharpie
             case .sharpie: return stroke.isSharpie
+            case .fill: return false
             }
         }
 

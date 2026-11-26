@@ -536,11 +536,11 @@ final class WhiteboardTests: XCTestCase {
         model.toggleEraserFromPencil()
         XCTAssertEqual(model.currentTool, .sharpie)
 
-        // Fill -> Eraser (targets .all) -> Fill
+        // Fill -> Eraser (targets .fill) -> Fill
         model.selectTool(.fill)
         model.toggleEraserFromPencil()
         XCTAssertEqual(model.currentTool, .eraser)
-        XCTAssertEqual(model.eraserSettings.eraseTarget, .all)
+        XCTAssertEqual(model.eraserSettings.eraseTarget, .fill)
         model.toggleEraserFromPencil()
         XCTAssertEqual(model.currentTool, .fill)
 
@@ -558,5 +558,115 @@ final class WhiteboardTests: XCTestCase {
         model.selectTool(.eraser)
         model.cycleToolFromPencil()
         XCTAssertEqual(model.currentTool, .pen)
+    }
+
+    func testScenesCRUDNavigationAndPersistence() throws {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.createBoard(name: "Scenes Test")
+        let boardId = try XCTUnwrap(model.currentBoardId)
+
+        model.currentViewportCenter = CGPoint(x: 100, y: 200)
+        model.currentViewportScale = 1.5
+        let s1 = model.addScene()
+        XCTAssertEqual(s1.name, "Scene 1")
+        XCTAssertEqual(s1.center.x, 100, accuracy: 0.01)
+        XCTAssertEqual(s1.cgScale, 1.5, accuracy: 0.01)
+
+        model.currentViewportCenter = CGPoint(x: 800, y: -300)
+        model.currentViewportScale = 0.75
+        let s2 = model.addScene(name: "Architecture")
+        XCTAssertEqual(s2.name, "Architecture")
+        XCTAssertEqual(model.scenes.count, 2)
+        XCTAssertEqual(model.activeSceneId, s2.id)
+
+        // Navigation wraps around cleanly
+        model.goToNextScene()
+        XCTAssertEqual(model.activeSceneId, s1.id)
+        XCTAssertEqual(model.pendingSceneNavigation?.id, s1.id)
+        model.goToPreviousScene()
+        XCTAssertEqual(model.activeSceneId, s2.id)
+
+        // Rename, update viewport, and reorder
+        model.renameScene(id: s1.id, to: "Intro")
+        XCTAssertEqual(model.scenes[0].name, "Intro")
+        model.currentViewportCenter = CGPoint(x: 42, y: 84)
+        model.updateSceneToCurrentView(id: s1.id)
+        XCTAssertEqual(model.scenes[0].center.x, 42, accuracy: 0.01)
+        model.moveScene(id: s2.id, direction: -1)
+        XCTAssertEqual(model.scenes[0].id, s2.id)
+        model.moveScenes(fromOffsets: IndexSet(integer: 1), toOffset: 0)
+        XCTAssertEqual(model.scenes[0].id, s1.id)
+        model.moveScenes(fromOffsets: IndexSet(integer: 1), toOffset: 0)
+        XCTAssertEqual(model.scenes[0].id, s2.id)
+
+        // Persist and reload from disk
+        model.flushAutoSave()
+        let loaded = try store.loadBoard(id: boardId)
+        XCTAssertEqual(loaded.scenes.count, 2)
+        XCTAssertEqual(loaded.scenes[0].name, "Architecture")
+        XCTAssertEqual(loaded.scenes[1].name, "Intro")
+
+        // Delete
+        model.deleteScene(id: s2.id)
+        XCTAssertEqual(model.scenes.count, 1)
+    }
+
+    func testEraserFillTargetErasesOnlyFillsAndNotStrokes() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        let rectEdges = [
+            Stroke(points: [CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 0)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+            Stroke(points: [CGPoint(x: 100, y: 0), CGPoint(x: 100, y: 100)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+            Stroke(points: [CGPoint(x: 100, y: 100), CGPoint(x: 0, y: 100)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+            Stroke(points: [CGPoint(x: 0, y: 100), CGPoint(x: 0, y: 0)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+        ]
+        model.strokes = rectEdges
+        XCTAssertTrue(model.floodFill(at: CGPoint(x: 50, y: 50)))
+        XCTAssertEqual(model.fills.count, 1)
+
+        // Erase across both the fill and the border strokes with target = .fill
+        model.eraserSettings.eraseTarget = .fill
+        model.beginStroke(at: CGPoint(x: 0, y: 50), isEraser: true)
+        model.addPoint(CGPoint(x: 50, y: 50))
+        model.addPoint(CGPoint(x: 100, y: 50))
+        model.endStroke()
+
+        XCTAssertTrue(model.fills.isEmpty, "Fill target should erase the touched fill")
+        XCTAssertEqual(model.strokes.count, 4, "Fill target must leave pen/sharpie strokes untouched")
+    }
+
+    func testCopyPasteLassoMovesOnlyPastedItems() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        let origStroke = Stroke(points: [CGPoint(x: 10, y: 10), CGPoint(x: 40, y: 40)], color: .black, lineWidth: 2, isEraser: false)
+        let origFill = FillShape(contours: [[CGPoint(x: 10, y: 10), CGPoint(x: 40, y: 10), CGPoint(x: 40, y: 40), CGPoint(x: 10, y: 40)]], color: .blue)
+        model.strokes = [origStroke]
+        model.fills = [origFill]
+        model.selectedStrokeIds = [origStroke.id]
+        model.selectedFillIds = [origFill.id]
+        model.selectionBoundary = [CGPoint(x: 0, y: 0), CGPoint(x: 50, y: 0), CGPoint(x: 50, y: 50), CGPoint(x: 0, y: 50)]
+        model.lastCanvasTapLocation = CGPoint(x: 25, y: 25)
+
+        model.copySelected()
+        model.paste()
+
+        XCTAssertEqual(model.strokes.count, 2)
+        XCTAssertEqual(model.fills.count, 2)
+        // Original IDs must NOT remain selected
+        XCTAssertFalse(model.selectedStrokeIds.contains(origStroke.id))
+        XCTAssertFalse(model.selectedFillIds.contains(origFill.id))
+
+        // Dragging the pasted selection must move ONLY the pasted copy, leaving originals at (10, 10)
+        model.beginMove(at: CGPoint(x: 40, y: 40))
+        model.moveSelected(by: CGSize(width: 200, height: 100))
+        model.commitMove()
+
+        let stillOrigStroke = model.strokes.first(where: { $0.id == origStroke.id })!
+        let stillOrigFill = model.fills.first(where: { $0.id == origFill.id })!
+        XCTAssertEqual(stillOrigStroke.points[0].x, 10, accuracy: 0.01)
+        XCTAssertEqual(stillOrigFill.contours[0][0].x, 10, accuracy: 0.01)
+
+        let pastedStroke = model.strokes.first(where: { $0.id != origStroke.id })!
+        let pastedFill = model.fills.first(where: { $0.id != origFill.id })!
+        XCTAssertEqual(pastedStroke.points[0].x, 234, accuracy: 0.01) // 10 + 24 + 200
+        XCTAssertEqual(pastedFill.contours[0][0].x, 234, accuracy: 0.01)
     }
 }
