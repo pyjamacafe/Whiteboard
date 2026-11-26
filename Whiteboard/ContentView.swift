@@ -45,8 +45,21 @@ struct ContentView: View {
                     }
                     .allowsHitTesting(false)
 
+                    #if os(iOS)
                     CanvasView(model: model, onBeginDraw: { showSettings = false })
                         .ignoresSafeArea()
+                        .onPencilDoubleTap { _ in
+                            model.toggleEraserFromPencil()
+                        }
+                        .onPencilSqueeze { phase in
+                            if case .ended = phase, !model.showAbout {
+                                model.cycleToolFromPencil()
+                            }
+                        }
+                    #else
+                    CanvasView(model: model, onBeginDraw: { showSettings = false })
+                        .ignoresSafeArea()
+                    #endif
 
                     VStack(spacing: 0) {
                         #if compiler(>=6.2)

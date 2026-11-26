@@ -1124,6 +1124,7 @@ struct CanvasView: View {
 
     @State private var keyMonitor: Any?
     @State private var scrollMonitor: Any?
+    @State private var changeModeMonitor: Any?
     @State private var viewSize: CGSize?
     @State private var pathCache = StrokePathCache()
     @State private var incrementalPath = IncrementalStrokePath()
@@ -1171,7 +1172,7 @@ struct CanvasView: View {
                 scale: scale
             )
         }
-        .overlay(DrawingInputOverlay(handler: pointerHandler))
+        .overlay(DrawingInputOverlay(handler: pointerHandler, currentTool: model.currentTool))
         .onChange(of: model.needsRecenter) { _, needs in
             if needs, let size = viewSize {
                 centerOnContent(canvasSize: size)
@@ -1296,13 +1297,28 @@ struct CanvasView: View {
             offset.height += event.scrollingDeltaY
             return event
         }
+
+        // Apple Pencil (2nd gen / Pro) double-tap over Sidecar arrives as `.changeMode`.
+        // Don't require `NSApp.keyWindow != nil` since Sidecar focus sync can leave keyWindow
+        // momentarily nil while the canvas is still the active window.
+        changeModeMonitor = NSEvent.addLocalMonitorForEvents(matching: .changeMode) { event in
+            let activeWindow = event.window ?? NSApp.keyWindow ?? NSApp.mainWindow
+            if activeWindow?.attachedSheet == nil,
+               !model.showWelcome,
+               !model.showAbout {
+                model.toggleEraserFromPencil()
+            }
+            return nil
+        }
     }
 
     private func removeMonitors() {
         if let m = keyMonitor { NSEvent.removeMonitor(m) }
         if let m = scrollMonitor { NSEvent.removeMonitor(m) }
+        if let m = changeModeMonitor { NSEvent.removeMonitor(m) }
         keyMonitor = nil
         scrollMonitor = nil
+        changeModeMonitor = nil
     }
 
     private func centerOnContent(canvasSize: CGSize) {
@@ -1315,6 +1331,7 @@ struct CanvasView: View {
 
 struct DrawingInputOverlay: NSViewRepresentable {
     let handler: CanvasPointerHandler
+    let currentTool: Tool
 
     static var debugInputLogging = false
 
@@ -1326,10 +1343,12 @@ struct DrawingInputOverlay: NSViewRepresentable {
 
     func updateNSView(_ nsView: InputView, context: Context) {
         nsView.handler = handler
+        nsView.refreshHoverDot()
     }
 
     final class InputView: NSView {
         var handler: CanvasPointerHandler?
+        private var lastHoverPoint: CGPoint?
 
         /// GPU-composited hover dot — moving the mouse updates this CALayer directly
         /// with ZERO SwiftUI state mutations or Canvas redraws!
@@ -1365,7 +1384,13 @@ struct DrawingInputOverlay: NSViewRepresentable {
             ))
         }
 
+        func refreshHoverDot() {
+            guard let point = lastHoverPoint else { return }
+            updateHoverDot(at: point)
+        }
+
         private func updateHoverDot(at point: CGPoint?) {
+            lastHoverPoint = point
             guard let point, let model = handler?.model else {
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)

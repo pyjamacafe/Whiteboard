@@ -1,0 +1,710 @@
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index e99dd34..0957943 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -40,6 +40,7 @@ jobs:
+             MACOSX_DEPLOYMENT_TARGET=27.0 \
+             CODE_SIGN_IDENTITY="-" \
+             CODE_SIGNING_REQUIRED=NO \
++            CODE_SIGN_ENTITLEMENTS="" \
+             clean build
+ 
+       - name: Package macOS DMG, ZIP, and checksums
+diff --git a/Whiteboard.xcodeproj/project.pbxproj b/Whiteboard.xcodeproj/project.pbxproj
+index 747f394..11ea2df 100644
+--- a/Whiteboard.xcodeproj/project.pbxproj
++++ b/Whiteboard.xcodeproj/project.pbxproj
+@@ -330,8 +330,8 @@
+ 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+ 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+ 				CLANG_ENABLE_MODULES = YES;
++				CODE_SIGN_ENTITLEMENTS = Whiteboard/Whiteboard.entitlements;
+ 				CODE_SIGN_IDENTITY = "Apple Development";
+-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+ 				CODE_SIGN_STYLE = Automatic;
+ 				CURRENT_PROJECT_VERSION = 2;
+ 				DEAD_CODE_STRIPPING = YES;
+@@ -399,11 +399,12 @@
+ 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+ 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+ 				CLANG_ENABLE_MODULES = YES;
++				CODE_SIGN_ENTITLEMENTS = Whiteboard/Whiteboard.entitlements;
+ 				CODE_SIGN_IDENTITY = "Apple Development";
+-				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+-				CODE_SIGN_STYLE = Automatic;
++				CODE_SIGN_STYLE = Manual;
+ 				CURRENT_PROJECT_VERSION = 2;
+ 				DEAD_CODE_STRIPPING = YES;
++				DEVELOPMENT_TEAM = "";
+ 				ENABLE_APP_SANDBOX = YES;
+ 				ENABLE_FILE_ACCESS_DOWNLOADS_FOLDER = readwrite;
+ 				ENABLE_FILE_ACCESS_MOVIES_FOLDER = readwrite;
+diff --git a/Whiteboard/BoardStore.swift b/Whiteboard/BoardStore.swift
+index d3e0387..fb6194c 100644
+--- a/Whiteboard/BoardStore.swift
++++ b/Whiteboard/BoardStore.swift
+@@ -74,6 +74,44 @@ nonisolated struct BoardFolder: Codable, Identifiable, Equatable, Sendable {
+ nonisolated struct BoardIndex: Codable, Equatable, Sendable {
+     var boards: [BoardMeta]
+     var folders: [BoardFolder]
++
++    /// Conflict-safe merge of two indexes (e.g. local + remote iCloud):
++    /// - Boards are unioned by `id`, keeping whichever entry has the newer `modified` timestamp.
++    /// - Folders are unioned by `id`, combining `boardIds` without duplicates.
++    static func merged(_ a: BoardIndex, _ b: BoardIndex) -> BoardIndex {
++        var boardMap: [String: BoardMeta] = [:]
++        for board in a.boards {
++            boardMap[board.id] = board
++        }
++        for board in b.boards {
++            if let existing = boardMap[board.id] {
++                if board.modified > existing.modified {
++                    boardMap[board.id] = board
++                }
++            } else {
++                boardMap[board.id] = board
++            }
++        }
++        let mergedBoards = boardMap.values.sorted { $0.modified > $1.modified }
++
++        var folderOrder: [String] = []
++        var folderMap: [String: BoardFolder] = [:]
++        for folder in a.folders + b.folders {
++            if var existing = folderMap[folder.id] {
++                var seen = Set(existing.boardIds)
++                for bid in folder.boardIds where !seen.contains(bid) {
++                    existing.boardIds.append(bid)
++                    seen.insert(bid)
++                }
++                folderMap[folder.id] = existing
++            } else {
++                folderOrder.append(folder.id)
++                folderMap[folder.id] = folder
++            }
++        }
++        let mergedFolders = folderOrder.compactMap { folderMap[$0] }
++        return BoardIndex(boards: mergedBoards, folders: mergedFolders)
++    }
+ }
+ 
+ nonisolated struct TrashEntry: Codable, Identifiable, Equatable, Sendable {
+@@ -133,18 +171,43 @@ enum BoardStoreError: LocalizedError {
+ /// Explicitly `nonisolated` so background `ioQueue` and `thumbnailQueue` work
+ /// never contends with or deadlocks against `@MainActor`.
+ nonisolated final class BoardStore: @unchecked Sendable {
+-    let baseDirectory: URL
++    private let stateLock = NSLock()
++    private var _activeDirectory: URL
++    private var _isUsingCloud: Bool = false
++    /// Always local — used for disk thumbnails (never synced to iCloud) and as the
++    /// initial/fallback directory before iCloud resolves or when iCloud is unavailable.
++    let localDirectory: URL
++    /// False when an explicit `baseDirectory` is injected (e.g. unit tests).
++    let allowsCloudSync: Bool
++
+     private let fileManager: FileManager
+     private let ioQueue = DispatchQueue(label: "com.whiteboard.boardstore.io", qos: .utility)
+ 
++    var baseDirectory: URL {
++        stateLock.lock()
++        defer { stateLock.unlock() }
++        return _activeDirectory
++    }
++
++    var isUsingCloud: Bool {
++        stateLock.lock()
++        defer { stateLock.unlock() }
++        return _isUsingCloud
++    }
++
+     init(baseDirectory: URL? = nil, fileManager: FileManager = .default) {
+         self.fileManager = fileManager
+         if let baseDirectory {
+-            self.baseDirectory = baseDirectory
++            self.localDirectory = baseDirectory
++            self._activeDirectory = baseDirectory
++            self.allowsCloudSync = false
+         } else {
+-            self.baseDirectory = Self.defaultBoardsDirectory(fileManager: fileManager)
++            let local = Self.defaultBoardsDirectory(fileManager: fileManager)
++            self.localDirectory = local
++            self._activeDirectory = local
++            self.allowsCloudSync = true
+         }
+-        ensureDirectoryExists(self.baseDirectory)
++        ensureDirectoryExists(self.localDirectory)
+     }
+ 
+     static func defaultBoardsDirectory(fileManager: FileManager = .default) -> URL {
+@@ -158,11 +221,138 @@ nonisolated final class BoardStore: @unchecked Sendable {
+         return root.appendingPathComponent("com.whiteboard.boards", isDirectory: true)
+     }
+ 
++    /// Resolves the app's native iCloud Ubiquity container off the main thread,
++    /// migrates any existing local boards/assets into iCloud, and switches `baseDirectory`
++    /// to `<container>/Documents/Boards`. Falls back cleanly to local storage when
++    /// signed out of iCloud or running an ad-hoc build without iCloud entitlements.
++    func resolveCloudContainerAsync(completion: @escaping @MainActor @Sendable (Bool) -> Void) {
++        guard allowsCloudSync else {
++            Task { @MainActor in completion(false) }
++            return
++        }
++        ioQueue.async { [weak self] in
++            guard let self else { return }
++            guard self.fileManager.ubiquityIdentityToken != nil,
++                  let containerURL = self.fileManager.url(forUbiquityContainerIdentifier: nil) else {
++                Task { @MainActor in completion(false) }
++                return
++            }
++
++            let cloudBoardsDir = containerURL
++                .appendingPathComponent("Documents", isDirectory: true)
++                .appendingPathComponent("Boards", isDirectory: true)
++
++            self.migrateLocalToCloud(cloudDirectory: cloudBoardsDir)
++            Task { @MainActor in completion(true) }
++        }
++    }
++
++    /// Migrates local boards, external image assets, and merges `boards.json` into
++    /// `cloudDirectory`, then activates `cloudDirectory` as the live `baseDirectory`.
++    /// Thumbnails remain in `localDirectory/.thumbs`.
++    func migrateLocalToCloud(cloudDirectory: URL) {
++        ensureDirectoryExists(cloudDirectory)
++        let cloudAssets = cloudDirectory.appendingPathComponent(".assets", isDirectory: true)
++        let localAssets = localDirectory.appendingPathComponent(".assets", isDirectory: true)
++
++        // 1. Copy external image assets that don't yet exist in cloud
++        if let assetFiles = try? fileManager.contentsOfDirectory(at: localAssets, includingPropertiesForKeys: nil),
++           !assetFiles.isEmpty {
++            ensureDirectoryExists(cloudAssets)
++            for src in assetFiles where src.pathExtension == "img" {
++                let dst = cloudAssets.appendingPathComponent(src.lastPathComponent)
++                if !fileManager.fileExists(atPath: dst.path) {
++                    if let data = try? Data(contentsOf: src) {
++                        try? coordinatedWrite(data: data, to: dst, useCoordination: true)
++                    }
++                }
++            }
++        }
++
++        // 2. Copy local `.wb` board files that don't yet exist in cloud (or are newer locally)
++        if let localFiles = try? fileManager.contentsOfDirectory(at: localDirectory, includingPropertiesForKeys: [.contentModificationDateKey]) {
++            for src in localFiles where src.pathExtension == "wb" {
++                let dst = cloudDirectory.appendingPathComponent(src.lastPathComponent)
++                let shouldCopy: Bool
++                if !fileManager.fileExists(atPath: dst.path) {
++                    shouldCopy = true
++                } else {
++                    let localMod = (try? src.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
++                    let cloudMod = (try? dst.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
++                    shouldCopy = localMod > cloudMod
++                }
++                if shouldCopy, let data = try? Data(contentsOf: src) {
++                    try? coordinatedWrite(data: data, to: dst, useCoordination: true)
++                }
++            }
++        }
++
++        // 3. Merge local `boards.json` into cloud `boards.json`
++        let localIndexURL = localDirectory.appendingPathComponent("boards.json")
++        let cloudIndexURL = cloudDirectory.appendingPathComponent("boards.json")
++        let localIndex = (try? Data(contentsOf: localIndexURL)).flatMap { try? JSONDecoder().decode(BoardIndex.self, from: $0) }
++        let cloudIndex = (try? coordinatedRead(at: cloudIndexURL, useCoordination: true)).flatMap { try? JSONDecoder().decode(BoardIndex.self, from: $0) }
++
++        if let localIndex {
++            let merged = BoardIndex.merged(localIndex, cloudIndex ?? BoardIndex(boards: [], folders: []))
++            if let encoded = try? JSONEncoder().encode(merged) {
++                try? coordinatedWrite(data: encoded, to: cloudIndexURL, useCoordination: true)
++            }
++        }
++
++        stateLock.lock()
++        _activeDirectory = cloudDirectory
++        _isUsingCloud = true
++        stateLock.unlock()
++    }
++
+     var indexURL: URL { baseDirectory.appendingPathComponent("boards.json") }
+     var trashDirectory: URL { baseDirectory.appendingPathComponent(".trash", isDirectory: true) }
+     var trashIndexURL: URL { trashDirectory.appendingPathComponent("trash_index.json") }
+     var assetsDirectory: URL { baseDirectory.appendingPathComponent(".assets", isDirectory: true) }
+-    var thumbsDirectory: URL { baseDirectory.appendingPathComponent(".thumbs", isDirectory: true) }
++    /// Disk thumbnail cache always stays local so generated PNGs are never uploaded to iCloud.
++    var thumbsDirectory: URL { localDirectory.appendingPathComponent(".thumbs", isDirectory: true) }
++
++    // MARK: - File Coordination
++
++    private func coordinatedRead(at url: URL, useCoordination: Bool? = nil) throws -> Data {
++        let coordinate = useCoordination ?? isUsingCloud
++        guard coordinate else {
++            return try Data(contentsOf: url)
++        }
++        var coordinatorError: NSError?
++        var readResult: Result<Data, Error>?
++        let coordinator = NSFileCoordinator(filePresenter: nil)
++        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinatorError) { coordinatedURL in
++            readResult = Result { try Data(contentsOf: coordinatedURL) }
++        }
++        if let coordinatorError { throw coordinatorError }
++        switch readResult {
++        case .success(let data): return data
++        case .failure(let error): throw error
++        case .none: throw BoardStoreError.ioFailure("Coordinated read failed", CocoaError(.fileReadUnknown))
++        }
++    }
++
++    private func coordinatedWrite(data: Data, to url: URL, useCoordination: Bool? = nil) throws {
++        let coordinate = useCoordination ?? isUsingCloud
++        guard coordinate else {
++            try data.write(to: url, options: .atomic)
++            return
++        }
++        var coordinatorError: NSError?
++        var writeError: Error?
++        let coordinator = NSFileCoordinator(filePresenter: nil)
++        coordinator.coordinate(writingItemAt: url, options: .forReplacing, error: &coordinatorError) { coordinatedURL in
++            do {
++                try data.write(to: coordinatedURL, options: .atomic)
++            } catch {
++                writeError = error
++            }
++        }
++        if let coordinatorError { throw coordinatorError }
++        if let writeError { throw writeError }
++    }
+ 
+     func boardURL(for id: String) -> URL {
+         baseDirectory.appendingPathComponent("\(id).wb")
+@@ -185,11 +375,12 @@ nonisolated final class BoardStore: @unchecked Sendable {
+     // MARK: - Index
+ 
+     func loadIndex() throws -> BoardIndex {
+-        guard fileManager.fileExists(atPath: indexURL.path) else {
++        let url = indexURL
++        guard fileManager.fileExists(atPath: url.path) else {
+             return BoardIndex(boards: [], folders: [])
+         }
+         do {
+-            let data = try Data(contentsOf: indexURL)
++            let data = try coordinatedRead(at: url)
+             let decoded = try JSONDecoder().decode(BoardIndex.self, from: data)
+             return BoardIndex(
+                 boards: decoded.boards.sorted { $0.modified > $1.modified },
+@@ -199,7 +390,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
+             let backupName = "boards.json.corrupt.\(Int(Date().timeIntervalSince1970))"
+             let backupURL = baseDirectory.appendingPathComponent(backupName)
+             var savedBackup: URL?
+-            if (try? fileManager.copyItem(at: indexURL, to: backupURL)) != nil {
++            if (try? fileManager.copyItem(at: url, to: backupURL)) != nil {
+                 savedBackup = backupURL
+             }
+             throw BoardStoreError.corruptedIndex(backupURL: savedBackup, underlying: error)
+@@ -210,7 +401,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
+         ensureDirectoryExists(baseDirectory)
+         do {
+             let data = try JSONEncoder().encode(index)
+-            try data.write(to: indexURL, options: .atomic)
++            try coordinatedWrite(data: data, to: indexURL)
+         } catch {
+             throw BoardStoreError.ioFailure("Failed to save board index", error)
+         }
+@@ -227,7 +418,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
+             images.reserveCapacity(binary.imageRefs.count)
+             for ref in binary.imageRefs {
+                 let url = assetURL(for: ref.id)
+-                if let imgData = try? Data(contentsOf: url) {
++                if let imgData = try? coordinatedRead(at: url) {
+                     images.append(PlacedImage(
+                         id: ref.id,
+                         position: ref.position.cgPoint,
+@@ -247,7 +438,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
+             for img in saveData.placedImages {
+                 let url = assetURL(for: img.id)
+                 if !fileManager.fileExists(atPath: url.path) {
+-                    try img.imageData.write(to: url, options: .atomic)
++                    try coordinatedWrite(data: img.imageData, to: url)
+                 }
+             }
+         }
+@@ -262,11 +453,15 @@ nonisolated final class BoardStore: @unchecked Sendable {
+ 
+     func loadBoard(id: String) throws -> SaveData {
+         let url = boardURL(for: id)
++        if isUsingCloud && !fileManager.fileExists(atPath: url.path) {
++            // Trigger download if the file exists as an evicted `.icloud` placeholder
++            try? fileManager.startDownloadingUbiquitousItem(at: url)
++        }
+         guard fileManager.fileExists(atPath: url.path) else {
+             throw BoardStoreError.boardNotFound(id)
+         }
+         do {
+-            let data = try Data(contentsOf: url)
++            let data = try coordinatedRead(at: url)
+             return try decodeBoardData(data)
+         } catch {
+             throw BoardStoreError.ioFailure("Failed to open board", error)
+@@ -282,7 +477,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
+         let url = boardURL(for: id)
+         do {
+             let data = try encodeBoardData(saveData)
+-            try data.write(to: url, options: .atomic)
++            try coordinatedWrite(data: data, to: url)
+         } catch {
+             throw BoardStoreError.ioFailure("Failed to save board", error)
+         }
+diff --git a/Whiteboard/DrawingModel.swift b/Whiteboard/DrawingModel.swift
+index c5765bb..ee02412 100644
+--- a/Whiteboard/DrawingModel.swift
++++ b/Whiteboard/DrawingModel.swift
+@@ -299,6 +299,7 @@ final class DrawingModel {
+     var needsRecenter: Bool = false
+     var welcomeFolderName: String?
+     var lastErrorMessage: String?
++    var cloudSyncStatus: CloudSyncStatus = .localOnly
+ 
+     /// Bumped whenever committed strokes or placed images change so the canvas
+     /// backing store knows when to re-bake (or incrementally append).
+@@ -319,6 +320,7 @@ final class DrawingModel {
+     }
+ 
+     @ObservationIgnored let store: BoardStore
++    @ObservationIgnored private let cloudMonitor = CloudSyncMonitor()
+     @ObservationIgnored private let userDefaults: UserDefaults
+     @ObservationIgnored private var history = CanvasHistory(maxSnapshots: 100)
+     @ObservationIgnored private var isInitializing = true
+@@ -366,6 +368,64 @@ final class DrawingModel {
+         loadRecents()
+         loadBoards()
+         isInitializing = false
++        startCloudSyncIfAvailable()
++    }
++
++    private func startCloudSyncIfAvailable() {
++        guard store.allowsCloudSync else { return }
++        if FileManager.default.ubiquityIdentityToken != nil {
++            cloudSyncStatus = .syncing
++        }
++        store.resolveCloudContainerAsync { [weak self] enabled in
++            guard let self else { return }
++            if enabled {
++                self.loadBoards()
++                self.loadTrash()
++                self.thumbnailCache.removeAllObjects()
++                self.thumbnailKeys.removeAll()
++                self.thumbnailRevision &+= 1
++                self.cloudSyncStatus = .synced
++                self.cloudMonitor.start(
++                    onRemoteChange: { [weak self] changedIds in
++                        self?.handleRemoteCloudUpdate(changedBoardIds: changedIds)
++                    },
++                    onStatusChange: { [weak self] status in
++                        self?.cloudSyncStatus = status
++                    }
++                )
++            } else {
++                self.cloudSyncStatus = .localOnly
++            }
++        }
++    }
++
++    private func handleRemoteCloudUpdate(changedBoardIds: Set<String>) {
++        loadBoards()
++        loadTrash()
++
++        for id in changedBoardIds {
++            invalidateThumbnail(for: id)
++        }
++        if !changedBoardIds.isEmpty {
++            thumbnailRevision &+= 1
++        }
++
++        // If the currently open board updated from another device and the user isn't
++        // mid-edit or waiting on a local auto-save, refresh it seamlessly.
++        if let activeId = currentBoardId,
++           changedBoardIds.contains(activeId),
++           currentStroke == nil,
++           !isMoving,
++           !isResizing,
++           pendingAutoSaveBoardId == nil,
++           let updated = try? store.loadBoard(id: activeId) {
++            strokes = updated.strokes
++            placedImages = updated.placedImages
++            fills = updated.fills
++            spatialGrid.rebuild(with: strokes)
++            pruneImageCache()
++            committedRevision &+= 1
++        }
+     }
+ 
+     private func scheduleSettingsSave() {
+diff --git a/Whiteboard/WelcomeView.swift b/Whiteboard/WelcomeView.swift
+index a48d6a6..3fc8df2 100644
+--- a/Whiteboard/WelcomeView.swift
++++ b/Whiteboard/WelcomeView.swift
+@@ -302,9 +302,40 @@ struct WelcomeView: View {
+                 .padding(.horizontal, 10)
+                 .padding(.bottom, 16)
+             }
++
++            Divider().opacity(0.4)
++            cloudSyncFooter
+         }
+     }
+ 
++    private var cloudSyncFooter: some View {
++        let (icon, label, color, tip): (String, String, Color, String) = {
++            switch model.cloudSyncStatus {
++            case .synced:
++                return ("icloud.fill", "iCloud Synced", .secondary, "Your tissues sync automatically via iCloud Drive")
++            case .syncing:
++                return ("arrow.trianglehead.2.clockwise.icloud", "Syncing…", .accentColor, "Syncing tissues with iCloud Drive")
++            case .localOnly:
++                return ("icloud.slash", "Local Only", .secondary.opacity(0.75), "Sign in to iCloud with a signed build to enable automatic sync")
++            case .error(let msg):
++                return ("exclamationmark.icloud", "Sync Issue", .orange, msg)
++            }
++        }()
++
++        return HStack(spacing: 6) {
++            Image(systemName: icon)
++                .font(.system(size: 11))
++                .foregroundColor(color)
++            Text(label)
++                .font(.system(size: 11, weight: .medium))
++                .foregroundColor(color)
++            Spacer()
++        }
++        .padding(.horizontal, 16)
++        .padding(.vertical, 10)
++        .help(tip)
++    }
++
+     private func sidebarSectionLabel(_ text: String) -> some View {
+         Text(text)
+             .font(.system(size: 11, weight: .semibold))
+diff --git a/WhiteboardTests/WhiteboardTests.swift b/WhiteboardTests/WhiteboardTests.swift
+index a476e85..ca0311b 100644
+--- a/WhiteboardTests/WhiteboardTests.swift
++++ b/WhiteboardTests/WhiteboardTests.swift
+@@ -546,4 +546,69 @@ final class WhiteboardTests: XCTestCase {
+         model.cycleToolFromPencil()
+         XCTAssertEqual(model.currentTool, .pen)
+     }
++
++    // MARK: - iCloud Sync & Migration Tests
++
++    func testBoardIndexMergedKeepsNewerBoardsAndUnionsFolders() {
++        let t1 = Date(timeIntervalSince1970: 1_000)
++        let t2 = Date(timeIntervalSince1970: 2_000)
++
++        let local = BoardIndex(
++            boards: [
++                BoardMeta(id: "a", name: "Old A", created: t1, modified: t1),
++                BoardMeta(id: "b", name: "Local B", created: t1, modified: t2),
++            ],
++            folders: [
++                BoardFolder(id: "f1", name: "Work", boardIds: ["a", "b"])
++            ]
++        )
++        let remote = BoardIndex(
++            boards: [
++                BoardMeta(id: "a", name: "Newer A", created: t1, modified: t2),
++                BoardMeta(id: "c", name: "Remote C", created: t2, modified: t2),
++            ],
++            folders: [
++                BoardFolder(id: "f1", name: "Work", boardIds: ["b", "c"])
++            ]
++        )
++
++        let merged = BoardIndex.merged(local, remote)
++        XCTAssertEqual(merged.boards.count, 3)
++        XCTAssertEqual(merged.boards.first(where: { $0.id == "a" })?.name, "Newer A")
++        XCTAssertEqual(merged.boards.first(where: { $0.id == "b" })?.name, "Local B")
++        XCTAssertEqual(merged.boards.first(where: { $0.id == "c" })?.name, "Remote C")
++        XCTAssertEqual(merged.folders.count, 1)
++        XCTAssertEqual(merged.folders[0].boardIds, ["a", "b", "c"])
++    }
++
++    func testBoardStoreMigrateLocalToCloudPreservesBoardsAssetsAndLocalThumbs() throws {
++        let stroke = Stroke(points: [CGPoint(x: 0, y: 0), CGPoint(x: 30, y: 30)], color: .blue, lineWidth: 2, isEraser: false)
++        let imgData = Data([0x89, 0x50, 0x4E, 0x47])
++        let img = PlacedImage(position: CGPoint(x: 5, y: 5), size: CGSize(width: 40, height: 40), imageData: imgData)
++
++        try store.saveBoardSync(id: "b1", saveData: SaveData(strokes: [stroke], placedImages: [img]))
++        try store.saveIndex(BoardIndex(
++            boards: [BoardMeta(id: "b1", name: "Cafe Sketch", created: Date(), modified: Date())],
++            folders: []
++        ))
++        store.saveDiskThumbnail(for: "b1", isDark: false, pngData: Data([1, 2, 3]))
++
++        let cloudDir = tempDir.appendingPathComponent("iCloudContainer/Documents/Boards", isDirectory: true)
++        store.migrateLocalToCloud(cloudDirectory: cloudDir)
++
++        XCTAssertTrue(store.isUsingCloud)
++        XCTAssertEqual(store.baseDirectory, cloudDir)
++        XCTAssertTrue(FileManager.default.fileExists(atPath: cloudDir.appendingPathComponent("b1.wb").path))
++        XCTAssertTrue(FileManager.default.fileExists(atPath: cloudDir.appendingPathComponent("boards.json").path))
++        XCTAssertTrue(FileManager.default.fileExists(atPath: cloudDir.appendingPathComponent(".assets/\(img.id.uuidString).img").path))
++
++        // Board & asset load cleanly from the new cloud directory
++        let loaded = try store.loadBoard(id: "b1")
++        XCTAssertEqual(loaded.strokes.count, 1)
++        XCTAssertEqual(loaded.placedImages.first?.imageData, imgData)
++
++        // Thumbnails remain local (not uploaded into iCloud)
++        XCTAssertEqual(store.thumbsDirectory.deletingLastPathComponent(), store.localDirectory)
++        XCTAssertEqual(store.loadDiskThumbnail(for: "b1", isDark: false), Data([1, 2, 3]))
++    }
+ }
+diff --git a/Users/piyush/.gemini/antigravity/brain/6998861a-31ed-45f7-a85a-ef410076483c/scratch/icloud_snapshot/Whiteboard/CloudSyncMonitor.swift b/Whiteboard/CloudSyncMonitor.swift
+new file mode 100644
+index 0000000..105717f
+--- /dev/null
++++ b/Whiteboard/CloudSyncMonitor.swift
+@@ -0,0 +1,121 @@
++import Foundation
++
++/// High-level iCloud sync state displayed in the Welcome screen sidebar.
++enum CloudSyncStatus: Equatable {
++    case localOnly
++    case syncing
++    case synced
++    case error(String)
++}
++
++/// Watches the app's iCloud Ubiquity Documents container via `NSMetadataQuery`,
++/// automatically triggers downloads of updated `.wb` / asset files, and notifies
++/// the UI when remote changes arrive.
++@MainActor
++final class CloudSyncMonitor {
++    private var query: NSMetadataQuery?
++    private var debounceTask: DispatchWorkItem?
++    private var onRemoteChange: ((Set<String>) -> Void)?
++    private var onStatusChange: ((CloudSyncStatus) -> Void)?
++    private var observers: [NSObjectProtocol] = []
++
++    func start(
++        onRemoteChange: @escaping (Set<String>) -> Void,
++        onStatusChange: @escaping (CloudSyncStatus) -> Void
++    ) {
++        stop()
++        self.onRemoteChange = onRemoteChange
++        self.onStatusChange = onStatusChange
++
++        let q = NSMetadataQuery()
++        q.searchScopes = [NSMetadataQueryUbiquitousDocumentsScope]
++        q.predicate = NSPredicate(format: "%K LIKE '*'", NSMetadataItemFSNameKey)
++
++        let center = NotificationCenter.default
++        let gatherObs = center.addObserver(
++            forName: .NSMetadataQueryDidFinishGathering,
++            object: q,
++            queue: .main
++        ) { [weak self] _ in
++            MainActor.assumeIsolated { self?.processQueryResults() }
++        }
++        let updateObs = center.addObserver(
++            forName: .NSMetadataQueryDidUpdate,
++            object: q,
++            queue: .main
++        ) { [weak self] _ in
++            MainActor.assumeIsolated { self?.processQueryResults() }
++        }
++        let accountObs = center.addObserver(
++            forName: .NSUbiquityIdentityDidChange,
++            object: nil,
++            queue: .main
++        ) { [weak self] _ in
++            MainActor.assumeIsolated {
++                if FileManager.default.ubiquityIdentityToken == nil {
++                    self?.onStatusChange?(.localOnly)
++                } else {
++                    self?.onStatusChange?(.syncing)
++                }
++            }
++        }
++
++        observers = [gatherObs, updateObs, accountObs]
++        query = q
++        q.start()
++    }
++
++    func stop() {
++        debounceTask?.cancel()
++        debounceTask = nil
++        query?.stop()
++        query = nil
++        for obs in observers {
++            NotificationCenter.default.removeObserver(obs)
++        }
++        observers.removeAll()
++    }
++
++    private func processQueryResults() {
++        guard let query else { return }
++        query.disableUpdates()
++        defer { query.enableUpdates() }
++
++        var changedBoardIds = Set<String>()
++        var hasPendingDownloads = false
++        let fm = FileManager.default
++
++        for i in 0..<query.resultCount {
++            guard let item = query.result(at: i) as? NSMetadataItem,
++                  let url = item.value(forAttribute: NSMetadataItemURLKey) as? URL else {
++                continue
++            }
++
++            let status = item.value(forAttribute: NSMetadataUbiquitousItemDownloadingStatusKey) as? String
++            let isUploading = (item.value(forAttribute: NSMetadataUbiquitousItemIsUploadingKey) as? Bool) ?? false
++
++            if status != NSMetadataUbiquitousItemDownloadingStatusCurrent {
++                hasPendingDownloads = true
++                try? fm.startDownloadingUbiquitousItem(at: url)
++            } else if isUploading {
++                hasPendingDownloads = true
++            }
++
++            if url.pathExtension == "wb" {
++                let boardId = url.deletingPathExtension().lastPathComponent
++                if !boardId.isEmpty {
++                    changedBoardIds.insert(boardId)
++                }
++            }
++        }
++
++        onStatusChange?(hasPendingDownloads ? .syncing : .synced)
++
++        debounceTask?.cancel()
++        let task = DispatchWorkItem { [weak self] in
++            self?.onRemoteChange?(changedBoardIds)
++        }
++        debounceTask = task
++        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: task)
++    }
++}
+diff --git a/Users/piyush/.gemini/antigravity/brain/6998861a-31ed-45f7-a85a-ef410076483c/scratch/icloud_snapshot/Whiteboard/Whiteboard.entitlements b/Whiteboard/Whiteboard.entitlements
+new file mode 100644
+index 0000000..620915b
+--- /dev/null
++++ b/Whiteboard/Whiteboard.entitlements
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>com.apple.developer.icloud-container-identifiers</key>
++	<array>
++		<string>iCloud.Typobrahe.Whiteboard</string>
++	</array>
++	<key>com.apple.developer.icloud-services</key>
++	<array>
++		<string>CloudDocuments</string>
++	</array>
++	<key>com.apple.developer.ubiquity-container-identifiers</key>
++	<array>
++		<string>iCloud.Typobrahe.Whiteboard</string>
++	</array>
++</dict>
++</plist>

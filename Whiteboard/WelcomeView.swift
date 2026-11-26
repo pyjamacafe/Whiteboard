@@ -54,10 +54,6 @@ struct WelcomeView: View {
     @State private var hoveredSidebar: SidebarSelection?
     @State private var dropTargetedFolder: SidebarSelection?
 
-    @State private var selectedBoardIds: Set<String> = []
-    @State private var selectionAnchorId: String?
-    @State private var isSelectingOnTouch = false
-
     @State private var showEmptyTrashAlert = false
     @State private var permanentDeleteEntry: TrashEntry?
 
@@ -125,9 +121,6 @@ struct WelcomeView: View {
             contentFocused = true
         }
         .onChange(of: selection) { _, newSelection in
-            selectedBoardIds.removeAll()
-            selectionAnchorId = nil
-            isSelectingOnTouch = false
             switch newSelection {
             case .folder(let id):
                 model.welcomeFolderName = model.folders.first(where: { $0.id == id })?.name
@@ -188,12 +181,6 @@ struct WelcomeView: View {
                 .keyboardShortcut("n", modifiers: .command)
             Button("") { isSearchPresented = true }
                 .keyboardShortcut("f", modifiers: .command)
-            Button("") {
-                if selection != .trash {
-                    selectedBoardIds = Set(displayedBoards.map(\.id))
-                }
-            }
-            .keyboardShortcut("a", modifiers: .command)
             Button("") { handleEscape() }
                 .keyboardShortcut(.escape, modifiers: [])
         }
@@ -205,9 +192,6 @@ struct WelcomeView: View {
         if renamingId != nil {
             renamingId = nil
             renameFocused = false
-        } else if !selectedBoardIds.isEmpty {
-            selectedBoardIds.removeAll()
-            selectionAnchorId = nil
         } else if !searchText.isEmpty || isSearchPresented {
             searchText = ""
             isSearchPresented = false
@@ -404,20 +388,12 @@ struct WelcomeView: View {
 
     private var mainContent: some View {
         VStack(spacing: 0) {
-            if !selectedBoardIds.isEmpty && selection != .trash {
-                bulkActionBar
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-
             if selection == .trash {
                 trashContent
             } else {
                 boardsContent
             }
         }
-        .animation(.easeOut(duration: 0.16), value: selectedBoardIds.isEmpty)
     }
 
     // MARK: - Unified Titlebar Toolbar
@@ -502,15 +478,6 @@ struct WelcomeView: View {
                 .frame(width: 78)
                 .pointingHand()
             }
-
-            #if os(iOS)
-            ToolbarItem(placement: .automatic) {
-                Button(isSelectingOnTouch ? "Done" : "Select") {
-                    isSelectingOnTouch.toggle()
-                    if !isSelectingOnTouch { selectedBoardIds.removeAll() }
-                }
-            }
-            #endif
         }
     }
 
@@ -572,15 +539,6 @@ struct WelcomeView: View {
         .focusable()
         .focused($contentFocused)
         .focusEffectDisabled()
-        #if os(macOS)
-        .onKeyPress(.upArrow) { moveSelection(-1); return .handled }
-        .onKeyPress(.downArrow) { moveSelection(1); return .handled }
-        .onKeyPress(.return) { openSelected(); return .handled }
-        .onKeyPress(.delete) {
-            if !selectedBoardIds.isEmpty { trashSelected() }
-            return .handled
-        }
-        #endif
     }
 
     // MARK: - Thumbnail Cell
@@ -589,7 +547,6 @@ struct WelcomeView: View {
         let _ = model.thumbnailRevision
         let img = model.thumbnail(for: board.id)
         let isHovered = hoveredBoard == board.id
-        let isSelected = selectedBoardIds.contains(board.id)
         let folderBadge = (selection == .all || selection == .recents) ? model.folderName(forBoardId: board.id) : nil
 
         return VStack(spacing: 0) {
@@ -619,7 +576,7 @@ struct WelcomeView: View {
 
                 // Clean overflow menu (revealed on hover on macOS, always subtly visible on iOS)
                 #if os(macOS)
-                let showMenuButton = isHovered || isSelected
+                let showMenuButton = isHovered
                 #else
                 let showMenuButton = true
                 #endif
@@ -638,20 +595,6 @@ struct WelcomeView: View {
                     .fixedSize()
                     .padding(8)
                     .transition(.opacity)
-                }
-
-                // Selection checkmark badge (hover-revealed on macOS or when selected for bulk actions)
-                if isSelected || (isHovered && renamingId != board.id) {
-                    Button(action: { toggleSelection(board) }) {
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .font(.system(size: 18))
-                            .foregroundStyle(isSelected ? .white : .secondary, isSelected ? Color.accentColor : Color.clear)
-                            .background(isSelected ? Color.clear : Color.black.opacity(0.15))
-                            .clipShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
 
@@ -700,16 +643,15 @@ struct WelcomeView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(
-                    isSelected ? Color.accentColor :
                     isHovered ? Color.primary.opacity(isDark ? 0.24 : 0.18) :
                     Color.primary.opacity(isDark ? 0.12 : 0.08),
-                    lineWidth: isSelected ? 2 : 1
+                    lineWidth: 1
                 )
         )
         .animation(.easeOut(duration: 0.15), value: isHovered)
         .contentShape(Rectangle())
         .onTapGesture {
-            handleTap(board)
+            openBoard(board)
         }
         .draggable(board.id)
         .onHover { hovering in
@@ -725,7 +667,6 @@ struct WelcomeView: View {
         let _ = model.thumbnailRevision
         let img = model.thumbnail(for: board.id, size: CGSize(width: 120, height: 90))
         let isHovered = hoveredBoard == board.id
-        let isSelected = selectedBoardIds.contains(board.id)
         let folderBadge = (selection == .all || selection == .recents) ? model.folderName(forBoardId: board.id) : nil
 
         return HStack(spacing: 12) {
@@ -780,7 +721,7 @@ struct WelcomeView: View {
                 }
 
                 #if os(macOS)
-                let showRowMenu = isHovered || isSelected
+                let showRowMenu = isHovered
                 #else
                 let showRowMenu = true
                 #endif
@@ -806,18 +747,11 @@ struct WelcomeView: View {
         .padding(.horizontal, 12)
         .background(
             RoundedRectangle(cornerRadius: 9)
-                .fill(
-                    isSelected ? Color.accentColor.opacity(0.16) :
-                    isHovered ? Color.primary.opacity(0.05) : Color.clear
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9)
-                .stroke(isSelected ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
+                .fill(isHovered ? Color.primary.opacity(0.05) : Color.clear)
         )
         .contentShape(Rectangle())
         .onTapGesture {
-            handleTap(board)
+            openBoard(board)
         }
         .draggable(board.id)
         .onHover { hovering in
@@ -924,7 +858,7 @@ struct WelcomeView: View {
         return "\(remaining) \(remaining == 1 ? "day" : "days") left"
     }
 
-    // MARK: - Context Menu & Bulk Bar
+    // MARK: - Context Menu
 
     @ViewBuilder
     private func boardContextMenu(_ board: BoardMeta) -> some View {
@@ -944,57 +878,6 @@ struct WelcomeView: View {
         #endif
         Divider()
         Button(role: .destructive) { trashBoards([board]) } label: { Label("Move to Trash", systemImage: "trash") }
-    }
-
-    private var bulkActionBar: some View {
-        HStack(spacing: 10) {
-            Text("\(selectedBoardIds.count) selected")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.accentColor)
-
-            Spacer()
-
-            Menu {
-                Button("No Folder") { moveSelected(toFolder: nil) }
-                if !model.folders.isEmpty { Divider() }
-                ForEach(model.folders) { folder in
-                    Button(folder.name) { moveSelected(toFolder: folder.id) }
-                }
-            } label: {
-                Label("Move", systemImage: "folder")
-                    .font(.system(size: 12))
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-
-            #if os(macOS)
-            Button(action: { exportBoards(Array(selectedBoardIds)) }) {
-                Label("Export PNG", systemImage: "square.and.arrow.up")
-                    .font(.system(size: 12))
-            }
-            .liquidGlassButton()
-            .controlSize(.small)
-            #endif
-
-            Button(role: .destructive, action: trashSelected) {
-                Label("Trash", systemImage: "trash")
-                    .font(.system(size: 12))
-            }
-            .liquidGlassButton()
-            .controlSize(.small)
-
-            Button("Clear") {
-                selectedBoardIds.removeAll()
-                selectionAnchorId = nil
-            }
-            .font(.system(size: 12))
-            .buttonStyle(.plain)
-            .foregroundColor(.secondary)
-            .pointingHand()
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .liquidGlassCapsule()
     }
 
     // MARK: - Undo Toast
@@ -1156,76 +1039,9 @@ struct WelcomeView: View {
         onStart()
     }
 
-    private func toggleSelection(_ board: BoardMeta) {
-        if selectedBoardIds.contains(board.id) {
-            selectedBoardIds.remove(board.id)
-        } else {
-            selectedBoardIds.insert(board.id)
-            selectionAnchorId = board.id
-        }
-    }
-
-    private func handleTap(_ board: BoardMeta) {
-        #if os(macOS)
-        let flags = NSEvent.modifierFlags
-        if flags.contains(.command) {
-            toggleSelection(board)
-        } else if flags.contains(.shift),
-                  let anchor = selectionAnchorId,
-                  let anchorIdx = displayedBoards.firstIndex(where: { $0.id == anchor }),
-                  let targetIdx = displayedBoards.firstIndex(where: { $0.id == board.id }) {
-            let range = min(anchorIdx, targetIdx)...max(anchorIdx, targetIdx)
-            selectedBoardIds = Set(displayedBoards[range].map(\.id))
-        } else if !selectedBoardIds.isEmpty {
-            // While in multi-select, clicking another card toggles its selection;
-            // plain click with no selection opens immediately.
-            toggleSelection(board)
-        } else {
-            openBoard(board)
-        }
-        #else
-        if isSelectingOnTouch {
-            toggleSelection(board)
-        } else {
-            openBoard(board)
-        }
-        #endif
-    }
-
     private func openBoard(_ board: BoardMeta) {
         model.loadBoard(id: board.id)
         onStart()
-    }
-
-    private func moveSelection(_ delta: Int) {
-        guard !displayedBoards.isEmpty else { return }
-        let currentIdx = selectionAnchorId.flatMap { anchor in
-            displayedBoards.firstIndex { $0.id == anchor }
-        } ?? selectedBoardIds.first.flatMap { sel in
-            displayedBoards.firstIndex { $0.id == sel }
-        }
-        let next: Int
-        if let idx = currentIdx {
-            next = min(max(idx + delta, 0), displayedBoards.count - 1)
-        } else {
-            next = delta > 0 ? 0 : displayedBoards.count - 1
-        }
-        let id = displayedBoards[next].id
-        selectedBoardIds = [id]
-        selectionAnchorId = id
-    }
-
-    private func openSelected() {
-        if let sel = selectionAnchorId ?? selectedBoardIds.first,
-           let board = displayedBoards.first(where: { $0.id == sel }) {
-            openBoard(board)
-        }
-    }
-
-    private func moveSelected(toFolder folderId: String?) {
-        for id in selectedBoardIds { model.moveBoard(boardId: id, toFolder: folderId) }
-        selectedBoardIds.removeAll()
-        selectionAnchorId = nil
     }
 
     private func trashBoards(_ boardsToTrash: [BoardMeta]) {
@@ -1233,19 +1049,11 @@ struct WelcomeView: View {
         let ids = boardsToTrash.map(\.id)
         for board in boardsToTrash {
             model.trashBoard(id: board.id, name: board.name)
-            selectedBoardIds.remove(board.id)
         }
         let msg = boardsToTrash.count == 1
             ? "Moved \"\(boardsToTrash[0].name)\" to Trash"
             : "Moved \(boardsToTrash.count) tissues to Trash"
         showUndoToast(message: msg, trashedIds: ids)
-    }
-
-    private func trashSelected() {
-        let targets = model.boards.filter { selectedBoardIds.contains($0.id) }
-        trashBoards(targets)
-        selectedBoardIds.removeAll()
-        selectionAnchorId = nil
     }
 
     #if os(macOS)
@@ -1442,22 +1250,26 @@ private struct PointingHandModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         #if os(macOS)
-        content
-            .onHover { hovering in
-                if hovering && !isPushed {
-                    NSCursor.pointingHand.push()
-                    isPushed = true
-                } else if !hovering && isPushed {
-                    NSCursor.pop()
-                    isPushed = false
+        if #available(macOS 15.0, *) {
+            content.pointerStyle(.link)
+        } else {
+            content
+                .onHover { hovering in
+                    if hovering && !isPushed {
+                        NSCursor.pointingHand.push()
+                        isPushed = true
+                    } else if !hovering && isPushed {
+                        NSCursor.pop()
+                        isPushed = false
+                    }
                 }
-            }
-            .onDisappear {
-                if isPushed {
-                    NSCursor.pop()
-                    isPushed = false
+                .onDisappear {
+                    if isPushed {
+                        NSCursor.pop()
+                        isPushed = false
+                    }
                 }
-            }
+        }
         #else
         content
         #endif

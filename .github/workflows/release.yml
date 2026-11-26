@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   release:
-    runs-on: macos-15
+    runs-on: macos-27
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -27,7 +27,7 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Build Whiteboard (Release, macOS arm64)
+      - name: Build Tissue Box (Release, macOS arm64)
         run: |
           xcodebuild \
             -project Whiteboard.xcodeproj \
@@ -37,14 +37,14 @@ jobs:
             -derivedDataPath build/DerivedData \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=NO \
-            MACOSX_DEPLOYMENT_TARGET=14.0 \
+            MACOSX_DEPLOYMENT_TARGET=27.0 \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
             clean build
 
       - name: Package macOS DMG, ZIP, and checksums
         run: |
-          APP_PATH="build/DerivedData/Build/Products/Release/Whiteboard.app"
+          APP_PATH="build/DerivedData/Build/Products/Release/Tissue Box.app"
           if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
             RAW_TAG="${{ github.event.release.tag_name }}"
             VERSION="${RAW_TAG#v}"
@@ -83,13 +83,13 @@ jobs:
           tag_name: ${{ github.event.release.tag_name || github.ref_name }}
           generate_release_notes: true
           body: |
-            ## Installation (macOS 14+, Apple Silicon)
+            ## Installation (macOS 27 Golden Gate+, Apple Silicon)
 
-            1. Download the `.dmg` (or `.zip`) below and copy **Whiteboard.app** to `/Applications`.
+            1. Download the `.dmg` (or `.zip`) below and copy **Tissue Box.app** to `/Applications`.
             2. Because this build is ad-hoc signed (not notarized with an Apple Developer ID), macOS Gatekeeper may block it on first launch. To allow it, either:
                - Run:
                  ```bash
-                 xattr -dr com.apple.quarantine /Applications/Whiteboard.app
+                 xattr -dr com.apple.quarantine "/Applications/Tissue Box.app"
                  ```
                - Or open **System Settings → Privacy & Security** and click **Open Anyway**.
           files: |

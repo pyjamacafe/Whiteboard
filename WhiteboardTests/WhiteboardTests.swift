@@ -440,6 +440,21 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertTrue(path.contains(CGPoint(x: 50, y: 50), using: .evenOdd))
         XCTAssertFalse(path.contains(CGPoint(x: 150, y: 150), using: .evenOdd))
 
+        // Sharp 4-edge rectangle must fill all four corners without cutting corner triangles
+        let rectEdges = [
+            Stroke(points: [CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 0)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+            Stroke(points: [CGPoint(x: 100, y: 0), CGPoint(x: 100, y: 100)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+            Stroke(points: [CGPoint(x: 100, y: 100), CGPoint(x: 0, y: 100)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+            Stroke(points: [CGPoint(x: 0, y: 100), CGPoint(x: 0, y: 0)], color: .black, lineWidth: 2, isEraser: false, isCatmullRom: false),
+        ]
+        let rectContours = FloodFillEngine.computeContours(at: CGPoint(x: 50, y: 50), strokes: rectEdges, gapTolerance: 2.5)
+        XCTAssertNotNil(rectContours)
+        let rectPath = FillShape(contours: rectContours!, color: .blue).makeCGPath()
+        XCTAssertTrue(rectPath.contains(CGPoint(x: 2, y: 2), using: .evenOdd), "Top-left corner should be filled")
+        XCTAssertTrue(rectPath.contains(CGPoint(x: 98, y: 2), using: .evenOdd), "Top-right corner should be filled")
+        XCTAssertTrue(rectPath.contains(CGPoint(x: 98, y: 98), using: .evenOdd), "Bottom-right corner should be filled")
+        XCTAssertTrue(rectPath.contains(CGPoint(x: 2, y: 98), using: .evenOdd), "Bottom-left corner should be filled")
+
         // Open shape (missing left edge) must abort with nil (no bleeding!)
         let openBox = makeBoxStroke(rect: CGRect(x: 0, y: 0, width: 100, height: 100), closed: false)
         XCTAssertNil(FloodFillEngine.computeContours(at: CGPoint(x: 50, y: 50), strokes: [openBox], gapTolerance: 2.5))
@@ -487,5 +502,48 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertTrue(model.fills.isEmpty)
         model.redo()
         XCTAssertEqual(model.fills.count, 1)
+    }
+
+    func testPencilDoubleTapTogglesEraserAndRestoresPreviousTool() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+
+        // Pen -> Eraser (targets .pen) -> Pen
+        model.selectTool(.pen)
+        model.toggleEraserFromPencil()
+        XCTAssertEqual(model.currentTool, .eraser)
+        XCTAssertEqual(model.eraserSettings.eraseTarget, .pen)
+        model.toggleEraserFromPencil()
+        XCTAssertEqual(model.currentTool, .pen)
+
+        // Sharpie -> Eraser (targets .sharpie) -> Sharpie
+        model.selectTool(.sharpie)
+        model.toggleEraserFromPencil()
+        XCTAssertEqual(model.currentTool, .eraser)
+        XCTAssertEqual(model.eraserSettings.eraseTarget, .sharpie)
+        model.toggleEraserFromPencil()
+        XCTAssertEqual(model.currentTool, .sharpie)
+
+        // Fill -> Eraser (targets .all) -> Fill
+        model.selectTool(.fill)
+        model.toggleEraserFromPencil()
+        XCTAssertEqual(model.currentTool, .eraser)
+        XCTAssertEqual(model.eraserSettings.eraseTarget, .all)
+        model.toggleEraserFromPencil()
+        XCTAssertEqual(model.currentTool, .fill)
+
+        // Squeeze cycles Pen -> Sharpie -> Fill -> Select -> Pen (and Eraser -> Pen)
+        model.selectTool(.pen)
+        model.cycleToolFromPencil()
+        XCTAssertEqual(model.currentTool, .sharpie)
+        model.cycleToolFromPencil()
+        XCTAssertEqual(model.currentTool, .fill)
+        model.cycleToolFromPencil()
+        XCTAssertEqual(model.currentTool, .select)
+        model.cycleToolFromPencil()
+        XCTAssertEqual(model.currentTool, .pen)
+
+        model.selectTool(.eraser)
+        model.cycleToolFromPencil()
+        XCTAssertEqual(model.currentTool, .pen)
     }
 }

@@ -246,7 +246,7 @@ nonisolated enum FloodFillEngine {
         }
 
         // 4. Expand filled mask slightly under the stroke centerline so there is zero halo.
-        let expandRadius = min(max(Int(((gapTolerance + 1.0) * gridScale).rounded(.up)), 1), 8)
+        let expandRadius = min(max(Int(((gapTolerance + 1.0) * gridScale).rounded(.up)), 1), 24)
         let cropMinX = max(0, minFX - expandRadius - 1)
         let cropMaxX = min(w - 1, maxFX + expandRadius + 1)
         let cropMinY = max(0, minFY - expandRadius - 1)
@@ -287,7 +287,9 @@ nonisolated enum FloodFillEngine {
                 CGPoint(x: originX + CGFloat(gp.x) * invScale, y: originY + CGFloat(gp.y) * invScale)
             }
             if pts.count >= 4 {
-                pts = chaikinClosed(pts)
+                // Limit Chaikin corner-cutting to half a raster pixel so diagonal pixel
+                // staircases are smoothed without chamfering sharp corners on long straight edges.
+                pts = chaikinClosed(pts, maxInset: 0.5 * invScale)
             }
             // Simplify closed polygon (append first point so RDP preserves closure, then drop duplicate)
             if pts.count > 4 {
@@ -448,9 +450,9 @@ nonisolated enum FloodFillEngine {
         return loops
     }
 
-    /// One pass of Chaikin's corner-cutting algorithm on a closed polygon to soften
-    /// staircase pixel steps into smooth curves.
-    private static func chaikinClosed(_ pts: [CGPoint]) -> [CGPoint] {
+    /// One pass of distance-capped Chaikin corner-cutting on a closed polygon to soften
+    /// 1-pixel staircase steps into smooth curves without truncating true corners on long edges.
+    private static func chaikinClosed(_ pts: [CGPoint], maxInset: CGFloat) -> [CGPoint] {
         let n = pts.count
         guard n >= 3 else { return pts }
         var out: [CGPoint] = []
@@ -458,8 +460,16 @@ nonisolated enum FloodFillEngine {
         for i in 0..<n {
             let p0 = pts[i]
             let p1 = pts[(i + 1) % n]
-            out.append(CGPoint(x: 0.75 * p0.x + 0.25 * p1.x, y: 0.75 * p0.y + 0.25 * p1.y))
-            out.append(CGPoint(x: 0.25 * p0.x + 0.75 * p1.x, y: 0.25 * p0.y + 0.75 * p1.y))
+            let dx = p1.x - p0.x
+            let dy = p1.y - p0.y
+            let len = hypot(dx, dy)
+            guard len > 1e-6 else {
+                out.append(p0)
+                continue
+            }
+            let t = min(0.25, maxInset / len)
+            out.append(CGPoint(x: p0.x + dx * t, y: p0.y + dy * t))
+            out.append(CGPoint(x: p1.x - dx * t, y: p1.y - dy * t))
         }
         return out
     }

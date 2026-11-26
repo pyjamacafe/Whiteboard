@@ -1427,6 +1427,9 @@ final class DrawingModel {
     // MARK: - Tool, Undo, Redo, Clear
 
     func selectTool(_ tool: Tool) {
+        if tool != currentTool {
+            previousTool = currentTool
+        }
         currentTool = tool
         if tool != .select {
             selectedStrokeIds.removeAll()
@@ -1436,6 +1439,34 @@ final class DrawingModel {
         }
         showDeleteMenu = false
         showClearConfirmation = false
+    }
+
+    /// Toggles between the Eraser and the previously active tool (used by Apple Pencil
+    /// double-tap on iPadOS and over macOS Sidecar).
+    func toggleEraserFromPencil() {
+        if currentTool == .eraser {
+            let target = previousTool == .eraser ? .pen : previousTool
+            selectTool(target)
+        } else {
+            let prior = currentTool
+            selectTool(.eraser)
+            switch prior {
+            case .pen: eraserSettings.eraseTarget = .pen
+            case .sharpie: eraserSettings.eraseTarget = .sharpie
+            default: eraserSettings.eraseTarget = .all
+            }
+        }
+    }
+
+    /// Cycles through drawing/selection tools (Pen → Sharpie → Fill → Select → Pen),
+    /// used by Apple Pencil Pro squeeze on iPadOS and macOS Sidecar.
+    func cycleToolFromPencil() {
+        let order: [Tool] = [.pen, .sharpie, .fill, .select]
+        if let idx = order.firstIndex(of: currentTool) {
+            selectTool(order[(idx + 1) % order.count])
+        } else {
+            selectTool(.pen)
+        }
     }
 
     func undo() {
