@@ -39,6 +39,7 @@ struct WelcomeView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var selection: SidebarSelection = .all
     @State private var searchText = ""
+    @State private var isSearchPresented = false
 
     @State private var showNewFolder = false
     @State private var newFolderName = ""
@@ -63,7 +64,6 @@ struct WelcomeView: View {
     @State private var undoToast: UndoTrashToast?
     @State private var toastDismissTask: DispatchWorkItem?
 
-    @FocusState private var searchFocused: Bool
     @FocusState private var renameFocused: Bool
     @FocusState private var contentFocused: Bool
 
@@ -77,7 +77,7 @@ struct WelcomeView: View {
 
     private var sectionTitle: String {
         switch selection {
-        case .all: return "All Doodles"
+        case .all: return "All Tissues"
         case .recents: return "Recents"
         case .trash: return "Recently Deleted"
         case .folder(let id):
@@ -88,7 +88,7 @@ struct WelcomeView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebar
-                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 220, max: 260)
         } detail: {
             ZStack(alignment: .bottom) {
                 mainContent
@@ -100,15 +100,23 @@ struct WelcomeView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            #if os(macOS)
+            .background(isDark ? Color(red: 18/255, green: 18/255, blue: 20/255) : Color(.windowBackgroundColor))
+            #else
+            .background(isDark ? Color.black : Color(.systemBackground))
+            #endif
             .animation(.spring(response: 0.28, dampingFraction: 0.85), value: undoToast)
+            .navigationTitle(sectionTitle)
+            #if os(macOS)
+            .navigationSubtitle(headerSubtitle)
+            #endif
+            .searchable(text: $searchText, isPresented: $isSearchPresented, placement: .toolbar, prompt: "Search")
+            .toolbar {
+                titlebarToolbarItems
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        #if os(macOS)
-        .background(isDark ? Color(red: 18/255, green: 18/255, blue: 20/255) : Color(.windowBackgroundColor))
-        #else
-        .background(isDark ? Color.black : Color(.systemBackground))
-        #endif
         .foregroundColor(isDark ? .white : .primary)
         .colorScheme(isDark ? .dark : .light)
         .accentColor(isDark ? Color(red: 0.45, green: 0.78, blue: 1.0) : nil)
@@ -154,7 +162,7 @@ struct WelcomeView: View {
             Button("Empty Trash", role: .destructive) { model.emptyTrash() }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("All \(model.trashedBoards.count) deleted doodles will be permanently removed. This cannot be undone.")
+            Text("All \(model.trashedBoards.count) deleted tissues will be permanently removed. This cannot be undone.")
         }
         .alert("Delete Permanently?", isPresented: Binding(
             get: { permanentDeleteEntry != nil },
@@ -176,9 +184,9 @@ struct WelcomeView: View {
 
     private var welcomeKeyboardShortcuts: some View {
         Group {
-            Button("") { createNewDoodle() }
+            Button("") { createNewBoard() }
                 .keyboardShortcut("n", modifiers: .command)
-            Button("") { searchFocused = true }
+            Button("") { isSearchPresented = true }
                 .keyboardShortcut("f", modifiers: .command)
             Button("") {
                 if selection != .trash {
@@ -200,9 +208,9 @@ struct WelcomeView: View {
         } else if !selectedBoardIds.isEmpty {
             selectedBoardIds.removeAll()
             selectionAnchorId = nil
-        } else if !searchText.isEmpty {
+        } else if !searchText.isEmpty || isSearchPresented {
             searchText = ""
-            searchFocused = false
+            isSearchPresented = false
         }
     }
 
@@ -216,7 +224,7 @@ struct WelcomeView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: 26, height: 26)
-                Text("Doodles")
+                Text("Tissue Box")
                     .font(.system(size: 18, weight: .bold, design: .rounded))
                 Spacer()
             }
@@ -231,7 +239,7 @@ struct WelcomeView: View {
                     sidebarRow(
                         target: .all,
                         icon: "square.grid.2x2",
-                        title: "All Doodles",
+                        title: "All Tissues",
                         count: model.boards.count,
                         acceptsDrop: true,
                         onDropBoardIds: { ids in
@@ -311,7 +319,6 @@ struct WelcomeView: View {
                 .padding(.bottom, 16)
             }
         }
-        .background(isDark ? Color.white.opacity(0.03) : Color.primary.opacity(0.03))
     }
 
     private func sidebarSectionLabel(_ text: String) -> some View {
@@ -397,10 +404,6 @@ struct WelcomeView: View {
 
     private var mainContent: some View {
         VStack(spacing: 0) {
-            headerToolbar
-
-            Divider().opacity(0.5)
-
             if !selectedBoardIds.isEmpty && selection != .trash {
                 bulkActionBar
                     .padding(.horizontal, 24)
@@ -417,51 +420,60 @@ struct WelcomeView: View {
         .animation(.easeOut(duration: 0.16), value: selectedBoardIds.isEmpty)
     }
 
-    // MARK: - Header Toolbar
+    // MARK: - Unified Titlebar Toolbar
 
-    private var headerToolbar: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(sectionTitle)
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                    .lineLimit(1)
-                Text(headerSubtitle)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+    @ToolbarContentBuilder
+    private var titlebarToolbarItems: some ToolbarContent {
+        if selection == .trash {
+            if !model.trashedBoards.isEmpty {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(role: .destructive, action: { showEmptyTrashAlert = true }) {
+                        Label("Empty Trash", systemImage: "trash")
+                    }
+                    .pointingHand()
+                }
             }
 
-            Spacer(minLength: 12)
-
-            if selection != .trash {
-                // Search pill
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                    TextField("Search", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13))
-                        .focused($searchFocused)
-                        .frame(minWidth: 120, maxWidth: 200)
-                    if !searchText.isEmpty {
-                        Button(action: { searchText = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
+            ToolbarItem(placement: .automatic) {
+                Button(action: { model.appSettings.isDarkMode.toggle() }) {
+                    Image(systemName: isDark ? "sun.max.fill" : "moon.fill")
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.primary.opacity(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(searchFocused ? Color.accentColor.opacity(0.6) : Color.clear, lineWidth: 1)
-                )
+                .help(isDark ? "Switch to Light Mode" : "Switch to Dark Mode")
+                .pointingHand()
+            }
+        } else {
+            // Order: New (+), Open, Search, Theme toggle, then Sort & View
+            ToolbarItem(placement: .automatic) {
+                Button(action: createNewBoard) {
+                    Image(systemName: "plus")
+                }
+                .help("New Tissue (⌘N)")
+                .pointingHand()
+            }
 
-                // Sort menu
+            ToolbarItem(placement: .automatic) {
+                Button(action: { model.pendingAction = .open }) {
+                    Image(systemName: "folder")
+                }
+                .help("Open .wb File…")
+                .pointingHand()
+            }
+
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, iOS 26.0, *) {
+                DefaultToolbarItem(kind: .search, placement: .automatic)
+            }
+            #endif
+
+            ToolbarItem(placement: .automatic) {
+                Button(action: { model.appSettings.isDarkMode.toggle() }) {
+                    Image(systemName: isDark ? "sun.max.fill" : "moon.fill")
+                }
+                .help(isDark ? "Switch to Light Mode" : "Switch to Dark Mode")
+                .pointingHand()
+            }
+
+            ToolbarItem(placement: .automatic) {
                 Menu {
                     ForEach(SortMode.allCases, id: \.self) { mode in
                         Button {
@@ -475,91 +487,40 @@ struct WelcomeView: View {
                     }
                 } label: {
                     Image(systemName: "arrow.up.arrow.down")
-                        .font(.system(size: 13))
-                        .frame(width: 30, height: 28)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
                 .help("Sort: \(sortMode.rawValue)")
                 .pointingHand()
+            }
 
-                // View mode segmented picker
+            ToolbarItem(placement: .automatic) {
                 Picker("View", selection: $viewMode) {
                     Image(systemName: "square.grid.2x2").tag(ViewMode.thumbnails)
                     Image(systemName: "list.bullet").tag(ViewMode.list)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 74)
+                .frame(width: 78)
+                .pointingHand()
+            }
 
-                #if os(iOS)
+            #if os(iOS)
+            ToolbarItem(placement: .automatic) {
                 Button(isSelectingOnTouch ? "Done" : "Select") {
                     isSelectingOnTouch.toggle()
                     if !isSelectingOnTouch { selectedBoardIds.removeAll() }
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                #endif
             }
-
-            // Theme toggle
-            Button(action: { model.appSettings.isDarkMode.toggle() }) {
-                Image(systemName: isDark ? "moon.fill" : "sun.max.fill")
-                    .font(.system(size: 13))
-                    .frame(width: 30, height: 28)
-                    .background(Color.primary.opacity(0.06))
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
-            }
-            .buttonStyle(.plain)
-            .help(isDark ? "Switch to Light Mode" : "Switch to Dark Mode")
-            .pointingHand()
-
-            if selection == .trash {
-                if !model.trashedBoards.isEmpty {
-                    Button(role: .destructive, action: { showEmptyTrashAlert = true }) {
-                        Label("Empty Trash", systemImage: "trash")
-                            .font(.system(size: 13, weight: .medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
-                    .pointingHand()
-                }
-            } else {
-                Button(action: { model.pendingAction = .open }) {
-                    Image(systemName: "folder")
-                        .font(.system(size: 13))
-                        .frame(width: 30, height: 28)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                }
-                .buttonStyle(.plain)
-                .help("Open .wb File…")
-                .pointingHand()
-
-                Button(action: createNewDoodle) {
-                    Label("New Doodle", systemImage: "plus")
-                        .font(.system(size: 13, weight: .semibold))
-                        .padding(.horizontal, 4)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
-                .help("New Doodle (⌘N)")
-                .pointingHand()
-            }
+            #endif
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 14)
     }
 
     private var headerSubtitle: String {
         if selection == .trash {
             let n = model.trashedBoards.count
-            return n == 0 ? "No deleted doodles" : "\(n) \(n == 1 ? "item" : "items") · Auto-deleted after 30 days"
+            return n == 0 ? "No deleted tissues" : "\(n) \(n == 1 ? "item" : "items") · Auto-deleted after 30 days"
         }
         let n = displayedBoards.count
-        return "\(n) \(n == 1 ? "doodle" : "doodles")"
+        return "\(n) \(n == 1 ? "tissue" : "tissues")"
     }
 
     // MARK: - Boards Grid / List
@@ -671,9 +632,7 @@ struct WelcomeView: View {
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundColor(.primary)
                             .frame(width: 26, height: 26)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                            .shadow(color: .black.opacity(0.15), radius: 3, y: 1)
+                            .liquidGlassInteractiveCapsule()
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
@@ -728,18 +687,26 @@ struct WelcomeView: View {
             .padding(.horizontal, 11)
             .padding(.vertical, 9)
         }
-        .background(isDark ? Color.white.opacity(0.05) : Color.primary.opacity(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(isDark ? Color(red: 30/255, green: 30/255, blue: 34/255) : Color.white)
+                .shadow(
+                    color: .black.opacity(isDark ? (isHovered ? 0.45 : 0.22) : (isHovered ? 0.16 : 0.06)),
+                    radius: isHovered ? 12 : 4,
+                    y: isHovered ? 5 : 2
+                )
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(
-                    isSelected ? Color.accentColor : Color.primary.opacity(isDark ? 0.14 : 0.10),
+                    isSelected ? Color.accentColor :
+                    isHovered ? Color.primary.opacity(isDark ? 0.24 : 0.18) :
+                    Color.primary.opacity(isDark ? 0.12 : 0.08),
                     lineWidth: isSelected ? 2 : 1
                 )
         )
-        .shadow(color: .black.opacity(isHovered ? 0.14 : 0.05), radius: isHovered ? 10 : 4, y: isHovered ? 4 : 2)
-        .scaleEffect(isHovered ? 1.015 : 1.0)
-        .animation(.easeOut(duration: 0.14), value: isHovered)
+        .animation(.easeOut(duration: 0.15), value: isHovered)
         .contentShape(Rectangle())
         .onTapGesture {
             handleTap(board)
@@ -747,10 +714,8 @@ struct WelcomeView: View {
         .draggable(board.id)
         .onHover { hovering in
             hoveredBoard = hovering ? board.id : nil
-            #if os(macOS)
-            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-            #endif
         }
+        .pointingHand()
         .contextMenu { boardContextMenu(board) }
     }
 
@@ -794,10 +759,10 @@ struct WelcomeView: View {
                     .focused($renameFocused)
                     .onSubmit { finishRename(board.id) }
                 Button("Save") { finishRename(board.id) }
-                    .buttonStyle(.borderedProminent)
+                    .liquidGlassProminentButton()
                     .controlSize(.small)
                 Button("Cancel") { renamingId = nil; renameFocused = false }
-                    .buttonStyle(.bordered)
+                    .liquidGlassButton()
                     .controlSize(.small)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
@@ -857,10 +822,8 @@ struct WelcomeView: View {
         .draggable(board.id)
         .onHover { hovering in
             hoveredBoard = hovering ? board.id : nil
-            #if os(macOS)
-            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-            #endif
         }
+        .pointingHand()
         .contextMenu { boardContextMenu(board) }
     }
 
@@ -890,7 +853,7 @@ struct WelcomeView: View {
                         .foregroundColor(.secondary.opacity(0.6))
                     Text("Trash is Empty")
                         .font(.title3.weight(.semibold))
-                    Text("Deleted doodles stay here for 30 days before being permanently removed.")
+                    Text("Deleted tissues stay here for 30 days before being permanently removed.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
@@ -924,7 +887,7 @@ struct WelcomeView: View {
                                     model.loadTrash()
                                 }
                             }
-                            .buttonStyle(.bordered)
+                            .liquidGlassButton()
                             .controlSize(.small)
                             .pointingHand()
 
@@ -934,7 +897,7 @@ struct WelcomeView: View {
                                 Image(systemName: "trash")
                                     .font(.system(size: 12))
                             }
-                            .buttonStyle(.bordered)
+                            .liquidGlassButton()
                             .controlSize(.small)
                             .help("Delete Permanently")
                             .pointingHand()
@@ -1009,7 +972,7 @@ struct WelcomeView: View {
                 Label("Export PNG", systemImage: "square.and.arrow.up")
                     .font(.system(size: 12))
             }
-            .buttonStyle(.bordered)
+            .liquidGlassButton()
             .controlSize(.small)
             #endif
 
@@ -1017,7 +980,7 @@ struct WelcomeView: View {
                 Label("Trash", systemImage: "trash")
                     .font(.system(size: 12))
             }
-            .buttonStyle(.bordered)
+            .liquidGlassButton()
             .controlSize(.small)
 
             Button("Clear") {
@@ -1029,11 +992,9 @@ struct WelcomeView: View {
             .foregroundColor(.secondary)
             .pointingHand()
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(Color.accentColor.opacity(0.10))
-        .clipShape(RoundedRectangle(cornerRadius: 9))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.accentColor.opacity(0.25), lineWidth: 0.5))
+        .liquidGlassCapsule()
     }
 
     // MARK: - Undo Toast
@@ -1059,10 +1020,7 @@ struct WelcomeView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(.thickMaterial)
-        .clipShape(Capsule())
-        .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        .liquidGlassCapsule()
     }
 
     private func showUndoToast(message: String, trashedIds: [String]) {
@@ -1075,36 +1033,125 @@ struct WelcomeView: View {
 
     // MARK: - Empty State
 
+    private var emptyStateIcon: String {
+        if !searchText.isEmpty { return "magnifyingglass" }
+        switch selection {
+        case .folder: return "folder"
+        case .recents: return "clock"
+        case .all, .trash: return "square.and.pencil"
+        }
+    }
+
+    private var emptyStateTitle: String {
+        if !searchText.isEmpty { return "No results for \"\(searchText)\"" }
+        switch selection {
+        case .folder: return "\(sectionTitle) is empty"
+        case .recents: return "No recent tissues"
+        case .all, .trash: return "Pull out your first tissue"
+        }
+    }
+
+    private var emptyStateSubtitle: String {
+        if !searchText.isEmpty {
+            return selection == .all
+                ? "Check the spelling or try a different keyword."
+                : "No matches in \(sectionTitle). Try another keyword or search across All Tissues."
+        }
+        switch selection {
+        case .folder:
+            return "Create a new tissue here, or drag existing tissues from All Tissues onto \"\(sectionTitle)\" in the sidebar."
+        case .recents:
+            return "Tissues you open or sketch on will show up here for quick access."
+        case .all, .trash:
+            return "Sketch ideas quickly like on a café napkin, or open an existing .wb file."
+        }
+    }
+
     private var emptyState: some View {
-        VStack(spacing: 14) {
-            Image(systemName: searchText.isEmpty ? "square.and.pencil" : "magnifyingglass")
-                .font(.system(size: 42))
-                .foregroundColor(.secondary.opacity(0.65))
-            Text(searchText.isEmpty ? "No doodles yet" : "No matches for \"\(searchText)\"")
-                .font(.title3.weight(.semibold))
-            Text(searchText.isEmpty ? "Start sketching right away or open an existing .wb file." : "Try a different search term or clear your filter.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            if searchText.isEmpty {
-                Button(action: createNewDoodle) {
-                    Label("New Doodle", systemImage: "plus")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.top, 4)
-            } else {
-                Button("Clear Search") { searchText = "" }
-                    .buttonStyle(.bordered)
+        VStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(isDark ? 0.14 : 0.10))
+                    .frame(width: 68, height: 68)
+                Image(systemName: emptyStateIcon)
+                    .font(.system(size: 28, weight: .medium))
+                    .foregroundColor(.accentColor)
             }
+
+            VStack(spacing: 6) {
+                Text(emptyStateTitle)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .multilineTextAlignment(.center)
+                Text(emptyStateSubtitle)
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(2)
+                    .frame(maxWidth: 340)
+            }
+
+            HStack(spacing: 10) {
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Label("Clear Search", systemImage: "xmark.circle")
+                            .font(.system(size: 13, weight: .medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                    }
+                    .liquidGlassProminentButton()
+                    .pointingHand()
+
+                    if selection != .all {
+                        Button(action: { selection = .all }) {
+                            Text("Search All Tissues")
+                                .font(.system(size: 13, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                        }
+                        .liquidGlassButton()
+                        .pointingHand()
+                    }
+                } else {
+                    Button(action: createNewBoard) {
+                        Label(activeFolderId != nil ? "New Tissue Here" : "New Tissue", systemImage: "plus")
+                            .font(.system(size: 13, weight: .semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                    }
+                    .liquidGlassProminentButton()
+                    .pointingHand()
+
+                    if selection == .all {
+                        Button(action: { model.pendingAction = .open }) {
+                            Label("Open File…", systemImage: "folder")
+                                .font(.system(size: 13, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                        }
+                        .liquidGlassButton()
+                        .pointingHand()
+                    } else {
+                        Button(action: { selection = .all }) {
+                            Label("Browse All Tissues", systemImage: "square.grid.2x2")
+                                .font(.system(size: 13, weight: .medium))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                        }
+                        .liquidGlassButton()
+                        .pointingHand()
+                    }
+                }
+            }
+            .padding(.top, 4)
         }
         .frame(maxWidth: .infinity)
-        .padding(.top, 80)
+        .padding(.horizontal, 32)
+        .padding(.top, 96)
     }
 
     // MARK: - Interactions
 
-    private func createNewDoodle() {
+    private func createNewBoard() {
         model.createQuickBoard(folderId: activeFolderId)
         onStart()
     }
@@ -1190,7 +1237,7 @@ struct WelcomeView: View {
         }
         let msg = boardsToTrash.count == 1
             ? "Moved \"\(boardsToTrash[0].name)\" to Trash"
-            : "Moved \(boardsToTrash.count) doodles to Trash"
+            : "Moved \(boardsToTrash.count) tissues to Trash"
         showUndoToast(message: msg, trashedIds: ids)
     }
 
@@ -1385,14 +1432,34 @@ private struct BlankCanvasPreview: View {
 }
 
 extension View {
-    @ViewBuilder
     func pointingHand() -> some View {
+        modifier(PointingHandModifier())
+    }
+}
+
+private struct PointingHandModifier: ViewModifier {
+    @State private var isPushed = false
+
+    func body(content: Content) -> some View {
         #if os(macOS)
-        self.onHover { hovering in
-            if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-        }
+        content
+            .onHover { hovering in
+                if hovering && !isPushed {
+                    NSCursor.pointingHand.push()
+                    isPushed = true
+                } else if !hovering && isPushed {
+                    NSCursor.pop()
+                    isPushed = false
+                }
+            }
+            .onDisappear {
+                if isPushed {
+                    NSCursor.pop()
+                    isPushed = false
+                }
+            }
         #else
-        self
+        content
         #endif
     }
 }

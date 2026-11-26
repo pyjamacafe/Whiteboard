@@ -1,6 +1,6 @@
-# Doodles — Whiteboard App
+# Tissue Box
 
-Doodles is a cross-platform vector drawing whiteboard for iPad and Mac, built with SwiftUI and Core Graphics.
+Tissue Box is a cross-platform vector sketching app for iPad and Mac — built with SwiftUI and Core Graphics — designed like a café napkin for quickly sketching and conveying ideas. Each canvas is a **Tissue**.
 
 Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whiteboard)
 
@@ -9,7 +9,7 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 ### Drawing Tools
 - **Pen (`P`)** — Smooth vector strokes with Gaussian pre-filtering and centripetal Catmull-Rom spline interpolation. Adjustable width (2–4 pt) and 8 theme-adaptive color presets.
 - **Sharpie (`S`)** — Two-pass glow/core stroke style with its own color presets and width options.
-- **Fill (`F`)** — Fast local scanline flood fill converted into crisp vector polygons (supporting interior holes via the even-odd fill rule). Includes zero-bleeding open-shape detection, configurable gap-closing tolerance (**Strict**, **Auto**, **Wide**), opacity presets (`25%`–`100%`), and theme-adaptive colors.
+- **Fill (`F`)** — Fast local scanline flood fill converted into crisp vector polygons (supporting interior holes via the even-odd fill rule). Includes zero-bleeding open-shape detection, configurable gap-closing tolerance (**Strict**, **Auto**, **Wide**), visual opacity swatches (`25%`–`100%`), and theme-adaptive colors.
 - **Eraser (`E`)** — Full-stroke or partial erase modes with adjustable size and segment-to-segment hit testing. Choose the erase target (**All**, **Pen**, or **Sharpie**); erasing **All** also removes touched fills.
 - **Select (`⇧S`)** — Lasso-select strokes, fills, and placed images. Move, copy/paste, resize images with corner handles, or double-tap for quick actions.
 
@@ -19,9 +19,10 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 - Per-canvas Light/Dark mode toggle with synchronized theme-adaptive stroke and fill palettes.
 - Apple Pencil support: double-tap toggles eraser, squeeze toggles the toolbar, plus a **Draw with Apple Pencil Only** toggle (off by default on macOS for mouse/trackpad drawing, on by default on iPad for palm rejection).
 
-### Library & Document Management
-- Responsive `NavigationSplitView` welcome screen with **All Doodles**, **Recents**, **Folders** (with drag-and-drop), and **Recently Deleted** (30-day retention, Restore, Delete Permanently, Empty Trash, and Undo toast).
-- Instant **New Doodle (`⌘N`)** creation, time-grouped List view with mini thumbnails, uniform `4:3` Grid view with blank-canvas previews, search (`⌘F`), sorting, and multi-select bulk actions.
+### Library & Interface
+- Native **Liquid Glass** styling (macOS 26 / iOS 26) with unified titlebar toolbar (`+`, Open, Search, Theme, Sort, View), floating glass sidebar, concentric capsule canvas toolbars, and compact icon-only More menu with hover tooltips.
+- Responsive `NavigationSplitView` welcome screen (minimum macOS window size `800×560`) with **All Tissues**, **Recents**, **Folders** (drag-and-drop), and **Recently Deleted** (30-day retention, Restore, Delete Permanently, Empty Trash, and Undo toast).
+- Instant **New Tissue (`⌘N`)** creation, time-grouped List view with mini thumbnails, uniform `4:3` Grid view with blank-canvas previews, search (`⌘F`), sorting, and multi-select bulk actions.
 - Fast atomic background auto-save using binary property lists + external image assets (with full backward compatibility for legacy JSON `.wb` files) and disk-cached thumbnails.
 - Bounded undo/redo history capturing strokes, fills, placed images, and selection state.
 - Import/export: portable `.wb` JSON format, transparent high-DPI PNG, and vector PDF.
@@ -38,8 +39,8 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 | `⌘Z` / `⌘⇧Z` | Undo / Redo |
 | `⌘C` / `⌘V` | Copy / Paste selection |
 | `⌘I` | Import image |
-| `⌘S` / `⌘O` / `⌘W` | Save / Open / Close board |
-| `⌘N` / `⌘F` / `⌘A` | New doodle / Search / Select all (Welcome screen) |
+| `⌘S` / `⌘O` / `⌘W` | Save / Open / Close tissue |
+| `⌘N` / `⌘F` / `⌘A` | New tissue / Search / Select all (Welcome screen) |
 | `Tab` | Toggle toolbar |
 | `Delete` | Delete selected |
 

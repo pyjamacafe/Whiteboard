@@ -399,12 +399,12 @@ final class WhiteboardTests: XCTestCase {
         let id1 = model.createQuickBoard(folderId: folderId)
         let id2 = model.createQuickBoard(folderId: folderId)
 
-        XCTAssertEqual(model.boards.first(where: { $0.id == id1 })?.name, "Untitled Doodle")
-        XCTAssertEqual(model.boards.first(where: { $0.id == id2 })?.name, "Untitled Doodle 2")
+        XCTAssertEqual(model.boards.first(where: { $0.id == id1 })?.name, "Untitled Tissue")
+        XCTAssertEqual(model.boards.first(where: { $0.id == id2 })?.name, "Untitled Tissue 2")
         XCTAssertEqual(model.folderName(forBoardId: id1), "Work")
 
-        model.trashBoard(id: id1, name: "Untitled Doodle")
-        model.trashBoard(id: id2, name: "Untitled Doodle 2")
+        model.trashBoard(id: id1, name: "Untitled Tissue")
+        model.trashBoard(id: id2, name: "Untitled Tissue 2")
         XCTAssertEqual(model.trashedBoards.count, 2)
 
         model.permanentlyDeleteTrashedBoard(id: id1)

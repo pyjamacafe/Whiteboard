@@ -14,11 +14,9 @@ struct ToolSettingsView: View {
             case .select: EmptyView()
             }
         }
-        .padding(5)
-        .background(model.appSettings.isDarkMode ? Color(red: 44/255, green: 44/255, blue: 46/255) : Color(.sRGB, red: 0.97, green: 0.97, blue: 0.97, opacity: 0.85))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .liquidGlassCapsule()
         .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
         .fixedSize()
     }
@@ -52,6 +50,7 @@ struct ToolSettingsView: View {
                                 }
                             }
                         }
+                        .pointingHand()
                 }
             }
         }
@@ -87,7 +86,7 @@ struct ToolSettingsView: View {
                     onSelect(color)
                     dismiss()
                 }
-                .buttonStyle(.borderedProminent)
+                .liquidGlassProminentButton()
             }
             .padding()
             .frame(width: 300, height: 400)
@@ -166,20 +165,26 @@ struct ToolSettingsView: View {
 
             Divider().frame(height: 24)
 
-            // Opacity presets
-            HStack(spacing: 4) {
+            // Opacity palette: swatches showing actual transparency of the selected fill color
+            HStack(spacing: 5) {
                 ForEach(model.fillSettings.opacityOptions, id: \.self) { op in
                     let isSelected = abs(model.fillSettings.opacity - op) < 0.01
                     Button(action: { model.fillSettings.opacity = op }) {
-                        Text("\(Int(op * 100))%")
-                            .font(.caption2.weight(.medium))
-                            .padding(.horizontal, 6)
-                            .frame(height: 26)
-                            .background(isSelected ? Color.accentColor : Color.clear)
-                            .foregroundColor(isSelected ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                        ZStack {
+                            CheckerboardSwatch()
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(model.fillColor.opacity(op))
+                        }
+                        .frame(width: 20, height: 20)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(isSelected ? Color.primary : Color.primary.opacity(0.18), lineWidth: isSelected ? 1.75 : 0.75)
+                        )
                     }
                     .buttonStyle(.plain)
+                    .help("\(Int(op * 100))% Opacity")
+                    .pointingHand()
                 }
             }
 
@@ -199,6 +204,7 @@ struct ToolSettingsView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 5))
                     }
                     .buttonStyle(.plain)
+                    .pointingHand()
                 }
             }
         }
@@ -256,7 +262,32 @@ struct ToolSettingsView: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .pointingHand()
                 }
+            }
+        }
+    }
+}
+
+private struct CheckerboardSwatch: View {
+    var body: some View {
+        Canvas { context, size in
+            let cell: CGFloat = 5
+            let light = Color.white
+            let dark = Color.gray.opacity(0.32)
+            var y: CGFloat = 0
+            var row = 0
+            while y < size.height {
+                var x: CGFloat = 0
+                var col = 0
+                while x < size.width {
+                    let color = (row + col).isMultiple(of: 2) ? light : dark
+                    context.fill(Path(CGRect(x: x, y: y, width: cell, height: cell)), with: .color(color))
+                    x += cell
+                    col += 1
+                }
+                y += cell
+                row += 1
             }
         }
     }

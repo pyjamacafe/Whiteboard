@@ -1282,9 +1282,14 @@ struct CanvasView: View {
         }
 
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-            guard let keyWindow = NSApp.keyWindow,
-                  event.window === keyWindow,
-                  keyWindow.attachedSheet == nil else {
+            // Only pan the canvas when scrolling on the main canvas window itself —
+            // ignore sheets (sheetParent != nil), popovers (parent != nil), and windows with an active sheet.
+            guard let win = event.window,
+                  win === NSApp.keyWindow,
+                  win.attachedSheet == nil,
+                  win.sheetParent == nil,
+                  win.parent == nil,
+                  !model.showAbout else {
                 return event
             }
             offset.width += event.scrollingDeltaX

@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct DoodlesApp: App {
+struct WhiteboardApp: App {
     @State private var model = DrawingModel()
 
     var body: some Scene {
@@ -15,20 +15,25 @@ struct DoodlesApp: App {
                     setTitle()
                 }
                 #if os(macOS)
+                .frame(minWidth: 800, minHeight: 560)
                 .background(WindowAccessor(model: model))
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     model.flushAutoSave(drainBackgroundQueue: true)
                 }
                 #endif
         }
+        #if os(macOS)
+        .defaultSize(width: 1120, height: 740)
+        .windowToolbarStyle(.unified)
+        #endif
         .commands {
             CommandGroup(replacing: .appInfo) {
-                Button("About Doodles") { model.showAbout = true }
+                Button("About Tissue Box") { model.showAbout = true }
             }
             CommandGroup(after: .saveItem) {
                 Button("Open…") { model.openCmd() }
                     .keyboardShortcut("o", modifiers: .command)
-                Button("Close Doodle") { model.closeBoard() }
+                Button("Close Tissue") { model.closeBoard() }
                     .keyboardShortcut("w", modifiers: .command)
             }
             CommandGroup(after: .saveItem) {
@@ -57,18 +62,19 @@ struct DoodlesApp: App {
 
     private func setTitle() {
         #if os(macOS)
+        // On the Welcome screen, NavigationSplitView manages the unified titlebar
+        // via .navigationTitle / .navigationSubtitle.
+        guard !model.showWelcome else { return }
         let t: String
-        if model.showWelcome {
-            if let folder = model.welcomeFolderName {
-                t = "Doodles | \(folder)"
-            } else {
-                t = "Doodles | All Boards"
-            }
-        } else if let id = model.currentBoardId,
-                let board = model.boards.first(where: { $0.id == id }) {
-            t = "Doodles | \(board.name)"
-        } else { t = "Doodles" }
-        NSApp.windows.first?.title = t
+        if let id = model.currentBoardId,
+           let board = model.boards.first(where: { $0.id == id }) {
+            t = "Tissue | \(board.name)"
+        } else {
+            t = "Tissue"
+        }
+        DispatchQueue.main.async {
+            NSApp.windows.first?.title = t
+        }
         #endif
     }
 }
@@ -80,7 +86,9 @@ struct WindowAccessor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async {
-            view.window?.delegate = context.coordinator
+            guard let window = view.window else { return }
+            window.delegate = context.coordinator
+            window.contentMinSize = NSSize(width: 800, height: 560)
         }
         return view
     }

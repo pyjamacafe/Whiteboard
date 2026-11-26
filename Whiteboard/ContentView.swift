@@ -15,12 +15,21 @@ struct ContentView: View {
     @State private var showingExporter = false
     @State private var showHelp = false
     @State private var showSettingsSidebar = false
+    @State private var windowHeight: CGFloat = 700
     @State private var exportFormat: ExportFormat = .wb
     @State private var exportData: Data?
     @State private var exportName = "Untitled"
     @State private var exportType: UTType = .data
 
     enum ExportFormat: String { case wb, png, pdf }
+
+    private var canvasWindowTitle: String {
+        if let id = model.currentBoardId,
+           let board = model.boards.first(where: { $0.id == id }) {
+            return "Tissue | \(board.name)"
+        }
+        return "Tissue"
+    }
 
     var body: some View {
         @Bindable var model = model
@@ -29,16 +38,44 @@ struct ContentView: View {
                 WelcomeView(model: model, onStart: { model.showWelcome = false })
             } else {
                 ZStack {
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear { windowHeight = geo.size.height }
+                            .onChange(of: geo.size.height) { _, h in windowHeight = h }
+                    }
+                    .allowsHitTesting(false)
+
                     CanvasView(model: model, onBeginDraw: { showSettings = false })
                         .ignoresSafeArea()
 
                     VStack(spacing: 0) {
+                        #if compiler(>=6.2)
+                        if #available(macOS 26.0, iOS 26.0, *) {
+                            GlassEffectContainer(spacing: 10) {
+                                VStack(spacing: 6) {
+                                    if model.isToolbarVisible { toolbar }
+                                    if model.isToolbarVisible, let tool = settingsTool, tool != .select {
+                                        ToolSettingsView(model: model, tool: tool)
+                                            .onTapGesture { }
+                                    }
+                                }
+                            }
+                        } else {
+                            if model.isToolbarVisible { toolbar }
+                            if model.isToolbarVisible, let tool = settingsTool, tool != .select {
+                                ToolSettingsView(model: model, tool: tool)
+                                    .padding(.top, 6)
+                                    .onTapGesture { }
+                            }
+                        }
+                        #else
                         if model.isToolbarVisible { toolbar }
                         if model.isToolbarVisible, let tool = settingsTool, tool != .select {
                             ToolSettingsView(model: model, tool: tool)
-                                .padding(.top, 4)
+                                .padding(.top, 6)
                                 .onTapGesture { }
                         }
+                        #endif
                         Spacer()
                     }
 
@@ -50,7 +87,9 @@ struct ContentView: View {
                                 .onTapGesture { showSettingsSidebar = false }
                             settingsSidebarContent
                                 .frame(width: 300)
-                                .background(.thickMaterial)
+                                .clipShape(RoundedRectangle(cornerRadius: 20))
+                                .liquidGlassSurface(cornerRadius: 20)
+                                .padding(12)
                         }
                         .ignoresSafeArea()
                         .transition(.move(edge: .trailing))
@@ -106,15 +145,13 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                             }
                         }
-                        .background(.thickMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
-                        .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+                        .liquidGlassCapsule()
                         .position(model.deleteMenuLocation)
                         .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         .onTapGesture { }  // prevent pass-through
                     }
                 }
+                .navigationTitle(canvasWindowTitle)
             }
         }
 
@@ -246,22 +283,17 @@ struct ContentView: View {
         return Button(action: {}) {
             Image(systemName: systemName)
                 .font(.title3)
-                .frame(width: 32, height: 32)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(minWidth: 38, minHeight: 36)
                 .background(bg)
                 .foregroundColor(fg)
-                .clipShape(RoundedRectangle(cornerRadius: 7))
+                .clipShape(Capsule())
         }
         .onHover { hovering in
             hoveredTool = hovering ? systemName : nil
-            #if os(macOS)
-            if hovering || settingsTool == tool { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-            #endif
         }
-        .onChange(of: settingsTool) { _, newValue in
-            #if os(macOS)
-            if newValue == tool { NSCursor.pointingHand.set() }
-            #endif
-        }
+        .pointingHand()
         .highPriorityGesture(
             TapGesture().onEnded {
                 let now = Date()
@@ -307,52 +339,52 @@ struct ContentView: View {
             Button(action: { model.undo() }) {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.title3)
-                    .frame(width: 32, height: 32)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(minWidth: 38, minHeight: 36)
                     .background(hoveredTool == "undo" ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(model.canUndo ? .primary : .secondary)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(Capsule())
             }
             .buttonStyle(.plain)
             .disabled(!model.canUndo)
             .onHover { hovering in
                 hoveredTool = hovering ? "undo" : nil
-                #if os(macOS)
-                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                #endif
             }
+            .pointingHand()
 
             Button(action: { model.redo() }) {
                 Image(systemName: "arrow.uturn.forward")
                     .font(.title3)
-                    .frame(width: 32, height: 32)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(minWidth: 38, minHeight: 36)
                     .background(hoveredTool == "redo" ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(model.canRedo ? .primary : .secondary)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(Capsule())
             }
             .buttonStyle(.plain)
             .disabled(!model.canRedo)
             .onHover { hovering in
                 hoveredTool = hovering ? "redo" : nil
-                #if os(macOS)
-                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                #endif
             }
+            .pointingHand()
 
             Button(action: { model.closeBoard() }) {
                 Image(systemName: "house")
                     .font(.title3)
-                    .frame(width: 32, height: 32)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .frame(minWidth: 38, minHeight: 36)
                     .background(hoveredTool == "home" ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(.primary)
-                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                    .clipShape(Capsule())
             }
             .buttonStyle(.plain)
             .onHover { hovering in
                 hoveredTool = hovering ? "home" : nil
-                #if os(macOS)
-                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                #endif
             }
+            .pointingHand()
 
             Divider()
                 .frame(height: 24)
@@ -360,12 +392,10 @@ struct ContentView: View {
             settingsMenu
         }
         .buttonStyle(.plain)
-        .padding(5)
-        .background(model.appSettings.isDarkMode ? Color(red: 44/255, green: 44/255, blue: 46/255) : Color(.sRGB, red: 0.97, green: 0.97, blue: 0.97, opacity: 0.85))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary, lineWidth: 0.5))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .liquidGlassCapsule()
         .padding(.top, 12)
-        .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
         .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
     }
 
@@ -399,12 +429,22 @@ struct ContentView: View {
 
                     settingsGroup(title: "Appearance", items: [])
 
-                    Toggle(isOn: $model.appSettings.isDarkMode) {
-                        Label(model.appSettings.isDarkMode ? "Dark Mode" : "Light Mode", systemImage: model.appSettings.isDarkMode ? "moon.fill" : "sun.max.fill")
-                            .onTapGesture { showSettingsSidebar = false }
+                    Button(action: {
+                        model.appSettings.isDarkMode.toggle()
+                        showSettingsSidebar = false
+                    }) {
+                        HStack {
+                            Image(systemName: model.appSettings.isDarkMode ? "sun.max.fill" : "moon.fill")
+                                .frame(width: 24)
+                            Text(model.appSettings.isDarkMode ? "Light Mode" : "Dark Mode")
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 10)
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
+                    .buttonStyle(.borderless)
+                    .foregroundColor(.primary)
 
                     Toggle(isOn: $model.appSettings.revealSettingsOnSingleTap) {
                         Label("Reveal Options on Single Tap", systemImage: model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap")
@@ -452,7 +492,7 @@ struct ContentView: View {
 
                     settingsGroup(title: nil, items: [
                         ("questionmark.circle", "Help", { showHelp = true }, false),
-                        ("info.circle", "About Doodles", { model.showAbout = true }, false),
+                        ("info.circle", "About Tissue Box", { model.showAbout = true }, false),
                     ])
                 }
                 .padding()
@@ -515,83 +555,169 @@ struct ContentView: View {
     #endif
 
     private var settingsMenu: some View {
-        @Bindable var model = model
-        let content = Group {
-            Section {
-                Button(action: { model.undo() }) { Label("Undo", systemImage: "arrow.uturn.backward") }
-                    .disabled(!model.canUndo)
-                Button(action: { model.redo() }) { Label("Redo", systemImage: "arrow.uturn.forward") }
-                    .disabled(!model.canRedo)
-                Button(action: { model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }) {
-                    Label(model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", systemImage: "trash")
-                }
-                .disabled(model.strokes.isEmpty && model.placedImages.isEmpty)
-                Button(action: { model.copySelected() }) { Label("Copy", systemImage: "doc.on.doc") }
-                    .disabled(model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty)
-                Button(action: { model.paste() }) { Label("Paste", systemImage: "doc.on.clipboard") }
-                Button(action: { showImporter = true }) { Label("Import Image", systemImage: "photo") }
-                Button(action: { model.needsRecenter = true }) { Label("Center", systemImage: "viewfinder") }
-                Button(action: { model.closeBoard() }) { Label("Home", systemImage: "house") }
-            }
+        let maxPopoverHeight = max(200, windowHeight - 110)
+        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+        let isEmptyCanvas = model.strokes.isEmpty && model.placedImages.isEmpty && model.fills.isEmpty
+        let cols = [GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6)]
 
-            Divider()
+        return Button(action: { showSettings.toggle() }) {
+            Image(systemName: "line.3.horizontal")
+                .font(.title3)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(minWidth: 38, minHeight: 36)
+                .background(hoveredTool == "settings" || showSettings ? Color.primary.opacity(0.12) : .clear)
+                .foregroundColor(.primary)
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("More")
+        .onHover { hovering in
+            hoveredTool = hovering ? "settings" : nil
+        }
+        .pointingHand()
+        .popover(isPresented: $showSettings, arrowEdge: .bottom) {
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 10) {
+                    // Actions
+                    LazyVGrid(columns: cols, spacing: 6) {
+                        popoverIcon("arrow.uturn.backward", tooltip: "Undo", disabled: !model.canUndo) {
+                            model.undo()
+                        }
+                        popoverIcon("arrow.uturn.forward", tooltip: "Redo", disabled: !model.canRedo) {
+                            model.redo()
+                        }
+                        popoverIcon(
+                            "trash",
+                            tooltip: hasSelection ? "Delete Selected" : "Clear Tissue",
+                            role: .destructive,
+                            disabled: isEmptyCanvas
+                        ) {
+                            showSettings = false
+                            if hasSelection { model.deleteSelected() } else { model.showClearConfirmation = true }
+                        }
+                        popoverIcon("doc.on.doc", tooltip: "Copy", disabled: !hasSelection) {
+                            model.copySelected(); showSettings = false
+                        }
+                        popoverIcon("doc.on.clipboard", tooltip: "Paste") {
+                            model.paste(); showSettings = false
+                        }
+                        popoverIcon("photo", tooltip: "Import Image") {
+                            showSettings = false; showImporter = true
+                        }
+                        popoverIcon("viewfinder", tooltip: "Center Canvas") {
+                            model.needsRecenter = true; showSettings = false
+                        }
+                        popoverIcon("house", tooltip: "Home") {
+                            showSettings = false; model.closeBoard()
+                        }
+                    }
 
-            Section("Appearance") {
-                Toggle(isOn: $model.appSettings.isDarkMode) {
-                    Label(model.appSettings.isDarkMode ? "Dark Mode" : "Light Mode", systemImage: model.appSettings.isDarkMode ? "moon.fill" : "sun.max.fill")
-                }
+                    Divider()
 
-                Toggle(isOn: $model.appSettings.revealSettingsOnSingleTap) {
-                    Label("Show Options on Single Tap", systemImage: model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap")
-                }
+                    // Appearance & Background
+                    LazyVGrid(columns: cols, spacing: 6) {
+                        popoverIcon(
+                            model.appSettings.isDarkMode ? "sun.max.fill" : "moon.fill",
+                            tooltip: model.appSettings.isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"
+                        ) {
+                            model.appSettings.isDarkMode.toggle()
+                        }
+                        popoverIcon(
+                            model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap",
+                            tooltip: "Show Options on Single Tap",
+                            isActive: model.appSettings.revealSettingsOnSingleTap
+                        ) {
+                            model.appSettings.revealSettingsOnSingleTap.toggle()
+                        }
+                        popoverIcon(
+                            "applepencil",
+                            tooltip: "Draw with Apple Pencil Only",
+                            isActive: model.appSettings.pencilOnly
+                        ) {
+                            model.appSettings.pencilOnly.toggle()
+                        }
+                        popoverIcon("bookmark", tooltip: "Save Current as Defaults") {
+                            model.saveDefaults(); showSettings = false
+                        }
 
-                Toggle(isOn: $model.appSettings.pencilOnly) {
-                    Label("Draw with Apple Pencil Only", systemImage: "applepencil")
-                }
+                        ForEach(CanvasBackground.allCases, id: \.self) { bg in
+                            popoverIcon(
+                                iconName(bg),
+                                tooltip: "\(bg.rawValue.capitalized) Background",
+                                isActive: model.appSettings.canvasBackground == bg
+                            ) {
+                                model.appSettings.canvasBackground = bg
+                            }
+                        }
+                    }
 
-                Picker("Background", selection: $model.appSettings.canvasBackground) {
-                    ForEach(CanvasBackground.allCases, id: \.self) { bg in
-                        Label(bg.rawValue.capitalized, systemImage: iconName(bg)).tag(bg)
+                    Divider()
+
+                    // Export, Defaults & Info
+                    LazyVGrid(columns: cols, spacing: 6) {
+                        popoverIcon("square.and.arrow.down", tooltip: "Save .wb") {
+                            showSettings = false; exportFormat = .wb; exportAction()
+                        }
+                        popoverIcon("photo.badge.arrow.down", tooltip: "Export PNG") {
+                            showSettings = false; exportFormat = .png; exportAction()
+                        }
+                        popoverIcon("doc.richtext", tooltip: "Export PDF") {
+                            showSettings = false; exportFormat = .pdf; exportAction()
+                        }
+                        popoverIcon("folder", tooltip: "Open .wb File…") {
+                            showSettings = false; showImporter = true
+                        }
+                        if model.hasDefaults {
+                            popoverIcon("bookmark.fill", tooltip: "Restore Defaults") {
+                                model.loadDefaults(); showSettings = false
+                            }
+                            popoverIcon("arrow.counterclockwise", tooltip: "Reset to Factory Defaults") {
+                                model.resetToFactory(); showSettings = false
+                            }
+                        }
+                        popoverIcon("questionmark.circle", tooltip: "Help & Shortcuts") {
+                            showSettings = false; showHelp = true
+                        }
+                        popoverIcon("info.circle", tooltip: "About Tissue Box") {
+                            showSettings = false; model.showAbout = true
+                        }
                     }
                 }
+                .padding(10)
             }
-
-            Section("Defaults") {
-                Button(action: { model.saveDefaults() }) { Label("Save Current as Defaults", systemImage: "bookmark") }
-                if model.hasDefaults {
-                    Button(action: { model.loadDefaults() }) { Label("Restore Defaults", systemImage: "bookmark.fill") }
-                    Button(action: { model.resetToFactory() }) { Label("Reset to Factory", systemImage: "arrow.counterclockwise") }
-                }
-            }
-
-            Section("Export") {
-                Button(action: { exportFormat = .wb; exportAction() }) { Label("Save", systemImage: "square.and.arrow.down") }
-                Button(action: { exportFormat = .png; exportAction() }) { Label("Export PNG", systemImage: "photo") }
-                Button(action: { exportFormat = .pdf; exportAction() }) { Label("Export PDF", systemImage: "doc.richtext") }
-                Button(action: { showImporter = true }) { Label("Open", systemImage: "folder") }
-            }
-
-            Section {
-                Button(action: { showHelp = true }) { Label("Help", systemImage: "questionmark.circle") }
-                Button(action: { model.showAbout = true }) { Label("About Doodles", systemImage: "info.circle") }
-            }
+            .frame(maxHeight: maxPopoverHeight)
+            .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
         }
+    }
 
-        let label = Image(systemName: "line.3.horizontal")
-            .font(.title3)
-            .frame(width: 32, height: 32)
-            .background(hoveredTool == "settings" ? Color.primary.opacity(0.12) : .clear)
-            .foregroundColor(.primary)
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .onHover { hovering in
-                hoveredTool = hovering ? "settings" : nil
-                #if os(macOS)
-                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
-                #endif
-            }
-
-        return Menu(content: { content }, label: { label })
-            .fixedSize()
+    private func popoverIcon(
+        _ icon: String,
+        tooltip: String,
+        isActive: Bool = false,
+        role: ButtonRole? = nil,
+        disabled: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(role: role, action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 15))
+                .frame(width: 36, height: 34)
+                .background(
+                    isActive ? Color.accentColor :
+                    Color.primary.opacity(0.06)
+                )
+                .foregroundColor(
+                    disabled ? .secondary.opacity(0.45) :
+                    isActive ? .white :
+                    role == .destructive ? .red : .primary
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(tooltip)
+        .pointingHand()
     }
 
     private func exportAction() {
@@ -616,6 +742,97 @@ struct ContentView: View {
             return
         }
         showingExporter = true
+    }
+}
+
+extension View {
+    /// Applies native Apple Liquid Glass on macOS 26+ / iOS 26+, with a refined
+    /// translucent material fallback on earlier OS versions and toolchains.
+    @ViewBuilder
+    func liquidGlassSurface(cornerRadius: CGFloat = 14) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            self.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+        }
+        #else
+        self
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+            )
+            .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+        #endif
+    }
+
+    @ViewBuilder
+    func liquidGlassCapsule() -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            self.glassEffect(.regular, in: .capsule)
+        } else {
+            self
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        }
+        #else
+        self
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        #endif
+    }
+
+    @ViewBuilder
+    func liquidGlassInteractiveCapsule() -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            self.glassEffect(.regular.interactive(), in: .capsule)
+        } else {
+            self
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
+        }
+        #else
+        self
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
+        #endif
+    }
+
+    @ViewBuilder
+    func liquidGlassProminentButton() -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            self.buttonStyle(.glassProminent)
+        } else {
+            self.buttonStyle(.borderedProminent)
+        }
+        #else
+        self.buttonStyle(.borderedProminent)
+        #endif
+    }
+
+    @ViewBuilder
+    func liquidGlassButton() -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, iOS 26.0, *) {
+            self.buttonStyle(.glass)
+        } else {
+            self.buttonStyle(.bordered)
+        }
+        #else
+        self.buttonStyle(.bordered)
+        #endif
     }
 }
 

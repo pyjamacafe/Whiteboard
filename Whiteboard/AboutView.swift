@@ -23,12 +23,12 @@ struct AboutView: View {
                         .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
 
                     VStack(spacing: 4) {
-                        Text("Doodles")
+                        Text("Tissue Box")
                             .font(.system(size: 24, weight: .bold, design: .rounded))
                         Text(appVersion)
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Text("Cross-platform vector drawing whiteboard for iPad and Mac.")
+                        Text("Like a café napkin for quick sketching — capture and convey ideas effortlessly on iPad and Mac.")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -38,11 +38,11 @@ struct AboutView: View {
                     Link(destination: Self.repoURL) {
                         Label("github.com/pyjamacafe/Whiteboard", systemImage: "link")
                             .font(.callout.weight(.medium))
-                            .padding(.horizontal, 14)
+                            .padding(.horizontal, 16)
                             .padding(.vertical, 8)
-                            .background(Color.accentColor.opacity(0.12))
-                            .clipShape(Capsule())
+                            .liquidGlassInteractiveCapsule()
                     }
+                    .pointingHand()
 
                     Divider()
 
@@ -62,7 +62,7 @@ struct AboutView: View {
                 }
                 .padding(24)
             }
-            .navigationTitle("About Doodles")
+            .navigationTitle("About Tissue Box")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }

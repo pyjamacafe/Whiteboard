@@ -63,11 +63,11 @@ jobs:
           ln -s /Applications "$DMG_STAGE/Applications"
           cp LICENSE "$DMG_STAGE/"
 
-          DMG_NAME="Doodles-${VERSION}-macOS-arm64.dmg"
-          ZIP_NAME="Doodles-${VERSION}-macOS-arm64.zip"
+          DMG_NAME="TissueBox-${VERSION}-macOS-arm64.dmg"
+          ZIP_NAME="TissueBox-${VERSION}-macOS-arm64.zip"
 
           hdiutil create \
-            -volname "Doodles ${VERSION}" \
+            -volname "Tissue Box ${VERSION}" \
             -srcfolder "$DMG_STAGE" \
             -ov -format UDZO \
             "$DIST_DIR/$DMG_NAME"
@@ -101,5 +101,5 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: Doodles-macOS-arm64
+          name: TissueBox-macOS-arm64
           path: build/dist/*

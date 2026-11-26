@@ -617,7 +617,7 @@ final class DrawingModel {
     /// Creates a new board immediately with a unique default name (no modal prompt).
     @discardableResult
     func createQuickBoard(folderId: String? = nil) -> String {
-        let base = "Untitled Doodle"
+        let base = "Untitled Tissue"
         let existingNames = Set(boards.map(\.name))
         var candidate = base
         var n = 2
