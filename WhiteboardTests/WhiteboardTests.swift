@@ -502,6 +502,19 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertTrue(model.fills.isEmpty)
         model.redo()
         XCTAssertEqual(model.fills.count, 1)
+
+        // Replace mode (default): refilling the same region replaces the prior fill
+        model.fillSettings.overlapMode = .replace
+        model.selectFillPreset(1) // Red
+        XCTAssertTrue(model.floodFill(at: CGPoint(x: 50, y: 50)))
+        XCTAssertEqual(model.fills.count, 1, "Replace mode should replace the existing fill in that region")
+        XCTAssertEqual(model.fills[0].presetIndex, 1)
+
+        // Blend mode: refilling the same region layers a new fill on top
+        model.fillSettings.overlapMode = .blend
+        model.selectFillPreset(4) // Green
+        XCTAssertTrue(model.floodFill(at: CGPoint(x: 50, y: 50)))
+        XCTAssertEqual(model.fills.count, 2, "Blend mode should keep both fills layered")
     }
 
     func testPencilDoubleTapTogglesEraserAndRestoresPreviousTool() {

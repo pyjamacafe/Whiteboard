@@ -398,15 +398,29 @@ class DrawingCanvasView: UIView {
         return layer
     }()
     private var isTouchActive: Bool = false
+    private var hasUsedPencil: Bool = false
 
     private lazy var pinchGesture: UIPinchGestureRecognizer = {
-        UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        let g = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        g.delegate = self
+        return g
     }()
 
     private lazy var panGesture: UIPanGestureRecognizer = {
         let g = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
         g.minimumNumberOfTouches = 2
         g.maximumNumberOfTouches = 2
+        g.delegate = self
+        return g
+    }()
+
+    /// Single-finger pan gesture active when drawing with Apple Pencil (or when Pencil Only is on).
+    private lazy var fingerPanGesture: UIPanGestureRecognizer = {
+        let g = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+        g.minimumNumberOfTouches = 1
+        g.maximumNumberOfTouches = 1
+        g.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        g.delegate = self
         return g
     }()
 
@@ -470,6 +484,7 @@ class DrawingCanvasView: UIView {
         isMultipleTouchEnabled = true
         addGestureRecognizer(pinchGesture)
         addGestureRecognizer(panGesture)
+        addGestureRecognizer(fingerPanGesture)
 
         gridView.frame = bounds
         gridView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -488,12 +503,6 @@ class DrawingCanvasView: UIView {
         if #available(iOS 17.0, *) {
             let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
             addGestureRecognizer(hover)
-        }
-
-        if #available(iOS 12.1, *) {
-            let interaction = UIPencilInteraction()
-            interaction.delegate = self
-            addInteraction(interaction)
         }
     }
 
@@ -584,7 +593,11 @@ class DrawingCanvasView: UIView {
         lastTouchPoint = touch.location(in: self)
         model.lastCanvasTapLocation = toCanvas(touch.location(in: self))
         #if os(iOS) && !targetEnvironment(macCatalyst)
-        guard !model.appSettings.pencilOnly || touch.type == .pencil || model.currentTool == .select else { return }
+        if touch.type == .pencil {
+            hasUsedPencil = true
+        }
+        let pencilModeActive = model.appSettings.pencilOnly || hasUsedPencil
+        guard !pencilModeActive || touch.type == .pencil || model.currentTool == .select else { return }
         #endif
 
         onBeginDraw?()
@@ -669,7 +682,11 @@ class DrawingCanvasView: UIView {
         guard let touch = touches.first, let model = model else { return }
         lastTouchPoint = touch.location(in: self)
         #if os(iOS) && !targetEnvironment(macCatalyst)
-        guard !model.appSettings.pencilOnly || touch.type == .pencil || model.currentTool == .select else { return }
+        if touch.type == .pencil {
+            hasUsedPencil = true
+        }
+        let pencilModeActive = model.appSettings.pencilOnly || hasUsedPencil
+        guard !pencilModeActive || touch.type == .pencil || model.currentTool == .select else { return }
         #endif
 
         if model.currentTool == .fill { return }
@@ -774,28 +791,32 @@ class DrawingCanvasView: UIView {
     }
 }
 
-// MARK: - Pencil Interaction
+// MARK: - Gesture Recognizer Delegate (iOS)
 
-@available(iOS 12.1, *)
-extension DrawingCanvasView: UIPencilInteractionDelegate {
-    static var lastPencilTap: Date = .distantPast
+extension DrawingCanvasView: UIGestureRecognizerDelegate {
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === fingerPanGesture {
+            guard let model else { return false }
+            let pencilModeActive = model.appSettings.pencilOnly || hasUsedPencil
+            return pencilModeActive && model.currentTool != .select
+        }
+        return true
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        (gestureRecognizer === pinchGesture && otherGestureRecognizer === panGesture) ||
+        (gestureRecognizer === panGesture && otherGestureRecognizer === pinchGesture)
+    }
+}
+
+// MARK: - Tap Timestamps (iOS)
+
+extension DrawingCanvasView {
     static var lastSelectTap: Date = .distantPast
     static var lastEmptyTap: Date = .distantPast
-
-    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
-        guard let model = model else { return }
-        if model.currentTool == .eraser {
-            model.selectTool(model.previousTool)
-        } else {
-            model.previousTool = model.currentTool
-            model.selectTool(.eraser)
-        }
-    }
-
-    @available(iOS 17.5, *)
-    func pencilInteractionDidSqueeze(_ interaction: UIPencilInteraction) {
-        model?.isToolbarVisible.toggle()
-    }
 }
 
 // MARK: - macOS Canvas
@@ -1135,7 +1156,11 @@ struct CanvasView: View {
             offset: offset,
             scale: max(scale, 0.01),
             onPoint: { pointCount = $0 },
-            onBeginDraw: onBeginDraw
+            onBeginDraw: onBeginDraw,
+            onPan: { delta in
+                offset.width += delta.width
+                offset.height += delta.height
+            }
         )
     }
 
@@ -1349,6 +1374,9 @@ struct DrawingInputOverlay: NSViewRepresentable {
     final class InputView: NSView {
         var handler: CanvasPointerHandler?
         private var lastHoverPoint: CGPoint?
+        private var hasUsedPencil: Bool = false
+        private var isFingerPanning: Bool = false
+        private var lastPanPoint: CGPoint = .zero
 
         /// GPU-composited hover dot — moving the mouse updates this CALayer directly
         /// with ZERO SwiftUI state mutations or Canvas redraws!
@@ -1443,6 +1471,12 @@ struct DrawingInputOverlay: NSViewRepresentable {
             return false
         }
 
+        private func shouldPanWithNonPencil(_ event: NSEvent, handler: CanvasPointerHandler) -> Bool {
+            guard handler.model.currentTool != .select else { return false }
+            guard !isPencil(event) else { return false }
+            return handler.model.appSettings.pencilOnly || hasUsedPencil
+        }
+
         private func shouldAcceptInput(_ event: NSEvent, handler: CanvasPointerHandler) -> Bool {
             if handler.model.currentTool == .select { return true }
             if !handler.model.appSettings.pencilOnly { return true }
@@ -1459,19 +1493,41 @@ struct DrawingInputOverlay: NSViewRepresentable {
             )
         }
 
+        override func tabletProximity(with event: NSEvent) {
+            super.tabletProximity(with: event)
+            hasUsedPencil = true
+        }
+
         override func mouseDown(with event: NSEvent) {
             log(event, "down")
             super.mouseDown(with: event)
-            guard let h = handler, shouldAcceptInput(event, handler: h) else { return }
+            if isPencil(event) { hasUsedPencil = true }
+            guard let h = handler else { return }
             let loc = convert(event.locationInWindow, from: nil)
+            if shouldPanWithNonPencil(event, handler: h) {
+                isFingerPanning = true
+                lastPanPoint = loc
+                updateHoverDot(at: nil)
+                NSCursor.closedHand.push()
+                return
+            }
+            guard shouldAcceptInput(event, handler: h) else { return }
             updateHoverDot(at: loc)
             h.onChange(canvasPoint(for: event), drawing: true)
         }
 
         override func mouseDragged(with event: NSEvent) {
             super.mouseDragged(with: event)
-            guard let h = handler, shouldAcceptInput(event, handler: h) else { return }
+            if isPencil(event) { hasUsedPencil = true }
+            guard let h = handler else { return }
             let loc = convert(event.locationInWindow, from: nil)
+            if isFingerPanning {
+                let delta = CGSize(width: loc.x - lastPanPoint.x, height: loc.y - lastPanPoint.y)
+                lastPanPoint = loc
+                h.onPan(delta)
+                return
+            }
+            guard shouldAcceptInput(event, handler: h) else { return }
             updateHoverDot(at: loc)
             h.onChange(canvasPoint(for: event), drawing: false)
         }
@@ -1479,11 +1535,17 @@ struct DrawingInputOverlay: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             log(event, "up")
             super.mouseUp(with: event)
+            if isFingerPanning {
+                isFingerPanning = false
+                NSCursor.pop()
+                return
+            }
             guard let h = handler, shouldAcceptInput(event, handler: h) else { return }
             h.onEnd()
         }
 
         override func mouseMoved(with event: NSEvent) {
+            if isPencil(event) { hasUsedPencil = true }
             updateHoverDot(at: convert(event.locationInWindow, from: nil))
         }
 
@@ -1504,6 +1566,7 @@ struct CanvasPointerHandler {
     let scale: CGFloat
     let onPoint: (Int) -> Void
     let onBeginDraw: (() -> Void)?
+    let onPan: (CGSize) -> Void
 
     func onChange(_ canvas: CGPoint, drawing: Bool) {
         if drawing {

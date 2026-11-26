@@ -165,48 +165,85 @@ struct ToolSettingsView: View {
 
             Divider().frame(height: 24)
 
-            // Opacity palette: swatches showing actual transparency of the selected fill color
-            HStack(spacing: 5) {
-                ForEach(model.fillSettings.opacityOptions, id: \.self) { op in
-                    let isSelected = abs(model.fillSettings.opacity - op) < 0.01
-                    Button(action: { model.fillSettings.opacity = op }) {
-                        ZStack {
-                            CheckerboardSwatch()
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(model.fillColor.opacity(op))
-                        }
-                        .frame(width: 20, height: 20)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(isSelected ? Color.primary : Color.primary.opacity(0.18), lineWidth: isSelected ? 1.75 : 0.75)
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help("\(Int(op * 100))% Opacity")
-                    .pointingHand()
+            // Single opacity swatch cycling 25% -> 50% -> 75% -> 100% -> 25%
+            Button(action: cycleFillOpacity) {
+                ZStack {
+                    CheckerboardSwatch()
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(model.fillColor.opacity(model.fillSettings.opacity))
                 }
+                .frame(width: 26, height: 26)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.primary.opacity(0.25), lineWidth: 1)
+                )
             }
+            .buttonStyle(.plain)
+            .help("Opacity: \(Int((model.fillSettings.opacity * 100).rounded()))% (tap to cycle 25% / 50% / 75% / 100%)")
+            .pointingHand()
 
-            Divider().frame(height: 24)
-
-            // Gap tolerance presets (Off / Low / Med)
-            HStack(spacing: 4) {
-                ForEach([(label: "Strict", val: CGFloat(0)), (label: "Auto", val: CGFloat(2.5)), (label: "Wide", val: CGFloat(5))], id: \.label) { opt in
-                    let isSelected = abs(model.fillSettings.gapTolerance - opt.val) < 0.1
-                    Button(action: { model.fillSettings.gapTolerance = opt.val }) {
-                        Text(opt.label)
-                            .font(.caption2.weight(.medium))
-                            .padding(.horizontal, 6)
-                            .frame(height: 26)
-                            .background(isSelected ? Color.accentColor : Color.clear)
-                            .foregroundColor(isSelected ? .white : .primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHand()
-                }
+            // Single icon-only cycle button for Gap Closing: Strict (0) -> Auto (2.5) -> Wide (5)
+            Button(action: cycleFillGapTolerance) {
+                Image(systemName: fillGapIcon)
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .background(Color.primary.opacity(0.08))
+                    .foregroundColor(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
             }
+            .buttonStyle(.plain)
+            .help("Gap Closing: \(fillGapLabel) (tap to cycle Strict / Auto / Wide)")
+            .pointingHand()
+
+            // Icon-only toggle between Replace (default, no blending) and Blend
+            Button(action: {
+                model.fillSettings.overlapMode = model.fillSettings.overlapMode == .replace ? .blend : .replace
+            }) {
+                Image(systemName: model.fillSettings.overlapMode == .replace ? "square.filled.on.square" : "square.on.square")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .background(model.fillSettings.overlapMode == .blend ? Color.accentColor : Color.primary.opacity(0.08))
+                    .foregroundColor(model.fillSettings.overlapMode == .blend ? .white : .primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+            .help(model.fillSettings.overlapMode == .replace
+                  ? "Replace Mode: refilling replaces the existing color (tap to switch to Blend)"
+                  : "Blend Mode: refilling layers colors together (tap to switch to Replace)")
+            .pointingHand()
+        }
+    }
+
+    private var fillGapLabel: String {
+        if model.fillSettings.gapTolerance < 1.0 { return "Strict" }
+        if model.fillSettings.gapTolerance < 4.0 { return "Auto" }
+        return "Wide"
+    }
+
+    private var fillGapIcon: String {
+        if model.fillSettings.gapTolerance < 1.0 { return "lock.fill" }
+        if model.fillSettings.gapTolerance < 4.0 { return "wand.and.stars" }
+        return "arrow.left.and.right"
+    }
+
+    private func cycleFillOpacity() {
+        let options = model.fillSettings.opacityOptions
+        guard !options.isEmpty else { return }
+        if let idx = options.firstIndex(where: { abs($0 - model.fillSettings.opacity) < 0.01 }) {
+            model.fillSettings.opacity = options[(idx + 1) % options.count]
+        } else {
+            model.fillSettings.opacity = options[0]
+        }
+    }
+
+    private func cycleFillGapTolerance() {
+        if model.fillSettings.gapTolerance < 1.0 {
+            model.fillSettings.gapTolerance = 2.5
+        } else if model.fillSettings.gapTolerance < 4.0 {
+            model.fillSettings.gapTolerance = 5.0
+        } else {
+            model.fillSettings.gapTolerance = 0
         }
     }
 

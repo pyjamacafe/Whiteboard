@@ -573,6 +573,12 @@ struct ContentView: View {
         let isEmptyCanvas = model.strokes.isEmpty && model.placedImages.isEmpty && model.fills.isEmpty
         let cols = [GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6)]
 
+        #if os(iOS)
+        let popoverArrowEdge: Edge = .top
+        #else
+        let popoverArrowEdge: Edge = .bottom
+        #endif
+
         return Button(action: { showSettings.toggle() }) {
             Image(systemName: "line.3.horizontal")
                 .font(.title3)
@@ -589,7 +595,7 @@ struct ContentView: View {
             hoveredTool = hovering ? "settings" : nil
         }
         .pointingHand()
-        .popover(isPresented: $showSettings, arrowEdge: .bottom) {
+        .popover(isPresented: $showSettings, attachmentAnchor: .rect(.bounds), arrowEdge: popoverArrowEdge) {
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 10) {
                     // Actions

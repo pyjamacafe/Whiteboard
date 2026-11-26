@@ -34,7 +34,7 @@ struct HelpView: View {
                                      detail: "Bold two-pass glow/core stroke with its own independent color presets.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "drop.fill", color: .teal, title: "Fill", key: "F",
-                                     detail: "Tap inside any closed shape to fill it cleanly without bleeding. Adjust opacity and gap-closing tolerance.")
+                                     detail: "Tap inside any closed shape to fill it cleanly without bleeding. Adjust opacity, cycle gap-closing (Strict / Auto / Wide), and toggle Replace vs. Blend mode.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "eraser", color: .pink, title: "Eraser", key: "E",
                                      detail: "Switch between Full Stroke and Partial erase, or target All, Pen, or Sharpie only.")
@@ -59,7 +59,6 @@ struct HelpView: View {
                             shortcutSubgroup("Files & Library", rows: [
                                 ("New tissue", "⌘N"),
                                 ("Search tissues", "⌘F"),
-                                ("Select all tissues", "⌘A"),
                                 ("Save / Open .wb", "⌘S / ⌘O"),
                                 ("Close tissue", "⌘W"),
                             ])
@@ -70,9 +69,9 @@ struct HelpView: View {
                     helpCard("Gestures & Tips", icon: "hand.draw") {
                         TipRow(icon: "hand.point.up.left", text: "Tap a tool to open its color, width, opacity, or eraser options.")
                         Divider().opacity(0.4)
-                        TipRow(icon: "applepencil", text: "Apple Pencil double-tap toggles the eraser; squeeze hides/shows the toolbar.")
+                        TipRow(icon: "applepencil", text: "Apple Pencil double-tap toggles Eraser (iPad & macOS Sidecar); Apple Pencil Pro squeeze cycles tools on iPad.")
                         Divider().opacity(0.4)
-                        TipRow(icon: "arrow.up.left.and.arrow.down.right", text: "Scroll (Mac) or two-finger drag (iPad) to pan the infinite canvas; pinch to zoom.")
+                        TipRow(icon: "arrow.up.left.and.arrow.down.right", text: "Pan the infinite canvas by scrolling (Mac), two-finger dragging (iPad), or single-finger dragging when using Apple Pencil; pinch to zoom.")
                         Divider().opacity(0.4)
                         TipRow(icon: "square.and.arrow.up", text: "Export any tissue as portable .wb, transparent high-DPI PNG, or vector PDF from the More menu.")
                     }

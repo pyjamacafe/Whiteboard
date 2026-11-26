@@ -190,12 +190,18 @@ struct SharpieSettings {
     ]
 }
 
+enum FillOverlapMode: String, CaseIterable {
+    case replace = "Replace"
+    case blend = "Blend"
+}
+
 struct FillSettings {
     var lightColor: Color = Color(red: 0.0, green: 0.35, blue: 1.0)
     var darkColor: Color = Color(red: 0.3, green: 0.6, blue: 1.0)
-    var opacity: Double = 0.5
+    var opacity: Double = 0.25
     let opacityOptions: [Double] = [0.25, 0.5, 0.75, 1.0]
     var gapTolerance: CGFloat = 2.5
+    var overlapMode: FillOverlapMode = .replace
     var lightPresets: [Color] = [
         Color(red: 0.05, green: 0.05, blue: 0.05),
         Color(red: 0.95, green: 0.0, blue: 0.1),
@@ -875,6 +881,20 @@ final class DrawingModel {
             opacity: fillSettings.opacity,
             presetIndex: fillPresetIndex
         )
+        if fillSettings.overlapMode == .replace {
+            let newBox = shape.boundingBox()
+            let expandedNewBox = newBox.insetBy(dx: -8, dy: -8)
+            fills.removeAll { existing in
+                let oldBox = existing.boundingBox()
+                guard !oldBox.isNull, oldBox.intersects(newBox) else { return false }
+                guard existing.makeCGPath().contains(point, using: .evenOdd) else { return false }
+                if expandedNewBox.contains(oldBox) { return true }
+                let inter = oldBox.intersection(newBox)
+                let interArea = max(0, inter.width) * max(0, inter.height)
+                let unionArea = oldBox.width * oldBox.height + newBox.width * newBox.height - interArea
+                return unionArea > 0 && (interArea / unionArea) > 0.7
+            }
+        }
         fills.append(shape)
         updateUndoRedo()
         scheduleAutoSave()

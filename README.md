@@ -9,7 +9,7 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 ### Drawing Tools
 - **Pen (`P`)** — Smooth vector strokes with Gaussian pre-filtering and centripetal Catmull-Rom spline interpolation. Adjustable width (2–4 pt) and 8 theme-adaptive color presets.
 - **Sharpie (`S`)** — Two-pass glow/core stroke style with its own color presets and width options.
-- **Fill (`F`)** — Fast local scanline flood fill converted into crisp vector polygons (supporting interior holes via the even-odd fill rule). Includes zero-bleeding open-shape detection, configurable gap-closing tolerance (**Strict**, **Auto**, **Wide**), visual opacity swatches (`25%`–`100%`), and theme-adaptive colors.
+- **Fill (`F`)** — Fast local scanline flood fill converted into crisp vector polygons (supporting interior holes via the even-odd fill rule and sharp corner preservation). Includes zero-bleeding open-shape detection, visual opacity swatches (`25%`–`100%`), an icon-only gap-closing cycle button (**Strict**, **Auto**, **Wide**), an icon-only **Replace / Blend** mode toggle (Replace by default so refilling swaps colors cleanly without blending), and theme-adaptive colors.
 - **Eraser (`E`)** — Full-stroke or partial erase modes with adjustable size and segment-to-segment hit testing. Choose the erase target (**All**, **Pen**, or **Sharpie**); erasing **All** also removes touched fills.
 - **Select (`⇧S`)** — Lasso-select strokes, fills, and placed images. Move, copy/paste, resize images with corner handles, or double-tap for quick actions.
 
@@ -17,12 +17,12 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 - Infinite pannable/zoomable canvas with spatial-indexed viewport culling and cached vector paths.
 - Dashed grid, dots, ruled, or plain background.
 - Per-canvas Light/Dark mode toggle with synchronized theme-adaptive stroke and fill palettes.
-- Apple Pencil support: double-tap toggles eraser, squeeze toggles the toolbar, plus a **Draw with Apple Pencil Only** toggle (off by default on macOS for mouse/trackpad drawing, on by default on iPad for palm rejection).
+- Apple Pencil support: double-tap toggles Eraser (on both iPadOS and macOS Sidecar), Apple Pencil Pro squeeze cycles drawing tools on iPadOS, single-finger dragging pans the canvas when using Apple Pencil, plus a **Draw with Apple Pencil Only** toggle (off by default on macOS for mouse/trackpad drawing, on by default on iPad for palm rejection).
 
 ### Library & Interface
 - Native **Liquid Glass** styling (macOS 26 / iOS 26) with unified titlebar toolbar (`+`, Open, Search, Theme, Sort, View), floating glass sidebar, concentric capsule canvas toolbars, and compact icon-only More menu with hover tooltips.
 - Responsive `NavigationSplitView` welcome screen (minimum macOS window size `800×560`) with **All Tissues**, **Recents**, **Folders** (drag-and-drop), and **Recently Deleted** (30-day retention, Restore, Delete Permanently, Empty Trash, and Undo toast).
-- Instant **New Tissue (`⌘N`)** creation, time-grouped List view with mini thumbnails, uniform `4:3` Grid view with blank-canvas previews, search (`⌘F`), sorting, and multi-select bulk actions.
+- Instant **New Tissue (`⌘N`)** creation, time-grouped List view with mini thumbnails, uniform `4:3` Grid view with blank-canvas previews, search (`⌘F`), and sorting.
 - Fast atomic background auto-save using binary property lists + external image assets (with full backward compatibility for legacy JSON `.wb` files) and disk-cached thumbnails.
 - Bounded undo/redo history capturing strokes, fills, placed images, and selection state.
 - Import/export: portable `.wb` JSON format, transparent high-DPI PNG, and vector PDF.
@@ -40,7 +40,7 @@ Repository: [github.com/pyjamacafe/Whiteboard](https://github.com/pyjamacafe/Whi
 | `⌘C` / `⌘V` | Copy / Paste selection |
 | `⌘I` | Import image |
 | `⌘S` / `⌘O` / `⌘W` | Save / Open / Close tissue |
-| `⌘N` / `⌘F` / `⌘A` | New tissue / Search / Select all (Welcome screen) |
+| `⌘N` / `⌘F` | New tissue / Search (Welcome screen) |
 | `Tab` | Toggle toolbar |
 | `Delete` | Delete selected |
 
@@ -58,12 +58,12 @@ Pre-built macOS releases (`.dmg` and `.zip` with `SHA256SUMS.txt`) are published
 
 Because releases are ad-hoc signed, macOS Gatekeeper may prompt on first launch:
 ```bash
-xattr -dr com.apple.quarantine /Applications/Whiteboard.app
+xattr -dr com.apple.quarantine "/Applications/Tissue Box.app"
 ```
 
 ## Build Requirements
-- iOS 17+ / macOS 14+
-- Xcode 16+
+- macOS 27 (Golden Gate)+ / iPadOS 27+ (pre-built GitHub Releases target macOS 27+ Apple Silicon)
+- Xcode 26+
 - Swift 5.9+
 
 ## License
