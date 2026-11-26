@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 #if os(iOS)
+import PhotosUI
 import UIKit
 #endif
 
@@ -15,6 +16,11 @@ struct ContentView: View {
     @State private var renamingSceneId: UUID?
     @State private var renameSceneText: String = ""
     @State private var showImporter = false
+    @State private var showImageImporter = false
+    #if os(iOS)
+    @State private var showPhotosPicker = false
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
+    #endif
     @State private var showingExporter = false
     @State private var showHelp = false
     @State private var showSettingsSidebar = false
@@ -168,6 +174,9 @@ struct ContentView: View {
                     }
                 }
                 .navigationTitle(canvasWindowTitle)
+                .onDrop(of: [.image, .fileURL], isTargeted: nil) { providers in
+                    handleImageDrop(providers: providers)
+                }
             }
         }
 
@@ -184,8 +193,10 @@ struct ContentView: View {
             .onChange(of: model.pendingAction) { _, newValue in
                 guard let newValue else { return }
                 switch newValue {
-                case .open, .importImage:
+                case .open:
                     showImporter = true
+                case .importImage:
+                    showImageImporter = true
                 case .export(let format):
                     exportFormat = format == .png ? .png : .pdf
                     exportAction()
@@ -205,8 +216,7 @@ struct ContentView: View {
                 case .success(let url):
                     let shouldStop = url.startAccessingSecurityScopedResource()
                     defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
-                    let ext = url.pathExtension.lowercased()
-                    if ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "heic" || ext == "gif" {
+                    if let utType = UTType(filenameExtension: url.pathExtension), utType.conforms(to: .image) {
                         model.addImage(url: url)
                     } else {
                         do {
@@ -221,6 +231,33 @@ struct ContentView: View {
                     model.lastErrorMessage = "Import failed: \(error.localizedDescription)"
                 }
             }
+            .fileImporter(isPresented: $showImageImporter, allowedContentTypes: [.image], allowsMultipleSelection: true) { result in
+                switch result {
+                case .success(let urls):
+                    for (idx, url) in urls.enumerated() {
+                        let shouldStop = url.startAccessingSecurityScopedResource()
+                        defer { if shouldStop { url.stopAccessingSecurityScopedResource() } }
+                        model.addImage(url: url, staggerIndex: idx)
+                    }
+                case .failure(let error):
+                    model.lastErrorMessage = "Image import failed: \(error.localizedDescription)"
+                }
+            }
+            #if os(iOS)
+            .photosPicker(isPresented: $showPhotosPicker, selection: $selectedPhotoItems, maxSelectionCount: 10, matching: .images)
+            .onChange(of: selectedPhotoItems) { _, items in
+                guard !items.isEmpty else { return }
+                let toLoad = items
+                selectedPhotoItems = []
+                Task { @MainActor in
+                    for (idx, item) in toLoad.enumerated() {
+                        if let data = try? await item.loadTransferable(type: Data.self) {
+                            model.addImage(data: data, staggerIndex: idx)
+                        }
+                    }
+                }
+            }
+            #endif
             .sheet(isPresented: $showHelp) {
                 HelpView()
                     .preferredColorScheme(model.appSettings.isDarkMode ? .dark : .light)
@@ -266,7 +303,7 @@ struct ContentView: View {
                 .keyboardShortcut("o", modifiers: .command)
             Button("") { model.closeBoard() }
                 .keyboardShortcut("w", modifiers: .command)
-            Button("") { showImporter = true }
+            Button("") { showImageImporter = true }
                 .keyboardShortcut("i", modifiers: .command)
             Button("") { model.addScene() }
                 .keyboardShortcut("x", modifiers: .shift)
@@ -331,6 +368,26 @@ struct ContentView: View {
         #endif
     }
 
+    #if os(iOS)
+    private let toolbarBtnMinW: CGFloat = 46
+    private let toolbarBtnMinH: CGFloat = 44
+    private let toolbarIconFont: Font = .title2
+    private let toolbarNavBtnW: CGFloat = 34
+    private let toolbarDividerH: CGFloat = 30
+    private let toolbarPadH: CGFloat = 14
+    private let toolbarPadV: CGFloat = 8
+    private let toolbarSpacing: CGFloat = 10
+    #else
+    private let toolbarBtnMinW: CGFloat = 38
+    private let toolbarBtnMinH: CGFloat = 36
+    private let toolbarIconFont: Font = .title3
+    private let toolbarNavBtnW: CGFloat = 26
+    private let toolbarDividerH: CGFloat = 24
+    private let toolbarPadH: CGFloat = 10
+    private let toolbarPadV: CGFloat = 6
+    private let toolbarSpacing: CGFloat = 8
+    #endif
+
     private func toolButton(systemName: String, tool: Tool) -> some View {
         let isSelected = model.currentTool == tool
         let isHovered = hoveredTool == systemName
@@ -338,10 +395,10 @@ struct ContentView: View {
         let fg: Color = isSelected ? contrastingColor(for: bg) : isHovered ? .primary : .secondary
         return Button(action: {}) {
             Image(systemName: systemName)
-                .font(.title3)
+                .font(toolbarIconFont)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
-                .frame(minWidth: 38, minHeight: 36)
+                .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
                 .background(bg)
                 .foregroundColor(fg)
                 .clipShape(Capsule())
@@ -382,7 +439,7 @@ struct ContentView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: toolbarSpacing) {
             toolButton(systemName: "pencil.tip", tool: .pen)
             toolButton(systemName: "pencil", tool: .sharpie)
             toolButton(systemName: "drop.fill", tool: .fill)
@@ -390,13 +447,13 @@ struct ContentView: View {
             toolButton(systemName: "cursorarrow.click", tool: .select)
 
             Divider()
-                .frame(height: 24)
+                .frame(height: toolbarDividerH)
 
             HStack(spacing: 2) {
                 Button(action: { model.goToPreviousScene() }) {
                     Image(systemName: "chevron.left")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 26, height: 36)
+                        .font(.system(size: toolbarNavBtnW > 30 ? 15 : 13, weight: .semibold))
+                        .frame(width: toolbarNavBtnW, height: toolbarBtnMinH)
                         .background(hoveredTool == "prevScene" ? Color.primary.opacity(0.12) : .clear)
                         .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
                         .clipShape(Capsule())
@@ -411,8 +468,8 @@ struct ContentView: View {
 
                 Button(action: { model.goToNextScene() }) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
-                        .frame(width: 26, height: 36)
+                        .font(.system(size: toolbarNavBtnW > 30 ? 15 : 13, weight: .semibold))
+                        .frame(width: toolbarNavBtnW, height: toolbarBtnMinH)
                         .background(hoveredTool == "nextScene" ? Color.primary.opacity(0.12) : .clear)
                         .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
                         .clipShape(Capsule())
@@ -426,10 +483,10 @@ struct ContentView: View {
 
             Button(action: { model.closeBoard() }) {
                 Image(systemName: "house")
-                    .font(.title3)
+                    .font(toolbarIconFont)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
-                    .frame(minWidth: 38, minHeight: 36)
+                    .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
                     .background(hoveredTool == "home" ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(.primary)
                     .clipShape(Capsule())
@@ -442,13 +499,13 @@ struct ContentView: View {
             .pointingHand()
 
             Divider()
-                .frame(height: 24)
+                .frame(height: toolbarDividerH)
 
             settingsMenu
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, toolbarPadH)
+        .padding(.vertical, toolbarPadV)
         .liquidGlassCapsule()
         .padding(.top, 12)
         .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
@@ -625,10 +682,10 @@ struct ContentView: View {
         }) {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "rectangle.stack")
-                    .font(.title3)
+                    .font(toolbarIconFont)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
-                    .frame(minWidth: 38, minHeight: 36)
+                    .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
                     .background(hoveredTool == "scenes" || showScenes ? Color.primary.opacity(0.12) : .clear)
                     .foregroundColor(showScenes ? .accentColor : .primary)
                     .clipShape(Capsule())
@@ -842,10 +899,10 @@ struct ContentView: View {
 
         return Button(action: { showSettings.toggle() }) {
             Image(systemName: "line.3.horizontal")
-                .font(.title3)
+                .font(toolbarIconFont)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
-                .frame(minWidth: 38, minHeight: 36)
+                .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
                 .background(hoveredTool == "settings" || showSettings ? Color.primary.opacity(0.12) : .clear)
                 .foregroundColor(.primary)
                 .clipShape(Capsule())
@@ -882,8 +939,13 @@ struct ContentView: View {
                         popoverIcon("doc.on.clipboard", tooltip: "Paste") {
                             model.paste(); showSettings = false
                         }
-                        popoverIcon("photo", tooltip: "Import Image") {
-                            showSettings = false; showImporter = true
+                        #if os(iOS)
+                        popoverIcon("photo.on.rectangle", tooltip: "Import from Photos") {
+                            showSettings = false; showPhotosPicker = true
+                        }
+                        #endif
+                        popoverIcon("photo", tooltip: "Import Image File…") {
+                            showSettings = false; showImageImporter = true
                         }
                         popoverIcon("viewfinder", tooltip: "Center Canvas") {
                             model.needsRecenter = true; showSettings = false
@@ -999,6 +1061,34 @@ struct ContentView: View {
         .disabled(disabled)
         .help(tooltip)
         .pointingHand()
+    }
+
+    private func handleImageDrop(providers: [NSItemProvider]) -> Bool {
+        var accepted = false
+        for (idx, provider) in providers.enumerated() {
+            if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                accepted = true
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    guard let data else { return }
+                    Task { @MainActor in
+                        model.addImage(data: data, staggerIndex: idx)
+                    }
+                }
+            } else if provider.canLoadObject(ofClass: URL.self) {
+                accepted = true
+                _ = provider.loadObject(ofClass: URL.self) { fileURL, _ in
+                    guard let fileURL,
+                          let utType = UTType(filenameExtension: fileURL.pathExtension),
+                          utType.conforms(to: .image) else { return }
+                    Task { @MainActor in
+                        let shouldStop = fileURL.startAccessingSecurityScopedResource()
+                        defer { if shouldStop { fileURL.stopAccessingSecurityScopedResource() } }
+                        model.addImage(url: fileURL, staggerIndex: idx)
+                    }
+                }
+            }
+        }
+        return accepted
     }
 
     private func exportAction() {

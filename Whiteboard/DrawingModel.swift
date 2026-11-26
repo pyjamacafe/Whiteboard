@@ -321,6 +321,7 @@ final class DrawingModel {
     @ObservationIgnored var lastCanvasTapLocation: CGPoint = .zero
     @ObservationIgnored var currentViewportCenter: CGPoint = .zero
     @ObservationIgnored var currentViewportScale: CGFloat = 1.0
+    @ObservationIgnored var needsDefaultSceneCapture: Bool = false
     @ObservationIgnored var imageCache: [UUID: PlatformImage] = [:]
     @ObservationIgnored let spatialGrid = SpatialHashGrid(cellSize: 256)
 
@@ -619,8 +620,12 @@ final class DrawingModel {
         currentBoardId = meta.id
         openFileURL = store.boardURL(for: meta.id)
         resetCanvasState()
+        let defaultScene = CanvasScene(name: "Scene 1", center: currentViewportCenter, scale: 1.0)
+        scenes = [defaultScene]
+        activeSceneId = defaultScene.id
+        needsDefaultSceneCapture = true
         do {
-            try store.saveBoardSync(id: meta.id, saveData: SaveData(strokes: [], placedImages: []))
+            try store.saveBoardSync(id: meta.id, saveData: SaveData(strokes: [], placedImages: [], fills: [], scenes: scenes))
         } catch {
             reportError(error.localizedDescription)
         }
@@ -940,6 +945,7 @@ final class DrawingModel {
         scenes.removeAll()
         activeSceneId = nil
         pendingSceneNavigation = nil
+        needsDefaultSceneCapture = false
         imageCache.removeAll()
         spatialGrid.invalidate()
         currentStroke = nil
@@ -1313,24 +1319,33 @@ final class DrawingModel {
 
     func paste() {
         #if os(iOS)
-        guard let item = UIPasteboard.general.items.first else { return }
-        let strokesData = item["strokes"] as? Data ?? Data()
-        let imagesData = item["images"] as? Data ?? Data()
-        let fillsData = item["fills"] as? Data ?? Data()
-        let boundaryData = item["boundary"] as? Data ?? Data()
+        let item = UIPasteboard.general.items.first
+        let strokesData = item?["strokes"] as? Data ?? Data()
+        let imagesData = item?["images"] as? Data ?? Data()
+        let fillsData = item?["fills"] as? Data ?? Data()
+        let boundaryData = item?["boundary"] as? Data ?? Data()
         #else
-        guard let json = NSPasteboard.general.data(forType: .string),
-              let item = try? JSONSerialization.jsonObject(with: json) as? [String: String] else { return }
-        let strokesData = Data(base64Encoded: item["strokes"] ?? "") ?? Data()
-        let imagesData = Data(base64Encoded: item["images"] ?? "") ?? Data()
-        let fillsData = Data(base64Encoded: item["fills"] ?? "") ?? Data()
-        let boundaryData = Data(base64Encoded: item["boundary"] ?? "") ?? Data()
+        var strokesData = Data()
+        var imagesData = Data()
+        var fillsData = Data()
+        var boundaryData = Data()
+        if let json = NSPasteboard.general.data(forType: .string),
+           let item = try? JSONSerialization.jsonObject(with: json) as? [String: String] {
+            strokesData = Data(base64Encoded: item["strokes"] ?? "") ?? Data()
+            imagesData = Data(base64Encoded: item["images"] ?? "") ?? Data()
+            fillsData = Data(base64Encoded: item["fills"] ?? "") ?? Data()
+            boundaryData = Data(base64Encoded: item["boundary"] ?? "") ?? Data()
+        }
         #endif
 
         let decodedStrokes = (try? JSONDecoder().decode([Stroke].self, from: strokesData)) ?? []
         let decodedImages = (try? JSONDecoder().decode([PlacedImage].self, from: imagesData)) ?? []
         let decodedFills = (try? JSONDecoder().decode([FillShape].self, from: fillsData)) ?? []
-        guard !decodedStrokes.isEmpty || !decodedImages.isEmpty || !decodedFills.isEmpty else { return }
+        guard !decodedStrokes.isEmpty || !decodedImages.isEmpty || !decodedFills.isEmpty else {
+            // Fall back to pasting a standard system clipboard image (screenshots, Safari, Photos, Preview)
+            pasteSystemClipboardImage()
+            return
+        }
 
         saveState()
 
@@ -1420,43 +1435,106 @@ final class DrawingModel {
 
     // MARK: - Images
 
-    func addImage(url: URL) {
+    @discardableResult
+    private func pasteSystemClipboardImage() -> Bool {
+        #if os(iOS)
+        if let img = UIPasteboard.general.image,
+           let data = img.pngData() ?? img.jpegData(compressionQuality: 0.85) {
+            return addImage(data: data)
+        }
+        return false
+        #else
+        let pb = NSPasteboard.general
+        if let pngData = pb.data(forType: .png) {
+            return addImage(data: pngData)
+        }
+        if let tiffData = pb.data(forType: .tiff) {
+            return addImage(data: tiffData)
+        }
+        if let nsImg = NSImage(pasteboard: pb), let tiff = nsImg.tiffRepresentation {
+            return addImage(data: tiff)
+        }
+        return false
+        #endif
+    }
+
+    @discardableResult
+    func addImage(url: URL, at centerPoint: CGPoint? = nil, staggerIndex: Int = 0) -> Bool {
         guard let data = try? Data(contentsOf: url) else {
             reportError("Could not read image file \(url.lastPathComponent).")
-            return
+            return false
         }
+        return addImage(data: data, at: centerPoint, staggerIndex: staggerIndex)
+    }
+
+    /// Imports an image from raw `Data` (PNG, JPEG, HEIC, WebP, TIFF, GIF, BMP, etc.),
+    /// preserving Retina sharpness (up to 1200 px long edge), using JPEG for opaque photos
+    /// and PNG for transparent images, and centering it in the current viewport.
+    @discardableResult
+    func addImage(data: Data, at centerPoint: CGPoint? = nil, staggerIndex: Int = 0) -> Bool {
+        let maxVisualDimension: CGFloat = 400
+        let maxPixelDimension: CGFloat = 1200
+
         #if os(iOS)
         guard let uiImg = UIImage(data: data), uiImg.size.width > 0, uiImg.size.height > 0 else {
             reportError("Unsupported or empty image file.")
-            return
+            return false
         }
-        let originalSize = uiImg.size
+        let rawPixelW = uiImg.size.width * uiImg.scale
+        let rawPixelH = uiImg.size.height * uiImg.scale
+        let visualScale = min(1.0, maxVisualDimension / max(uiImg.size.width, uiImg.size.height))
+        let finalSize = CGSize(
+            width: max(1, (uiImg.size.width * visualScale).rounded()),
+            height: max(1, (uiImg.size.height * visualScale).rounded())
+        )
+        let pixelScale = min(1.0, maxPixelDimension / max(rawPixelW, rawPixelH))
+        let pixelSize = CGSize(
+            width: max(1, (rawPixelW * pixelScale).rounded()),
+            height: max(1, (rawPixelH * pixelScale).rounded())
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        let hasAlpha: Bool = {
+            guard let info = uiImg.cgImage?.alphaInfo else { return true }
+            return info == .first || info == .last || info == .premultipliedFirst || info == .premultipliedLast
+        }()
+        format.opaque = !hasAlpha
+        let renderer = UIGraphicsImageRenderer(size: pixelSize, format: format)
+        let normalized = renderer.image { _ in
+            uiImg.draw(in: CGRect(origin: .zero, size: pixelSize))
+        }
+        let encodedData: Data = hasAlpha
+            ? (normalized.pngData() ?? data)
+            : (normalized.jpegData(compressionQuality: 0.85) ?? normalized.pngData() ?? data)
         #else
-        guard let nsImg = NSImage(data: data), nsImg.size.width > 0, nsImg.size.height > 0 else {
+        guard let nsImg = NSImage(data: data) else {
             reportError("Unsupported or empty image file.")
-            return
+            return false
         }
-        let originalSize = nsImg.size
-        #endif
+        var proposed = NSRect(origin: .zero, size: nsImg.size)
+        guard let cgImg = nsImg.cgImage(forProposedRect: &proposed, context: nil, hints: nil),
+              cgImg.width > 0, cgImg.height > 0 else {
+            reportError("Unsupported or empty image file.")
+            return false
+        }
+        let rawPixelW = CGFloat(cgImg.width)
+        let rawPixelH = CGFloat(cgImg.height)
+        let visualScale = min(1.0, maxVisualDimension / max(rawPixelW, rawPixelH))
+        let finalSize = CGSize(
+            width: max(1, (rawPixelW * visualScale).rounded()),
+            height: max(1, (rawPixelH * visualScale).rounded())
+        )
+        let pixelScale = min(1.0, maxPixelDimension / max(rawPixelW, rawPixelH))
+        let pxW = max(1, Int((rawPixelW * pixelScale).rounded()))
+        let pxH = max(1, Int((rawPixelH * pixelScale).rounded()))
+        let alphaInfo = cgImg.alphaInfo
+        let hasAlpha = alphaInfo == .first || alphaInfo == .last || alphaInfo == .premultipliedFirst || alphaInfo == .premultipliedLast
 
-        let maxWidth: CGFloat = 400
-        let width = min(originalSize.width, maxWidth)
-        let aspect = originalSize.height / originalSize.width
-        let finalSize = CGSize(width: width, height: max(1, width * aspect))
-
-        let resizedData: Data = {
-            #if os(iOS)
-            let renderer = UIGraphicsImageRenderer(size: finalSize)
-            let resized = renderer.image { _ in
-                uiImg.draw(in: CGRect(origin: .zero, size: finalSize))
-            }
-            return resized.pngData() ?? data
-            #else
-            let targetSize = NSSize(width: finalSize.width, height: finalSize.height)
+        let encodedData: Data = {
             guard let rep = NSBitmapImageRep(
                 bitmapDataPlanes: nil,
-                pixelsWide: Int(targetSize.width.rounded()),
-                pixelsHigh: Int(targetSize.height.rounded()),
+                pixelsWide: pxW,
+                pixelsHigh: pxH,
                 bitsPerSample: 8,
                 samplesPerPixel: 4,
                 hasAlpha: true,
@@ -1468,23 +1546,41 @@ final class DrawingModel {
             NSGraphicsContext.saveGraphicsState()
             if let ctx = NSGraphicsContext(bitmapImageRep: rep) {
                 NSGraphicsContext.current = ctx
-                nsImg.draw(in: NSRect(origin: .zero, size: targetSize), from: NSRect(origin: .zero, size: originalSize), operation: .copy, fraction: 1)
+                ctx.imageInterpolation = .high
+                nsImg.draw(
+                    in: NSRect(x: 0, y: 0, width: CGFloat(pxW), height: CGFloat(pxH)),
+                    from: NSRect(origin: .zero, size: nsImg.size),
+                    operation: .copy,
+                    fraction: 1
+                )
             }
             NSGraphicsContext.restoreGraphicsState()
-            return rep.representation(using: .png, properties: [:]) ?? data
-            #endif
+            if hasAlpha {
+                return rep.representation(using: .png, properties: [:]) ?? data
+            }
+            return rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85])
+                ?? rep.representation(using: .png, properties: [:])
+                ?? data
         }()
+        #endif
 
-        let pos = lastCanvasTapLocation == .zero ? CGPoint(x: 100, y: 100) : lastCanvasTapLocation
+        let stagger = CGFloat(staggerIndex) * 24
+        let anchor = centerPoint ?? currentViewportCenter
+        let pos = CGPoint(
+            x: anchor.x - finalSize.width / 2 + stagger,
+            y: anchor.y - finalSize.height / 2 + stagger
+        )
         saveState()
-        let img = PlacedImage(position: pos, size: finalSize, imageData: resizedData)
+        let img = PlacedImage(position: pos, size: finalSize, imageData: encodedData)
         placedImages.append(img)
         selectTool(.select)
         selectedImageIds = [img.id]
         selectedStrokeIds.removeAll()
+        selectedFillIds.removeAll()
         selectionBoundary.removeAll()
         updateUndoRedo()
         scheduleAutoSave()
+        return true
     }
 
     func resizeSelectedImages(by factor: CGFloat) {
@@ -1599,6 +1695,17 @@ final class DrawingModel {
     }
 
     // MARK: - Scenes (Viewport Bookmarks)
+
+    /// Called by `CanvasView` once the initial layout size is known for a newly created tissue,
+    /// locking the default "Scene 1" to the exact initial viewport center and scale.
+    func captureDefaultSceneIfNeeded() {
+        guard needsDefaultSceneCapture, !scenes.isEmpty else { return }
+        needsDefaultSceneCapture = false
+        scenes[0].centerX = Double(currentViewportCenter.x)
+        scenes[0].centerY = Double(currentViewportCenter.y)
+        scenes[0].scale = Double(max(currentViewportScale, 0.1))
+        scheduleAutoSave()
+    }
 
     @discardableResult
     func addScene(name: String? = nil) -> CanvasScene {

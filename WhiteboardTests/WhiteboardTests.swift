@@ -565,12 +565,16 @@ final class WhiteboardTests: XCTestCase {
         model.createBoard(name: "Scenes Test")
         let boardId = try XCTUnwrap(model.currentBoardId)
 
-        model.currentViewportCenter = CGPoint(x: 100, y: 200)
-        model.currentViewportScale = 1.5
-        let s1 = model.addScene()
+        // New tissue automatically starts with Scene 1 capturing the default canvas view
+        XCTAssertEqual(model.scenes.count, 1)
+        let s1 = model.scenes[0]
         XCTAssertEqual(s1.name, "Scene 1")
-        XCTAssertEqual(s1.center.x, 100, accuracy: 0.01)
-        XCTAssertEqual(s1.cgScale, 1.5, accuracy: 0.01)
+        XCTAssertEqual(model.activeSceneId, s1.id)
+        model.currentViewportCenter = CGPoint(x: 500, y: 350)
+        model.currentViewportScale = 1.0
+        model.captureDefaultSceneIfNeeded()
+        XCTAssertEqual(model.scenes[0].center.x, 500, accuracy: 0.01)
+        XCTAssertEqual(model.scenes[0].center.y, 350, accuracy: 0.01)
 
         model.currentViewportCenter = CGPoint(x: 800, y: -300)
         model.currentViewportScale = 0.75
@@ -668,5 +672,54 @@ final class WhiteboardTests: XCTestCase {
         let pastedFill = model.fills.first(where: { $0.id != origFill.id })!
         XCTAssertEqual(pastedStroke.points[0].x, 234, accuracy: 0.01) // 10 + 24 + 200
         XCTAssertEqual(pastedFill.contours[0][0].x, 234, accuracy: 0.01)
+    }
+
+    private func makeTestPNGData(width: Int, height: Int, opaque: Bool = false) -> Data {
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = opaque ? CGImageAlphaInfo.noneSkipLast.rawValue : CGImageAlphaInfo.premultipliedLast.rawValue
+        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: colorSpace, bitmapInfo: bitmapInfo)!
+        ctx.setFillColor(CGColor(red: 0.2, green: 0.6, blue: 0.9, alpha: 1.0))
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let cgImg = ctx.makeImage()!
+        let rep = NSBitmapImageRep(cgImage: cgImg)
+        return rep.representation(using: .png, properties: [:])!
+    }
+
+    func testAddImagePreservesRetinaResolutionCentersInViewportAndClearsFillSelection() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.currentViewportCenter = CGPoint(x: 1500, y: -600)
+        model.selectedFillIds = [UUID()]
+
+        // 2000x1000 image -> visual size 400x200, stored pixel resolution 1200x600 (Retina-sharp)
+        let pngData = makeTestPNGData(width: 2000, height: 1000, opaque: false)
+        XCTAssertTrue(model.addImage(data: pngData))
+        XCTAssertEqual(model.placedImages.count, 1)
+
+        let placed = model.placedImages[0]
+        XCTAssertEqual(placed.cgSize.width, 400, accuracy: 1)
+        XCTAssertEqual(placed.cgSize.height, 200, accuracy: 1)
+        // Centered on currentViewportCenter (1500, -600) -> origin (1300, -700)
+        XCTAssertEqual(placed.cgPosition.x, 1300, accuracy: 1)
+        XCTAssertEqual(placed.cgPosition.y, -700, accuracy: 1)
+        // Stored pixels should be 1200x600 (not blurry 400x200)
+        let decoded = NSBitmapImageRep(data: placed.imageData)
+        XCTAssertEqual(decoded?.pixelsWide, 1200)
+        XCTAssertEqual(decoded?.pixelsHigh, 600)
+        // Stale fill selection must be cleared
+        XCTAssertTrue(model.selectedFillIds.isEmpty)
+        XCTAssertEqual(model.selectedImageIds, [placed.id])
+    }
+
+    func testPasteSystemClipboardImage() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        let pngData = makeTestPNGData(width: 300, height: 200, opaque: true)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setData(pngData, forType: .png)
+
+        model.paste()
+        XCTAssertEqual(model.placedImages.count, 1)
+        XCTAssertEqual(model.placedImages[0].cgSize.width, 300, accuracy: 1)
+        XCTAssertEqual(model.placedImages[0].cgSize.height, 200, accuracy: 1)
     }
 }

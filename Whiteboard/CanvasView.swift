@@ -404,6 +404,7 @@ class DrawingCanvasView: UIView {
             y: (bounds.height / 2 - offset.height) / safeScale
         )
         model.currentViewportScale = safeScale
+        model.captureDefaultSceneIfNeeded()
     }
 
     override func layoutSubviews() {
@@ -424,6 +425,12 @@ class DrawingCanvasView: UIView {
     }()
     private var isTouchActive: Bool = false
     private var hasUsedPencil: Bool = false
+    private var isPencilActive: Bool = false
+    private var isPencilHovering: Bool = false
+    private var lastPencilEndTime: CFTimeInterval = 0
+    private var fingerPanStartTime: CFTimeInterval = 0
+    private var fingerPanStartOffset: CGSize = .zero
+    private var fingerPanMovedPastDeadzone: Bool = false
 
     private lazy var pinchGesture: UIPinchGestureRecognizer = {
         let g = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
@@ -536,11 +543,13 @@ class DrawingCanvasView: UIView {
     @objc private func handleHover(_ gesture: UIHoverGestureRecognizer) {
         switch gesture.state {
         case .began, .changed:
+            isPencilHovering = true
             let loc = gesture.location(in: self)
             if !isTouchActive {
                 showHoverIndicator(at: loc)
             }
         case .ended, .cancelled:
+            isPencilHovering = false
             if !isTouchActive {
                 hideHoverIndicator()
             }
@@ -553,25 +562,37 @@ class DrawingCanvasView: UIView {
         guard let model = model else { return }
         let size: CGFloat
         let color: UIColor
+        let borderColor: UIColor?
+        let inkBase: UIColor = model.appSettings.isDarkMode ? .white : .black
         switch model.currentTool {
         case .eraser:
-            size = model.eraserSettings.size
-            color = UIColor.red.withAlphaComponent(0.25)
+            size = max(model.eraserSettings.size, 8)
+            color = UIColor.systemRed.withAlphaComponent(0.22)
+            borderColor = UIColor.systemRed.withAlphaComponent(0.75)
         case .pen:
-            size = model.penSettings.thickness * 1.5
-            color = UIColor.black.withAlphaComponent(0.4)
+            size = max(model.penSettings.thickness * 1.5, 4)
+            color = inkBase.withAlphaComponent(0.4)
+            borderColor = nil
         case .sharpie:
-            size = model.sharpieSettings.thickness * 1.5
-            color = UIColor.black.withAlphaComponent(0.4)
+            size = max(model.sharpieSettings.thickness * 1.5, 4)
+            color = inkBase.withAlphaComponent(0.4)
+            borderColor = nil
+        case .fill:
+            size = 10
+            color = UIColor(model.fillColor).withAlphaComponent(0.6)
+            borderColor = inkBase.withAlphaComponent(0.35)
         default:
             size = 4
-            color = UIColor.black.withAlphaComponent(0.4)
+            color = inkBase.withAlphaComponent(0.4)
+            borderColor = nil
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         hoverIndicatorLayer.frame = CGRect(x: point.x - size / 2, y: point.y - size / 2, width: size, height: size)
         hoverIndicatorLayer.cornerRadius = size / 2
         hoverIndicatorLayer.backgroundColor = color.cgColor
+        hoverIndicatorLayer.borderColor = borderColor?.cgColor
+        hoverIndicatorLayer.borderWidth = borderColor != nil ? 1.5 : 0
         hoverIndicatorLayer.isHidden = false
         CATransaction.commit()
     }
@@ -664,16 +685,35 @@ class DrawingCanvasView: UIView {
     // MARK: - Touch Handling
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first, let model = model else { return }
+        guard let model = model else { return }
+        let pencilTouch = touches.first(where: { $0.type == .pencil })
+        if pencilTouch != nil {
+            hasUsedPencil = true
+            isPencilActive = true
+            // Cancel any accidental palm pan that began just before the Pencil landed
+            if fingerPanGesture.state == .began || fingerPanGesture.state == .changed {
+                let elapsed = CACurrentMediaTime() - fingerPanStartTime
+                fingerPanGesture.isEnabled = false
+                fingerPanGesture.isEnabled = true
+                if elapsed < 0.25 {
+                    offset = fingerPanStartOffset
+                    gridView.setNeedsDisplay()
+                    committedLayer.setNeedsDisplay()
+                    liveOverlay.setNeedsDisplay()
+                }
+            }
+        } else if isPencilActive {
+            // Ignore stray palm/finger touches while actively writing with Apple Pencil
+            return
+        }
+
+        guard let touch = pencilTouch ?? touches.first else { return }
         isTouchActive = true
         hideHoverIndicator()
         model.showDeleteMenu = false
         lastTouchPoint = touch.location(in: self)
         model.lastCanvasTapLocation = toCanvas(touch.location(in: self))
         #if os(iOS) && !targetEnvironment(macCatalyst)
-        if touch.type == .pencil {
-            hasUsedPencil = true
-        }
         let pencilModeActive = model.appSettings.pencilOnly || hasUsedPencil
         guard !pencilModeActive || touch.type == .pencil || model.currentTool == .select else { return }
         #endif
@@ -753,12 +793,23 @@ class DrawingCanvasView: UIView {
             return
         }
 
+        if model.currentTool == .eraser {
+            showHoverIndicator(at: lastTouchPoint)
+        }
         model.beginStroke(at: toCanvas(touch.location(in: self)), isEraser: model.currentTool == .eraser)
         liveOverlay.setNeedsDisplay()
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let touch = touches.first, let model = model else { return }
+        guard let model = model else { return }
+        let touch: UITouch
+        if isPencilActive {
+            guard let pt = touches.first(where: { $0.type == .pencil }) else { return }
+            touch = pt
+        } else {
+            guard let first = touches.first else { return }
+            touch = first
+        }
         lastTouchPoint = touch.location(in: self)
         #if os(iOS) && !targetEnvironment(macCatalyst)
         if touch.type == .pencil {
@@ -793,6 +844,10 @@ class DrawingCanvasView: UIView {
 
         guard model.currentStroke != nil else { return }
 
+        if model.currentTool == .eraser {
+            showHoverIndicator(at: lastTouchPoint)
+        }
+
         let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
         for ct in coalesced {
             model.addPoint(toCanvas(ct.location(in: self)))
@@ -801,6 +856,11 @@ class DrawingCanvasView: UIView {
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if isPencilActive {
+            guard touches.contains(where: { $0.type == .pencil }) else { return }
+            isPencilActive = false
+            lastPencilEndTime = CACurrentMediaTime()
+        }
         isTouchActive = false
         if model?.currentTool == .select {
             if model?.showDeleteMenu == true { return }
@@ -825,6 +885,11 @@ class DrawingCanvasView: UIView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if isPencilActive {
+            guard touches.contains(where: { $0.type == .pencil }) else { return }
+            isPencilActive = false
+            lastPencilEndTime = CACurrentMediaTime()
+        }
         isTouchActive = false
         if model?.currentTool == .select {
             if model?.isMoving == true || model?.isResizing == true {
@@ -859,6 +924,34 @@ class DrawingCanvasView: UIView {
     }
 
     @objc private func handlePan(_ gesture: UIPanGestureRecognizer) {
+        if gesture === fingerPanGesture {
+            if gesture.state == .began {
+                fingerPanStartTime = CACurrentMediaTime()
+                fingerPanStartOffset = offset
+                fingerPanMovedPastDeadzone = false
+                return
+            }
+            guard gesture.state == .changed else { return }
+            if isPencilActive || isPencilHovering || (CACurrentMediaTime() - lastPencilEndTime) < 0.35 {
+                gesture.isEnabled = false
+                gesture.isEnabled = true
+                return
+            }
+            let t = gesture.translation(in: self)
+            if !fingerPanMovedPastDeadzone {
+                // Ignore subtle resting-palm micro-jitter (< 10 pt)
+                guard hypot(t.x, t.y) >= 10 else { return }
+                fingerPanMovedPastDeadzone = true
+            }
+            offset.width += t.x
+            offset.height += t.y
+            gesture.setTranslation(.zero, in: self)
+            gridView.setNeedsDisplay()
+            committedLayer.setNeedsDisplay()
+            liveOverlay.setNeedsDisplay()
+            return
+        }
+
         guard gesture.state == .changed else { return }
         let t = gesture.translation(in: self)
         offset.width += t.x
@@ -873,9 +966,24 @@ class DrawingCanvasView: UIView {
 // MARK: - Gesture Recognizer Delegate (iOS)
 
 extension DrawingCanvasView: UIGestureRecognizerDelegate {
+    private var isPencilRecentlyActive: Bool {
+        isPencilActive || isPencilHovering || (CACurrentMediaTime() - lastPencilEndTime) < 0.35
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === fingerPanGesture {
+            guard touch.type == .direct else { return false }
+            // Reject large palm contacts (fingertips are typically 15–28 pt; palms are 35–90+ pt)
+            if touch.majorRadius > 32 { return false }
+            if isPencilRecentlyActive { return false }
+        }
+        return true
+    }
+
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         if gestureRecognizer === fingerPanGesture {
             guard let model else { return false }
+            guard !isPencilRecentlyActive else { return false }
             let pencilModeActive = model.appSettings.pencilOnly || hasUsedPencil
             return pencilModeActive && model.currentTool != .select
         }
@@ -1477,6 +1585,7 @@ struct CanvasView: View {
             y: (size.height / 2 - offset.height) / safeScale
         )
         model.currentViewportScale = safeScale
+        model.captureDefaultSceneIfNeeded()
     }
 
     private func animateMacToScene(_ scene: CanvasScene) {
