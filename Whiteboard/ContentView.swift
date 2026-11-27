@@ -13,6 +13,9 @@ struct ContentView: View {
     @State private var lastTapTime: Date = .distantPast
     @State private var showSettings: Bool = false
     @State private var showScenes: Bool = false
+    @State private var isCustomizingToolbar: Bool = false
+    @State private var toolbarDropTargeted: Bool = false
+    @State private var trayDropTargeted: Bool = false
     @State private var renamingSceneId: UUID?
     @State private var renameSceneText: String = ""
     @State private var showImporter = false
@@ -55,7 +58,7 @@ struct ContentView: View {
                     .allowsHitTesting(false)
 
                     #if os(iOS)
-                    CanvasView(model: model, onBeginDraw: { showSettings = false; showScenes = false })
+                    CanvasView(model: model, onBeginDraw: { showSettings = false; showScenes = false; isCustomizingToolbar = false })
                         .ignoresSafeArea()
                         .onPencilDoubleTap { _ in
                             model.toggleEraserFromPencil()
@@ -66,7 +69,7 @@ struct ContentView: View {
                             }
                         }
                     #else
-                    CanvasView(model: model, onBeginDraw: { showSettings = false; showScenes = false })
+                    CanvasView(model: model, onBeginDraw: { showSettings = false; showScenes = false; isCustomizingToolbar = false })
                         .ignoresSafeArea()
                     #endif
 
@@ -76,7 +79,10 @@ struct ContentView: View {
                             GlassEffectContainer(spacing: 10) {
                                 VStack(spacing: 6) {
                                     if model.isToolbarVisible { toolbar }
-                                    if model.isToolbarVisible, let tool = settingsTool, tool != .select {
+                                    if model.isToolbarVisible && isCustomizingToolbar {
+                                        customizeToolbarTray
+                                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
+                                    } else if model.isToolbarVisible, let tool = settingsTool, tool != .select {
                                         ToolSettingsView(model: model, tool: tool)
                                             .onTapGesture { }
                                     }
@@ -84,7 +90,10 @@ struct ContentView: View {
                             }
                         } else {
                             if model.isToolbarVisible { toolbar }
-                            if model.isToolbarVisible, let tool = settingsTool, tool != .select {
+                            if model.isToolbarVisible && isCustomizingToolbar {
+                                customizeToolbarTray
+                                    .padding(.top, 6)
+                            } else if model.isToolbarVisible, let tool = settingsTool, tool != .select {
                                 ToolSettingsView(model: model, tool: tool)
                                     .padding(.top, 6)
                                     .onTapGesture { }
@@ -92,7 +101,10 @@ struct ContentView: View {
                         }
                         #else
                         if model.isToolbarVisible { toolbar }
-                        if model.isToolbarVisible, let tool = settingsTool, tool != .select {
+                        if model.isToolbarVisible && isCustomizingToolbar {
+                            customizeToolbarTray
+                                .padding(.top, 6)
+                        } else if model.isToolbarVisible, let tool = settingsTool, tool != .select {
                             ToolSettingsView(model: model, tool: tool)
                                 .padding(.top, 6)
                                 .onTapGesture { }
@@ -402,6 +414,10 @@ struct ContentView: View {
                 .background(bg)
                 .foregroundColor(fg)
                 .clipShape(Capsule())
+                .contentShape(Capsule())
+                .scaleEffect(isHovered ? 1.07 : 1.0)
+                .animation(.easeOut(duration: 0.12), value: isHovered)
+                .pencilHoverEffect()
         }
         .onHover { hovering in
             hoveredTool = hovering ? systemName : nil
@@ -440,75 +456,387 @@ struct ContentView: View {
 
     private var toolbar: some View {
         HStack(spacing: toolbarSpacing) {
-            toolButton(systemName: "pencil.tip", tool: .pen)
-            toolButton(systemName: "pencil", tool: .sharpie)
-            toolButton(systemName: "drop.fill", tool: .fill)
-            toolButton(systemName: "eraser", tool: .eraser)
-            toolButton(systemName: "cursorarrow.click", tool: .select)
-
-            Divider()
-                .frame(height: toolbarDividerH)
-
-            HStack(spacing: 2) {
-                Button(action: { model.goToPreviousScene() }) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: toolbarNavBtnW > 30 ? 15 : 13, weight: .semibold))
-                        .frame(width: toolbarNavBtnW, height: toolbarBtnMinH)
-                        .background(hoveredTool == "prevScene" ? Color.primary.opacity(0.12) : .clear)
-                        .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
-                        .clipShape(Capsule())
+            ForEach(model.pinnedToolbarItems) { item in
+                if isCustomizingToolbar {
+                    customizingToolbarChip(for: item)
+                } else {
+                    toolbarItemView(for: item)
                 }
-                .buttonStyle(.plain)
-                .disabled(model.scenes.isEmpty)
-                .help("Previous Scene")
-                .onHover { hovering in hoveredTool = hovering ? "prevScene" : nil }
-                .pointingHand()
+            }
 
-                scenesMenu
+            if !model.pinnedToolbarItems.isEmpty {
+                Divider()
+                    .frame(height: toolbarDividerH)
+            }
 
-                Button(action: { model.goToNextScene() }) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: toolbarNavBtnW > 30 ? 15 : 13, weight: .semibold))
-                        .frame(width: toolbarNavBtnW, height: toolbarBtnMinH)
-                        .background(hoveredTool == "nextScene" ? Color.primary.opacity(0.12) : .clear)
-                        .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
-                        .clipShape(Capsule())
+            if isCustomizingToolbar {
+                Button("Done") {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        isCustomizingToolbar = false
+                    }
                 }
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .frame(height: toolbarBtnMinH)
+                .background(Color.accentColor)
+                .clipShape(Capsule())
+                .contentShape(Capsule())
                 .buttonStyle(.plain)
-                .disabled(model.scenes.isEmpty)
-                .help("Next Scene")
-                .onHover { hovering in hoveredTool = hovering ? "nextScene" : nil }
                 .pointingHand()
+                .pencilHoverEffect()
+            } else {
+                settingsMenu
             }
-
-            Button(action: { model.closeBoard() }) {
-                Image(systemName: "house")
-                    .font(toolbarIconFont)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
-                    .background(hoveredTool == "home" ? Color.primary.opacity(0.12) : .clear)
-                    .foregroundColor(.primary)
-                    .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .help("Home")
-            .onHover { hovering in
-                hoveredTool = hovering ? "home" : nil
-            }
-            .pointingHand()
-
-            Divider()
-                .frame(height: toolbarDividerH)
-
-            settingsMenu
         }
         .buttonStyle(.plain)
         .padding(.horizontal, toolbarPadH)
         .padding(.vertical, toolbarPadV)
         .liquidGlassCapsule()
+        .overlay(
+            Capsule()
+                .stroke(
+                    isCustomizingToolbar ? (toolbarDropTargeted ? Color.accentColor : Color.accentColor.opacity(0.4)) : Color.clear,
+                    lineWidth: toolbarDropTargeted ? 2 : 1
+                )
+        )
+        .dropDestination(for: String.self) { payloads, _ in
+            guard isCustomizingToolbar, let raw = payloads.first, let item = ToolbarItemID(rawValue: raw) else {
+                return false
+            }
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                model.pinToolbarItem(item, before: nil)
+            }
+            return true
+        } isTargeted: { targeted in
+            toolbarDropTargeted = targeted
+        }
         .padding(.top, 12)
         .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
+    }
+
+    @ViewBuilder
+    private func toolbarItemView(for item: ToolbarItemID) -> some View {
+        if let tool = item.associatedTool {
+            toolButton(systemName: item.systemImage, tool: tool)
+        } else if item == .scenes {
+            scenesToolbarGroup
+        } else {
+            actionToolbarButton(for: item)
+        }
+    }
+
+    private var scenesToolbarGroup: some View {
+        HStack(spacing: 2) {
+            Button(action: { model.goToPreviousScene() }) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: toolbarNavBtnW > 30 ? 15 : 13, weight: .semibold))
+                    .frame(width: toolbarNavBtnW, height: toolbarBtnMinH)
+                    .background(hoveredTool == "prevScene" ? Color.primary.opacity(0.14) : .clear)
+                    .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
+                    .clipShape(Capsule())
+                    .contentShape(Capsule())
+                    .scaleEffect(hoveredTool == "prevScene" ? 1.07 : 1.0)
+                    .animation(.easeOut(duration: 0.12), value: hoveredTool == "prevScene")
+                    .pencilHoverEffect()
+            }
+            .buttonStyle(.plain)
+            .disabled(model.scenes.isEmpty)
+            .help("Previous Scene")
+            .onHover { hovering in hoveredTool = hovering ? "prevScene" : nil }
+            .pointingHand()
+
+            scenesMenu
+
+            Button(action: { model.goToNextScene() }) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: toolbarNavBtnW > 30 ? 15 : 13, weight: .semibold))
+                    .frame(width: toolbarNavBtnW, height: toolbarBtnMinH)
+                    .background(hoveredTool == "nextScene" ? Color.primary.opacity(0.14) : .clear)
+                    .foregroundColor(model.scenes.isEmpty ? .secondary.opacity(0.45) : .primary)
+                    .clipShape(Capsule())
+                    .contentShape(Capsule())
+                    .scaleEffect(hoveredTool == "nextScene" ? 1.07 : 1.0)
+                    .animation(.easeOut(duration: 0.12), value: hoveredTool == "nextScene")
+                    .pencilHoverEffect()
+            }
+            .buttonStyle(.plain)
+            .disabled(model.scenes.isEmpty)
+            .help("Next Scene")
+            .onHover { hovering in hoveredTool = hovering ? "nextScene" : nil }
+            .pointingHand()
+        }
+    }
+
+    private func actionToolbarButton(for item: ToolbarItemID) -> some View {
+        let isHovered = hoveredTool == item.rawValue
+        let isActive = isToolbarItemActive(item)
+        let isDisabled = isToolbarItemDisabled(item)
+        let isDestructive = item == .clear
+
+        return Button(action: { performToolbarAction(for: item) }) {
+            Image(systemName: dynamicIcon(for: item))
+                .font(toolbarIconFont)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
+                .background(
+                    isActive ? Color.accentColor :
+                    isHovered ? Color.primary.opacity(0.14) : .clear
+                )
+                .foregroundColor(
+                    isDisabled ? .secondary.opacity(0.45) :
+                    isActive ? .white :
+                    isDestructive ? .red : .primary
+                )
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+                .scaleEffect(isHovered ? 1.07 : 1.0)
+                .animation(.easeOut(duration: 0.12), value: isHovered)
+                .pencilHoverEffect()
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .help(dynamicTooltip(for: item))
+        .onHover { hovering in
+            hoveredTool = hovering ? item.rawValue : nil
+        }
+        .pointingHand()
+    }
+
+    private func customizingToolbarChip(for item: ToolbarItemID) -> some View {
+        ZStack(alignment: .topTrailing) {
+            Image(systemName: dynamicIcon(for: item))
+                .font(toolbarIconFont)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
+                .background(Color.primary.opacity(0.10))
+                .foregroundColor(.primary)
+                .clipShape(Capsule())
+                .contentShape(Capsule())
+
+            Button(action: {
+                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                    model.unpinToolbarItem(item)
+                }
+            }) {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white, .red)
+            }
+            .buttonStyle(.plain)
+            .offset(x: 3, y: -3)
+            .help("Move \(item.title) to More")
+            .pointingHand()
+        }
+        .help("Drag to reorder or drop in tray below to move to More")
+        .draggable(item.rawValue)
+        .dropDestination(for: String.self) { payloads, _ in
+            guard let raw = payloads.first, let dropped = ToolbarItemID(rawValue: raw) else { return false }
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                model.pinToolbarItem(dropped, before: item)
+            }
+            return true
+        }
+    }
+
+    private var customizeToolbarTray: some View {
+        let cols = [GridItem(.adaptive(minimum: 58, maximum: 68), spacing: 8)]
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Customize Toolbar", systemImage: "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Button("Reset") {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                        model.resetToolbarLayout()
+                    }
+                }
+                .font(.caption.weight(.medium))
+                .foregroundColor(.secondary)
+                .buttonStyle(.plain)
+                .pointingHand()
+            }
+
+            Text("Drag icons onto the toolbar above to add or reorder · Drag icons down here to move to More")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            if model.unpinnedToolbarItems.isEmpty {
+                Text("All tools are pinned to the toolbar. Drag any icon down here to unpin it.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 14)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVGrid(columns: cols, spacing: 8) {
+                        ForEach(model.unpinnedToolbarItems) { item in
+                            Button(action: {
+                                withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                                    model.pinToolbarItem(item, before: nil)
+                                }
+                            }) {
+                                VStack(spacing: 4) {
+                                    Image(systemName: dynamicIcon(for: item))
+                                        .font(.system(size: 16))
+                                        .frame(width: 38, height: 34)
+                                        .background(Color.primary.opacity(0.08))
+                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                    Text(item.title)
+                                        .font(.system(size: 9.5))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .contentShape(Rectangle())
+                                .pencilHoverEffect()
+                            }
+                            .buttonStyle(.plain)
+                            .help("Drag or tap to add \(item.title) to toolbar")
+                            .pointingHand()
+                            .draggable(item.rawValue)
+                        }
+                    }
+                }
+                .frame(maxHeight: min(220, max(120, windowHeight - 220)))
+            }
+        }
+        .padding(14)
+        .frame(width: 360)
+        .liquidGlassSurface(cornerRadius: 16)
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(trayDropTargeted ? Color.accentColor : Color.clear, style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+        )
+        .dropDestination(for: String.self) { payloads, _ in
+            guard let raw = payloads.first, let dropped = ToolbarItemID(rawValue: raw) else { return false }
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                model.unpinToolbarItem(dropped)
+            }
+            return true
+        } isTargeted: { targeted in
+            trayDropTargeted = targeted
+        }
+        .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
+        .onTapGesture { }
+    }
+
+    private func dynamicIcon(for item: ToolbarItemID) -> String {
+        switch item {
+        case .darkMode:
+            return model.appSettings.isDarkMode ? "sun.max.fill" : "moon.fill"
+        case .singleTapOptions:
+            return model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap"
+        default:
+            return item.systemImage
+        }
+    }
+
+    private func dynamicTooltip(for item: ToolbarItemID) -> String {
+        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+        switch item {
+        case .clear: return hasSelection ? "Delete Selected" : "Clear Tissue"
+        case .darkMode: return model.appSettings.isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"
+        case .singleTapOptions: return "Show Options on Single Tap"
+        case .pencilOnly: return "Draw with Apple Pencil Only"
+        case .importPhoto: return "Import from Photos"
+        case .importImage: return "Import Image File…"
+        case .openFile: return "Open .wb File…"
+        case .help: return "Help & Shortcuts"
+        case .about: return "About Tissue Box"
+        default: return item.title
+        }
+    }
+
+    private func isToolbarItemActive(_ item: ToolbarItemID) -> Bool {
+        if let tool = item.associatedTool {
+            return model.currentTool == tool
+        }
+        switch item {
+        case .singleTapOptions: return model.appSettings.revealSettingsOnSingleTap
+        case .pencilOnly: return model.appSettings.pencilOnly
+        default: return false
+        }
+    }
+
+    private func isToolbarItemDisabled(_ item: ToolbarItemID) -> Bool {
+        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+        let isEmptyCanvas = model.strokes.isEmpty && model.placedImages.isEmpty && model.fills.isEmpty
+        switch item {
+        case .undo: return !model.canUndo
+        case .redo: return !model.canRedo
+        case .clear: return isEmptyCanvas
+        case .copy: return !hasSelection
+        default: return false
+        }
+    }
+
+    private func performToolbarAction(for item: ToolbarItemID, closePopover: Bool = false) {
+        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+        switch item {
+        case .pen, .sharpie, .fill, .eraser, .select:
+            if let tool = item.associatedTool {
+                model.selectTool(tool)
+                settingsTool = model.appSettings.revealSettingsOnSingleTap ? tool : nil
+            }
+            if closePopover { showSettings = false }
+        case .scenes:
+            if closePopover { showSettings = false }
+            showScenes.toggle()
+        case .home:
+            if closePopover { showSettings = false }
+            model.closeBoard()
+        case .undo:
+            model.undo()
+        case .redo:
+            model.redo()
+        case .clear:
+            if closePopover { showSettings = false }
+            if hasSelection { model.deleteSelected() } else { model.showClearConfirmation = true }
+        case .copy:
+            model.copySelected()
+            if closePopover { showSettings = false }
+        case .paste:
+            model.paste()
+            if closePopover { showSettings = false }
+        case .importPhoto:
+            if closePopover { showSettings = false }
+            #if os(iOS)
+            showPhotosPicker = true
+            #endif
+        case .importImage:
+            if closePopover { showSettings = false }
+            showImageImporter = true
+        case .center:
+            model.needsRecenter = true
+            if closePopover { showSettings = false }
+        case .darkMode:
+            model.appSettings.isDarkMode.toggle()
+        case .singleTapOptions:
+            model.appSettings.revealSettingsOnSingleTap.toggle()
+        case .pencilOnly:
+            model.appSettings.pencilOnly.toggle()
+        case .exportWB:
+            if closePopover { showSettings = false }
+            exportFormat = .wb; exportAction()
+        case .exportPNG:
+            if closePopover { showSettings = false }
+            exportFormat = .png; exportAction()
+        case .exportPDF:
+            if closePopover { showSettings = false }
+            exportFormat = .pdf; exportAction()
+        case .openFile:
+            if closePopover { showSettings = false }
+            showImporter = true
+        case .help:
+            if closePopover { showSettings = false }
+            showHelp = true
+        case .about:
+            if closePopover { showSettings = false }
+            model.showAbout = true
+        }
     }
 
     private func iconName(_ bg: CanvasBackground) -> String {
@@ -686,9 +1014,13 @@ struct ContentView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
                     .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
-                    .background(hoveredTool == "scenes" || showScenes ? Color.primary.opacity(0.12) : .clear)
+                    .background(hoveredTool == "scenes" || showScenes ? Color.primary.opacity(0.14) : .clear)
                     .foregroundColor(showScenes ? .accentColor : .primary)
                     .clipShape(Capsule())
+                    .contentShape(Capsule())
+                    .scaleEffect(hoveredTool == "scenes" ? 1.07 : 1.0)
+                    .animation(.easeOut(duration: 0.12), value: hoveredTool == "scenes")
+                    .pencilHoverEffect()
 
                 if !model.scenes.isEmpty {
                     Text("\(model.scenes.count)")
@@ -887,8 +1219,6 @@ struct ContentView: View {
 
     private var settingsMenu: some View {
         let maxPopoverHeight = max(200, windowHeight - 110)
-        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
-        let isEmptyCanvas = model.strokes.isEmpty && model.placedImages.isEmpty && model.fills.isEmpty
         let cols = [GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6), GridItem(.fixed(38), spacing: 6)]
 
         #if os(iOS)
@@ -903,9 +1233,13 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .frame(minWidth: toolbarBtnMinW, minHeight: toolbarBtnMinH)
-                .background(hoveredTool == "settings" || showSettings ? Color.primary.opacity(0.12) : .clear)
+                .background(hoveredTool == "settings" || showSettings ? Color.primary.opacity(0.14) : .clear)
                 .foregroundColor(.primary)
                 .clipShape(Capsule())
+                .contentShape(Capsule())
+                .scaleEffect(hoveredTool == "settings" ? 1.07 : 1.0)
+                .animation(.easeOut(duration: 0.12), value: hoveredTool == "settings")
+                .pencilHoverEffect()
         }
         .buttonStyle(.plain)
         .help("More")
@@ -916,73 +1250,27 @@ struct ContentView: View {
         .popover(isPresented: $showSettings, attachmentAnchor: .rect(.bounds), arrowEdge: popoverArrowEdge) {
             ScrollView(.vertical, showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 10) {
-                    // Actions
-                    LazyVGrid(columns: cols, spacing: 6) {
-                        popoverIcon("arrow.uturn.backward", tooltip: "Undo", disabled: !model.canUndo) {
-                            model.undo()
+                    // Unpinned tools & actions
+                    if !model.unpinnedToolbarItems.isEmpty {
+                        LazyVGrid(columns: cols, spacing: 6) {
+                            ForEach(model.unpinnedToolbarItems) { item in
+                                popoverIcon(
+                                    dynamicIcon(for: item),
+                                    tooltip: dynamicTooltip(for: item),
+                                    isActive: isToolbarItemActive(item),
+                                    role: item == .clear ? .destructive : nil,
+                                    disabled: isToolbarItemDisabled(item)
+                                ) {
+                                    performToolbarAction(for: item, closePopover: true)
+                                }
+                            }
                         }
-                        popoverIcon("arrow.uturn.forward", tooltip: "Redo", disabled: !model.canRedo) {
-                            model.redo()
-                        }
-                        popoverIcon(
-                            "trash",
-                            tooltip: hasSelection ? "Delete Selected" : "Clear Tissue",
-                            role: .destructive,
-                            disabled: isEmptyCanvas
-                        ) {
-                            showSettings = false
-                            if hasSelection { model.deleteSelected() } else { model.showClearConfirmation = true }
-                        }
-                        popoverIcon("doc.on.doc", tooltip: "Copy", disabled: !hasSelection) {
-                            model.copySelected(); showSettings = false
-                        }
-                        popoverIcon("doc.on.clipboard", tooltip: "Paste") {
-                            model.paste(); showSettings = false
-                        }
-                        #if os(iOS)
-                        popoverIcon("photo.on.rectangle", tooltip: "Import from Photos") {
-                            showSettings = false; showPhotosPicker = true
-                        }
-                        #endif
-                        popoverIcon("photo", tooltip: "Import Image File…") {
-                            showSettings = false; showImageImporter = true
-                        }
-                        popoverIcon("viewfinder", tooltip: "Center Canvas") {
-                            model.needsRecenter = true; showSettings = false
-                        }
-                        popoverIcon("house", tooltip: "Home") {
-                            showSettings = false; model.closeBoard()
-                        }
+
+                        Divider()
                     }
 
-                    Divider()
-
-                    // Appearance & Background
+                    // Canvas Background
                     LazyVGrid(columns: cols, spacing: 6) {
-                        popoverIcon(
-                            model.appSettings.isDarkMode ? "sun.max.fill" : "moon.fill",
-                            tooltip: model.appSettings.isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"
-                        ) {
-                            model.appSettings.isDarkMode.toggle()
-                        }
-                        popoverIcon(
-                            model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap",
-                            tooltip: "Show Options on Single Tap",
-                            isActive: model.appSettings.revealSettingsOnSingleTap
-                        ) {
-                            model.appSettings.revealSettingsOnSingleTap.toggle()
-                        }
-                        popoverIcon(
-                            "applepencil",
-                            tooltip: "Draw with Apple Pencil Only",
-                            isActive: model.appSettings.pencilOnly
-                        ) {
-                            model.appSettings.pencilOnly.toggle()
-                        }
-                        popoverIcon("bookmark", tooltip: "Save Current as Defaults") {
-                            model.saveDefaults(); showSettings = false
-                        }
-
                         ForEach(CanvasBackground.allCases, id: \.self) { bg in
                             popoverIcon(
                                 iconName(bg),
@@ -996,19 +1284,17 @@ struct ContentView: View {
 
                     Divider()
 
-                    // Export, Defaults & Info
+                    // Defaults & Customize Toolbar
                     LazyVGrid(columns: cols, spacing: 6) {
-                        popoverIcon("square.and.arrow.down", tooltip: "Save .wb") {
-                            showSettings = false; exportFormat = .wb; exportAction()
+                        popoverIcon("slider.horizontal.3", tooltip: "Customize Toolbar…") {
+                            showSettings = false
+                            settingsTool = nil
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                isCustomizingToolbar = true
+                            }
                         }
-                        popoverIcon("photo.badge.arrow.down", tooltip: "Export PNG") {
-                            showSettings = false; exportFormat = .png; exportAction()
-                        }
-                        popoverIcon("doc.richtext", tooltip: "Export PDF") {
-                            showSettings = false; exportFormat = .pdf; exportAction()
-                        }
-                        popoverIcon("folder", tooltip: "Open .wb File…") {
-                            showSettings = false; showImporter = true
+                        popoverIcon("bookmark", tooltip: "Save Current as Defaults") {
+                            model.saveDefaults(); showSettings = false
                         }
                         if model.hasDefaults {
                             popoverIcon("bookmark.fill", tooltip: "Restore Defaults") {
@@ -1017,12 +1303,6 @@ struct ContentView: View {
                             popoverIcon("arrow.counterclockwise", tooltip: "Reset to Factory Defaults") {
                                 model.resetToFactory(); showSettings = false
                             }
-                        }
-                        popoverIcon("questionmark.circle", tooltip: "Help & Shortcuts") {
-                            showSettings = false; showHelp = true
-                        }
-                        popoverIcon("info.circle", tooltip: "About Tissue Box") {
-                            showSettings = false; model.showAbout = true
                         }
                     }
                 }
@@ -1056,6 +1336,8 @@ struct ContentView: View {
                     role == .destructive ? .red : .primary
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .contentShape(RoundedRectangle(cornerRadius: 8))
+                .pencilHoverEffect()
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -1117,6 +1399,16 @@ struct ContentView: View {
 }
 
 extension View {
+    /// Applies native iPadOS Apple Pencil / pointer hover highlight when available.
+    @ViewBuilder
+    func pencilHoverEffect() -> some View {
+        #if os(iOS)
+        self.hoverEffect(.highlight)
+        #else
+        self
+        #endif
+    }
+
     /// Applies native Apple Liquid Glass on macOS 26+ / iOS 26+, with a refined
     /// translucent material fallback on earlier OS versions and toolchains.
     @ViewBuilder

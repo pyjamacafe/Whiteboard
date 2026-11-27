@@ -722,4 +722,31 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertEqual(model.placedImages[0].cgSize.width, 300, accuracy: 1)
         XCTAssertEqual(model.placedImages[0].cgSize.height, 200, accuracy: 1)
     }
+
+    func testConfigurableToolbarPinReorderUnpinAndPersistence() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        XCTAssertEqual(model.pinnedToolbarItems, ToolbarItemID.defaultPinned)
+        XCTAssertTrue(model.unpinnedToolbarItems.contains(.undo))
+
+        // Pin Undo before Home
+        model.pinToolbarItem(.undo, before: .home)
+        XCTAssertTrue(model.pinnedToolbarItems.contains(.undo))
+        XCTAssertFalse(model.unpinnedToolbarItems.contains(.undo))
+        let undoIdx = model.pinnedToolbarItems.firstIndex(of: .undo)!
+        let homeIdx = model.pinnedToolbarItems.firstIndex(of: .home)!
+        XCTAssertLessThan(undoIdx, homeIdx)
+
+        // Unpin Sharpie -> moves to unpinned list
+        model.unpinToolbarItem(.sharpie)
+        XCTAssertFalse(model.pinnedToolbarItems.contains(.sharpie))
+        XCTAssertTrue(model.unpinnedToolbarItems.contains(.sharpie))
+
+        // Persists across reload
+        let reloaded = DrawingModel(store: store, userDefaults: testDefaults)
+        XCTAssertEqual(reloaded.pinnedToolbarItems, model.pinnedToolbarItems)
+
+        // Reset restores defaults
+        reloaded.resetToolbarLayout()
+        XCTAssertEqual(reloaded.pinnedToolbarItems, ToolbarItemID.defaultPinned)
+    }
 }

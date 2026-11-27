@@ -115,6 +115,118 @@ enum Tool: String, CaseIterable {
     case pen, sharpie, fill, eraser, select
 }
 
+/// Every configurable item that can live on either the floating canvas toolbar
+/// or inside the More menu.
+nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Hashable, Sendable {
+    case pen
+    case sharpie
+    case fill
+    case eraser
+    case select
+    case scenes
+    case home
+    case undo
+    case redo
+    case clear
+    case copy
+    case paste
+    case importPhoto
+    case importImage
+    case center
+    case darkMode
+    case singleTapOptions
+    case pencilOnly
+    case exportWB
+    case exportPNG
+    case exportPDF
+    case openFile
+    case help
+    case about
+
+    var id: String { rawValue }
+
+    static let defaultPinned: [ToolbarItemID] = [
+        .pen, .sharpie, .fill, .eraser, .select, .scenes, .home
+    ]
+
+    static var platformCases: [ToolbarItemID] {
+        #if os(iOS)
+        return allCases
+        #else
+        return allCases.filter { $0 != .importPhoto }
+        #endif
+    }
+
+    var title: String {
+        switch self {
+        case .pen: return "Pen"
+        case .sharpie: return "Sharpie"
+        case .fill: return "Fill"
+        case .eraser: return "Eraser"
+        case .select: return "Select"
+        case .scenes: return "Scenes"
+        case .home: return "Home"
+        case .undo: return "Undo"
+        case .redo: return "Redo"
+        case .clear: return "Clear / Delete"
+        case .copy: return "Copy"
+        case .paste: return "Paste"
+        case .importPhoto: return "Photos"
+        case .importImage: return "Import Image"
+        case .center: return "Center Canvas"
+        case .darkMode: return "Theme"
+        case .singleTapOptions: return "Single-Tap Options"
+        case .pencilOnly: return "Pencil Only"
+        case .exportWB: return "Save .wb"
+        case .exportPNG: return "Export PNG"
+        case .exportPDF: return "Export PDF"
+        case .openFile: return "Open .wb"
+        case .help: return "Help"
+        case .about: return "About"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .pen: return "pencil.tip"
+        case .sharpie: return "pencil"
+        case .fill: return "drop.fill"
+        case .eraser: return "eraser"
+        case .select: return "cursorarrow.click"
+        case .scenes: return "rectangle.stack"
+        case .home: return "house"
+        case .undo: return "arrow.uturn.backward"
+        case .redo: return "arrow.uturn.forward"
+        case .clear: return "trash"
+        case .copy: return "doc.on.doc"
+        case .paste: return "doc.on.clipboard"
+        case .importPhoto: return "photo.on.rectangle"
+        case .importImage: return "photo"
+        case .center: return "viewfinder"
+        case .darkMode: return "moon.fill"
+        case .singleTapOptions: return "hand.tap"
+        case .pencilOnly: return "applepencil"
+        case .exportWB: return "square.and.arrow.down"
+        case .exportPNG: return "photo.badge.arrow.down"
+        case .exportPDF: return "doc.richtext"
+        case .openFile: return "folder"
+        case .help: return "questionmark.circle"
+        case .about: return "info.circle"
+        }
+    }
+
+    var associatedTool: Tool? {
+        switch self {
+        case .pen: return .pen
+        case .sharpie: return .sharpie
+        case .fill: return .fill
+        case .eraser: return .eraser
+        case .select: return .select
+        default: return nil
+        }
+    }
+}
+
 enum CanvasBackground: String, CaseIterable {
     case none, grid, dots, ruled
 }
@@ -309,6 +421,7 @@ final class DrawingModel {
     var needsRecenter: Bool = false
     var welcomeFolderName: String?
     var lastErrorMessage: String?
+    var pinnedToolbarItems: [ToolbarItemID] = ToolbarItemID.defaultPinned
 
     /// Bumped whenever committed strokes or placed images change so the canvas
     /// backing store knows when to re-bake (or incrementally append).
@@ -339,6 +452,7 @@ final class DrawingModel {
     @ObservationIgnored private let recentKey = "recentFiles"
     @ObservationIgnored private let maxRecent = 5
     @ObservationIgnored private let defaultsKey = "savedDefaults"
+    @ObservationIgnored private let toolbarLayoutKey = "pinnedToolbarItems"
 
     @ObservationIgnored private var settingsSaveWorkItem: DispatchWorkItem?
     @ObservationIgnored private var saveWorkItem: DispatchWorkItem?
@@ -376,9 +490,57 @@ final class DrawingModel {
         thumbnailCache.countLimit = 128
 
         loadDefaults()
+        loadToolbarLayout()
         loadRecents()
         loadBoards()
         isInitializing = false
+    }
+
+    // MARK: - Configurable Toolbar Layout
+
+    var unpinnedToolbarItems: [ToolbarItemID] {
+        let pinnedSet = Set(pinnedToolbarItems)
+        return ToolbarItemID.platformCases.filter { !pinnedSet.contains($0) }
+    }
+
+    private func loadToolbarLayout() {
+        guard let data = userDefaults.data(forKey: toolbarLayoutKey),
+              let decoded = try? JSONDecoder().decode([ToolbarItemID].self, from: data) else {
+            pinnedToolbarItems = ToolbarItemID.defaultPinned
+            return
+        }
+        let valid = Set(ToolbarItemID.platformCases)
+        var seen = Set<ToolbarItemID>()
+        let filtered = decoded.filter { valid.contains($0) && seen.insert($0).inserted }
+        pinnedToolbarItems = filtered
+    }
+
+    private func saveToolbarLayout() {
+        if let data = try? JSONEncoder().encode(pinnedToolbarItems) {
+            userDefaults.set(data, forKey: toolbarLayoutKey)
+        }
+    }
+
+    func pinToolbarItem(_ item: ToolbarItemID, before target: ToolbarItemID? = nil) {
+        guard ToolbarItemID.platformCases.contains(item) else { return }
+        if item == target { return }
+        pinnedToolbarItems.removeAll { $0 == item }
+        if let target, let idx = pinnedToolbarItems.firstIndex(of: target) {
+            pinnedToolbarItems.insert(item, at: idx)
+        } else {
+            pinnedToolbarItems.append(item)
+        }
+        saveToolbarLayout()
+    }
+
+    func unpinToolbarItem(_ item: ToolbarItemID) {
+        pinnedToolbarItems.removeAll { $0 == item }
+        saveToolbarLayout()
+    }
+
+    func resetToolbarLayout() {
+        pinnedToolbarItems = ToolbarItemID.defaultPinned
+        saveToolbarLayout()
     }
 
     private func scheduleSettingsSave() {

@@ -108,7 +108,7 @@ struct ToolSettingsView: View {
                            lastTapIndex: $lastPenTapIndex)
 
             // Width picker: dots of varying size (2–5pt)
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 ForEach(model.penSettings.widthOptions, id: \.self) { w in
                     Button(action: { model.penSettings.thickness = w }) {
                         Circle()
@@ -118,8 +118,12 @@ struct ToolSettingsView: View {
                                 model.penSettings.thickness == w ?
                                 Circle().stroke(Color.primary, lineWidth: 1) : nil
                             )
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                            .pencilHoverEffect()
                     }
                     .buttonStyle(.plain)
+                    .pointingHand()
                 }
             }
         }
@@ -135,7 +139,7 @@ struct ToolSettingsView: View {
                            lastTapIndex: $lastSharpieTapIndex)
 
             // Width picker: dots of varying size (4–10pt)
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 ForEach(model.sharpieSettings.widthOptions, id: \.self) { w in
                     Button(action: { model.sharpieSettings.thickness = w }) {
                         Circle()
@@ -145,8 +149,12 @@ struct ToolSettingsView: View {
                                 model.sharpieSettings.thickness == w ?
                                 Circle().stroke(Color.primary, lineWidth: 1) : nil
                             )
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                            .pencilHoverEffect()
                     }
                     .buttonStyle(.plain)
+                    .pointingHand()
                 }
             }
         }
@@ -178,6 +186,8 @@ struct ToolSettingsView: View {
                     RoundedRectangle(cornerRadius: 6)
                         .stroke(Color.primary.opacity(0.25), lineWidth: 1)
                 )
+                .contentShape(RoundedRectangle(cornerRadius: 6))
+                .pencilHoverEffect()
             }
             .buttonStyle(.plain)
             .help("Opacity: \(Int((model.fillSettings.opacity * 100).rounded()))% (tap to cycle 25% / 50% / 75% / 100%)")
@@ -191,6 +201,8 @@ struct ToolSettingsView: View {
                     .background(Color.primary.opacity(0.08))
                     .foregroundColor(.primary)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                    .pencilHoverEffect()
             }
             .buttonStyle(.plain)
             .help("Gap Closing: \(fillGapLabel) (tap to cycle Strict / Auto / Wide)")
@@ -206,6 +218,8 @@ struct ToolSettingsView: View {
                     .background(model.fillSettings.overlapMode == .blend ? Color.accentColor : Color.primary.opacity(0.08))
                     .foregroundColor(model.fillSettings.overlapMode == .blend ? .white : .primary)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                    .pencilHoverEffect()
             }
             .buttonStyle(.plain)
             .help(model.fillSettings.overlapMode == .replace
@@ -279,8 +293,11 @@ struct ToolSettingsView: View {
                             .background(model.eraserSettings.mode == mode ? Color.accentColor : Color.clear)
                             .foregroundColor(model.eraserSettings.mode == mode ? .white : .primary)
                             .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .contentShape(RoundedRectangle(cornerRadius: 6))
+                            .pencilHoverEffect()
                     }
                     .buttonStyle(.plain)
+                    .pointingHand()
                 }
             }
 
@@ -294,6 +311,8 @@ struct ToolSettingsView: View {
                     .background(model.eraserSettings.eraseTarget == .all ? Color.primary.opacity(0.08) : Color.accentColor)
                     .foregroundColor(model.eraserSettings.eraseTarget == .all ? .primary : .white)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                    .pencilHoverEffect()
             }
             .buttonStyle(.plain)
             .help("Erase Target: \(model.eraserSettings.eraseTarget.rawValue) (tap to cycle All / Pen / Sharpie / Fill)")
