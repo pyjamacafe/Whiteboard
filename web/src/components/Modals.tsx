@@ -146,7 +146,7 @@ export const AboutModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
       <div className="modal-body about-body">
         <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Tissue Box" className="about-logo" />
         <h1>Tissue Box</h1>
-        <div className="about-version">Version 1.4.0 (Web / PWA)</div>
+        <div className="about-version">Version 1.5.0 (Web / PWA)</div>
         <p className="about-tagline">
           Like a café napkin for quick sketching — capture and convey ideas effortlessly on Mac, iPad, Windows, Linux, and the Web.
         </p>

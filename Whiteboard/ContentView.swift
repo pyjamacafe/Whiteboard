@@ -264,6 +264,15 @@ struct ContentView: View {
             } message: {
                 Text("This will permanently delete all strokes and images.")
             }
+            .onChange(of: model.currentTool) { _, newTool in
+                if newTool == .select {
+                    settingsTool = nil
+                } else if !model.pinnedToolbarItems.contains(where: { $0.associatedTool == newTool }) {
+                    settingsTool = newTool
+                } else if settingsTool != newTool {
+                    settingsTool = model.appSettings.revealSettingsOnSingleTap ? newTool : nil
+                }
+            }
             .onChange(of: model.zoomDisplayScale) { _, _ in
                 withAnimation(.easeOut(duration: 0.16)) { showZoomPill = true }
                 zoomHideWorkItem?.cancel()
@@ -1000,11 +1009,18 @@ struct ContentView: View {
         case .pen, .sharpie, .fill, .shape, .text, .eraser, .select:
             if let tool = item.associatedTool {
                 let wasSelected = (model.currentTool == tool)
-                if wasSelected {
-                    settingsTool = (settingsTool == tool || tool == .select) ? nil : tool
+                let hasOptions = (tool != .select)
+                let isInMoreMenu = closePopover || !model.pinnedToolbarItems.contains(item)
+                if isInMoreMenu {
+                    if !wasSelected {
+                        model.selectTool(tool)
+                    }
+                    settingsTool = hasOptions ? tool : nil
+                } else if wasSelected {
+                    settingsTool = (settingsTool == tool || !hasOptions) ? nil : tool
                 } else {
                     model.selectTool(tool)
-                    settingsTool = (model.appSettings.revealSettingsOnSingleTap && tool != .select) ? tool : nil
+                    settingsTool = (model.appSettings.revealSettingsOnSingleTap && hasOptions) ? tool : nil
                 }
             }
             if closePopover { showSettings = false }

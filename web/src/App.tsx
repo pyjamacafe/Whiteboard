@@ -509,39 +509,42 @@ export const App: React.FC = () => {
           }
           return;
         }
+        const selectToolWithMoreOptions = (tool: Tool) => {
+          drawingStore.selectTool(tool);
+          const isUnpinned = !state.pinnedToolbarItems.includes(tool);
+          setSettingsTool(
+            tool !== 'select' && (isUnpinned || state.appSettings.revealSettingsOnSingleTap)
+              ? tool
+              : null
+          );
+        };
         if (key === 'p') {
-          drawingStore.selectTool('pen');
-          setSettingsTool(null);
+          selectToolWithMoreOptions('pen');
           return;
         }
         if (key === 's') {
-          drawingStore.selectTool(e.shiftKey ? 'select' : 'sharpie');
-          setSettingsTool(null);
+          selectToolWithMoreOptions(e.shiftKey ? 'select' : 'sharpie');
           return;
         }
         if (key === 'f') {
-          drawingStore.selectTool('fill');
-          setSettingsTool(null);
+          selectToolWithMoreOptions('fill');
           return;
         }
         if (key === 'r') {
-          drawingStore.selectTool('shape');
-          setSettingsTool(null);
+          selectToolWithMoreOptions('shape');
           return;
         }
         if (key === 't') {
-          drawingStore.selectTool('text');
-          setSettingsTool(null);
+          selectToolWithMoreOptions('text');
           return;
         }
         if (key === 'e') {
           const prior = state.currentTool;
-          drawingStore.selectTool('eraser');
+          selectToolWithMoreOptions('eraser');
           drawingStore.setEraserSettings({
             eraseTarget:
               prior === 'pen' ? 'pen' : prior === 'sharpie' ? 'sharpie' : prior === 'fill' ? 'fill' : 'all',
           });
-          setSettingsTool(null);
           return;
         }
         if (key === 'x' && e.shiftKey) {
@@ -586,6 +589,8 @@ export const App: React.FC = () => {
     showClearConfirm,
     showRenameTissue,
     state.currentTool,
+    state.pinnedToolbarItems,
+    state.appSettings.revealSettingsOnSingleTap,
     state.selectedImageIds,
     state.showQuickMenu,
     showScenes,
@@ -652,7 +657,9 @@ export const App: React.FC = () => {
         <>
           <CanvasStage
             onBeginDraw={() => {
-              setSettingsTool(null);
+              if (state.pinnedToolbarItems.includes(state.currentTool)) {
+                setSettingsTool(null);
+              }
               setShowScenes(false);
               setShowMore(false);
             }}

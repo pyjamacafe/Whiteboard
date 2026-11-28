@@ -373,7 +373,15 @@ export class DrawingStore {
           currentTool: s.currentTool,
         })
       );
-      localStorage.setItem(TOOLBAR_KEY, JSON.stringify(s.pinnedToolbarItems));
+    } catch {
+      // ignore
+    }
+  }
+
+  private persistToolbarLayout(): void {
+    if (typeof localStorage === 'undefined') return;
+    try {
+      localStorage.setItem(TOOLBAR_KEY, JSON.stringify(this.state.pinnedToolbarItems));
     } catch {
       // ignore
     }
@@ -590,12 +598,12 @@ export class DrawingStore {
       next.push(item);
     }
     this.emit({ pinnedToolbarItems: next });
-    this.persistSettings();
+    this.persistToolbarLayout();
   }
 
   unpinToolbarItem(item: ToolbarItemID): void {
     this.emit({ pinnedToolbarItems: this.state.pinnedToolbarItems.filter((x) => x !== item) });
-    this.persistSettings();
+    this.persistToolbarLayout();
   }
 
   resetToolbarLayout(): void {
@@ -604,6 +612,13 @@ export class DrawingStore {
       appSettings: { ...this.state.appSettings, toolbarDockEdge: 'top' },
     });
     this.persistSettings();
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.removeItem(TOOLBAR_KEY);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   // MARK: - Tools & Settings

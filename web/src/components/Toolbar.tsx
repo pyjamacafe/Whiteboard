@@ -144,12 +144,19 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
     const tool = ITEM_META[id].tool;
     if (tool) {
       props.setShowScenes(false);
-      if (state.currentTool === tool) {
-        props.setSettingsTool(props.settingsTool === tool || tool === 'select' ? null : tool);
+      const hasOptions = tool !== 'select';
+      const isInMoreMenu = closeMore || !state.pinnedToolbarItems.includes(id);
+      if (isInMoreMenu) {
+        if (state.currentTool !== tool) {
+          drawingStore.selectTool(tool);
+        }
+        props.setSettingsTool(hasOptions ? tool : null);
+      } else if (state.currentTool === tool) {
+        props.setSettingsTool(props.settingsTool === tool || !hasOptions ? null : tool);
       } else {
         drawingStore.selectTool(tool);
         props.setSettingsTool(
-          state.appSettings.revealSettingsOnSingleTap && tool !== 'select' ? tool : null
+          state.appSettings.revealSettingsOnSingleTap && hasOptions ? tool : null
         );
       }
       if (closeMore) props.setShowMore(false);

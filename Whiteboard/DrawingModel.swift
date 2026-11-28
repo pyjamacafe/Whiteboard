@@ -633,8 +633,8 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     case fill
     case shape
     case text
-    case eraser
     case select
+    case eraser
     case scenes
     case home
     case undo
@@ -661,7 +661,7 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     var id: String { rawValue }
 
     static let defaultPinned: [ToolbarItemID] = [
-        .pen, .sharpie, .fill, .shape, .text, .eraser, .select, .scenes, .home
+        .pen, .sharpie, .fill, .shape, .text, .select, .eraser, .scenes, .home
     ]
 
     static var platformCases: [ToolbarItemID] {
