@@ -15,8 +15,17 @@ import {
 import { computeFillContours } from '../engine/floodFill';
 import { CanvasHistory } from '../engine/history';
 import { decodeWBJson, encodeWBJson } from '../engine/wbCodec';
+import { exportCanvasPDFBytes, exportScenesPDFBytes } from '../engine/pdfExport';
+import { BoardStore } from '../store/boardStore';
 import { DrawingStore } from '../store/drawingStore';
-import { generateId, type FillShape, type PlacedImage, type Point, type Stroke } from '../types/model';
+import {
+  DEFAULT_LIGHT_PRESETS,
+  generateId,
+  type FillShape,
+  type PlacedImage,
+  type Point,
+  type Stroke,
+} from '../types/model';
 
 const black = { r: 0, g: 0, b: 0, a: 1 };
 
@@ -420,5 +429,76 @@ describe('DrawingStore Phase 2 (Lasso, Rotation Handle, Images, Scenes)', () => 
     expect(store.getSnapshot().activeSceneId).toBe(s1.id);
     store.deleteScene(s1.id);
     expect(store.getSnapshot().scenes.length).toBe(1);
+  });
+});
+
+describe('Phase 3 (BoardStore Trash/Restore & Vector PDF Export)', () => {
+  it('persists boards, folders, thumbnails, and 30-day trash restore/purge', async () => {
+    const bs = new BoardStore(true);
+    const s = makeStroke([
+      { x: 0, y: 0 },
+      { x: 50, y: 50 },
+    ]);
+    await bs.saveBoard('b1', { strokes: [s], fills: [], placedImages: [], scenes: [] });
+    await bs.saveIndex({
+      boards: [{ id: 'b1', name: 'Napkin 1', created: 1000, modified: 2000, isPinned: true }],
+      folders: [{ id: 'f1', name: 'Work', boardIds: ['b1'] }],
+    });
+
+    const idx = await bs.loadIndex();
+    expect(idx.boards[0].isPinned).toBe(true);
+    expect(idx.folders[0].name).toBe('Work');
+
+    const now = Date.now();
+    const trash = await bs.trashBoard('b1', 'Napkin 1', now);
+    expect(trash.length).toBe(1);
+    expect(await bs.loadBoard('b1')).toBeNull();
+
+    const restored = await bs.restoreBoard('b1', 'b2');
+    expect(restored?.name).toBe('Napkin 1');
+    expect(restored?.data.strokes.length).toBe(1);
+    expect((await bs.loadBoard('b2'))?.strokes.length).toBe(1);
+    expect((await bs.loadTrash()).length).toBe(0);
+
+    // Entries older than 30 days are auto-purged
+    await bs.trashBoard('old', 'Ancient', now - 31 * 24 * 3600 * 1000);
+    expect((await bs.loadTrash(now)).length).toBe(0);
+  });
+
+  it('exports valid vector PDF for single canvas and multi-page scenes', async () => {
+    const s = makeStroke([
+      { x: 0, y: 0 },
+      { x: 100, y: 50 },
+      { x: 200, y: 10 },
+    ]);
+    const pdfBytes = await exportCanvasPDFBytes({
+      strokes: [s],
+      fills: [],
+      placedImages: [],
+      penPresets: DEFAULT_LIGHT_PRESETS,
+      sharpiePresets: DEFAULT_LIGHT_PRESETS,
+      fillPresets: DEFAULT_LIGHT_PRESETS,
+      isDarkMode: false,
+      isWarmPaper: true,
+    });
+    expect(pdfBytes).not.toBeNull();
+    expect(new TextDecoder().decode(pdfBytes!.slice(0, 5))).toBe('%PDF-');
+
+    const deckBytes = await exportScenesPDFBytes({
+      scenes: [
+        { id: generateId(), name: 'Slide 1', centerX: 50, centerY: 25, scale: 1 },
+        { id: generateId(), name: 'Slide 2', centerX: 150, centerY: 25, scale: 1.5 },
+      ],
+      strokes: [s],
+      fills: [],
+      placedImages: [],
+      penPresets: DEFAULT_LIGHT_PRESETS,
+      sharpiePresets: DEFAULT_LIGHT_PRESETS,
+      fillPresets: DEFAULT_LIGHT_PRESETS,
+      isDarkMode: true,
+      isWarmPaper: false,
+    });
+    expect(deckBytes).not.toBeNull();
+    expect(deckBytes!.length).toBeGreaterThan(300);
   });
 });

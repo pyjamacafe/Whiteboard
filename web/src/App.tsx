@@ -1,37 +1,378 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CanvasStage } from './components/CanvasStage';
 import { Icon } from './components/Icons';
+import { AboutModal, ConfirmModal, HelpModal, PromptModal } from './components/Modals';
 import { ScenesPopover } from './components/ScenesPopover';
 import { QuickSelectionMenu, SelectionPill } from './components/SelectionPill';
+import { Toolbar } from './components/Toolbar';
 import { ToolSettingsPill } from './components/ToolSettingsPill';
+import { WelcomeScreen } from './components/WelcomeScreen';
+import { downloadBlob, exportCanvasPDFBytes, exportScenesPDFBytes } from './engine/pdfExport';
+import { renderBoardThumbnailDataUrl, renderPNGBlob } from './engine/renderer';
+import { decodeWBJson, encodeWBJson } from './engine/wbCodec';
+import { boardStore } from './store/boardStore';
 import { drawingStore, useDrawingState } from './store/drawingStore';
-import { colorToCss, type CanvasBackground, type Tool } from './types/model';
-
-function contrastOnColor(c: { r: number; g: number; b: number }): string {
-  const lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
-  return lum > 0.6 ? '#000000' : '#ffffff';
-}
+import {
+  generateId,
+  type BoardFolder,
+  type BoardMeta,
+  type SaveData,
+  type Tool,
+  type TrashEntry,
+} from './types/model';
 
 export const App: React.FC = () => {
   const state = useDrawingState();
+
+  // Library state
+  const [showWelcome, setShowWelcome] = useState(true);
+  const [boards, setBoards] = useState<BoardMeta[]>([]);
+  const [folders, setFolders] = useState<BoardFolder[]>([]);
+  const [trashedBoards, setTrashedBoards] = useState<TrashEntry[]>([]);
+  const [currentBoardId, setCurrentBoardId] = useState<string | null>(null);
+  const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
+
+  // Canvas overlay & modal state
   const [settingsTool, setSettingsTool] = useState<Tool | null>(null);
   const [showScenes, setShowScenes] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  const [isCustomizing, setIsCustomizing] = useState(false);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [showRenameTissue, setShowRenameTissue] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [showZoomPill, setShowZoomPill] = useState(false);
+
   const zoomHideTimer = useRef<number | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
+  const wbInputRef = useRef<HTMLInputElement>(null);
+  const currentBoardIdRef = useRef<string | null>(null);
+  currentBoardIdRef.current = currentBoardId;
+
+  const boardsRef = useRef(boards);
+  boardsRef.current = boards;
+  const foldersRef = useRef(folders);
+  foldersRef.current = folders;
+
+  const currentBoardName =
+    boards.find((b) => b.id === currentBoardId)?.name ?? 'Tissue';
+
+  // Sync document title
+  useEffect(() => {
+    document.title = showWelcome ? 'Tissue Box' : `Tissue | ${currentBoardName}`;
+  }, [showWelcome, currentBoardName]);
+
+  // Initial library load from IndexedDB
+  useEffect(() => {
+    (async () => {
+      const idx = await boardStore.loadIndex();
+      setBoards(idx.boards);
+      setFolders(idx.folders);
+      const trash = await boardStore.loadTrash();
+      setTrashedBoards(trash);
+    })();
+  }, []);
+
+  // Load/generate thumbnails whenever welcome screen or theme changes
+  useEffect(() => {
+    if (!showWelcome || boards.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const next: Record<string, string> = {};
+      for (const b of boards) {
+        const cached = await boardStore.loadThumbnail(b.id, state.appSettings.isDarkMode);
+        if (cached) {
+          next[b.id] = cached;
+          continue;
+        }
+        const data = await boardStore.loadBoard(b.id);
+        if (!data) continue;
+        const url = await renderBoardThumbnailDataUrl({
+          strokes: data.strokes,
+          placedImages: data.placedImages,
+          fills: data.fills,
+          penPresets: drawingStore.penPresets,
+          sharpiePresets: drawingStore.sharpiePresets,
+          fillPresets: drawingStore.fillPresets,
+          isDarkMode: state.appSettings.isDarkMode,
+          isWarmPaper: state.appSettings.isWarmPaper,
+        });
+        if (url) {
+          await boardStore.saveThumbnail(b.id, state.appSettings.isDarkMode, url);
+          next[b.id] = url;
+        }
+      }
+      if (!cancelled) setThumbnails(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [showWelcome, boards, state.appSettings.isDarkMode, state.appSettings.isWarmPaper]);
+
+  // Persist index helper
+  const persistIndex = useCallback(async (nextBoards: BoardMeta[], nextFolders: BoardFolder[]) => {
+    setBoards(nextBoards);
+    setFolders(nextFolders);
+    await boardStore.saveIndex({ boards: nextBoards, folders: nextFolders });
+  }, []);
+
+  // Wire auto-save hook to IndexedDB
+  useEffect(() => {
+    drawingStore.setAutoSaveHook((data: SaveData) => {
+      const id = currentBoardIdRef.current;
+      if (!id) return;
+      const now = Date.now();
+      boardStore.saveBoard(id, data).then(() => boardStore.invalidateThumbnails(id));
+      const updated = boardsRef.current
+        .map((b) => (b.id === id ? { ...b, modified: now } : b))
+        .sort((a, b) => b.modified - a.modified);
+      persistIndex(updated, foldersRef.current);
+    });
+    return () => drawingStore.setAutoSaveHook(null);
+  }, [persistIndex]);
+
+  // Flush auto-save before tab unload
+  useEffect(() => {
+    const onBeforeUnload = () => drawingStore.flushAutoSave();
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, []);
 
   // Transient Zoom Indicator Pill
   useEffect(() => {
+    if (showWelcome) return;
     setShowZoomPill(true);
     if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
     zoomHideTimer.current = window.setTimeout(() => setShowZoomPill(false), 2000);
     return () => {
       if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
     };
-  }, [state.zoomDisplayScale]);
+  }, [state.zoomDisplayScale, showWelcome]);
 
-  // System clipboard image paste
+  // MARK: - Board CRUD
+
+  const createBoard = async (folderId?: string, initialData?: SaveData, customName?: string) => {
+    const now = Date.now();
+    const id = generateId();
+    const defaultName =
+      customName?.trim() ||
+      `Tissue ${boardsRef.current.length + 1}`;
+    const meta: BoardMeta = { id, name: defaultName, created: now, modified: now, isPinned: false };
+    const defaultScene = {
+      id: generateId(),
+      name: 'Scene 1',
+      centerX: 0,
+      centerY: 0,
+      scale: 1,
+    };
+    const saveData: SaveData = initialData ?? {
+      strokes: [],
+      placedImages: [],
+      fills: [],
+      scenes: [defaultScene],
+    };
+
+    await boardStore.saveBoard(id, saveData);
+    const nextBoards = [meta, ...boardsRef.current];
+    const nextFolders = folderId
+      ? foldersRef.current.map((f) =>
+          f.id === folderId ? { ...f, boardIds: [id, ...f.boardIds] } : f
+        )
+      : foldersRef.current;
+    await persistIndex(nextBoards, nextFolders);
+
+    setCurrentBoardId(id);
+    drawingStore.loadSaveData(saveData);
+    setShowWelcome(false);
+    setSettingsTool(null);
+    setShowScenes(false);
+    setShowMore(false);
+    setIsCustomizing(false);
+  };
+
+  const openBoard = async (id: string) => {
+    const data = (await boardStore.loadBoard(id)) ?? {
+      strokes: [],
+      placedImages: [],
+      fills: [],
+      scenes: [],
+    };
+    setCurrentBoardId(id);
+    drawingStore.loadSaveData(data);
+    setShowWelcome(false);
+    setSettingsTool(null);
+    setShowScenes(false);
+    setShowMore(false);
+    setIsCustomizing(false);
+    drawingStore.requestRecenter();
+  };
+
+  const closeBoard = () => {
+    drawingStore.flushAutoSave();
+    setShowWelcome(true);
+    setSettingsTool(null);
+    setShowScenes(false);
+    setShowMore(false);
+    setIsCustomizing(false);
+  };
+
+  const renameBoard = async (id: string, name: string) => {
+    const next = boardsRef.current.map((b) => (b.id === id ? { ...b, name } : b));
+    await persistIndex(next, foldersRef.current);
+  };
+
+  const togglePinBoard = async (id: string) => {
+    const next = boardsRef.current.map((b) =>
+      b.id === id ? { ...b, isPinned: !b.isPinned } : b
+    );
+    await persistIndex(next, foldersRef.current);
+  };
+
+  const moveBoardToFolder = async (boardId: string, folderId: string | null) => {
+    const nextFolders = foldersRef.current.map((f) => {
+      const cleaned = f.boardIds.filter((id) => id !== boardId);
+      if (folderId && f.id === folderId) return { ...f, boardIds: [boardId, ...cleaned] };
+      return { ...f, boardIds: cleaned };
+    });
+    await persistIndex(boardsRef.current, nextFolders);
+  };
+
+  const trashBoard = async (id: string) => {
+    const target = boardsRef.current.find((b) => b.id === id);
+    if (!target) return;
+    const updatedTrash = await boardStore.trashBoard(id, target.name);
+    setTrashedBoards(updatedTrash);
+    const nextBoards = boardsRef.current.filter((b) => b.id !== id);
+    const nextFolders = foldersRef.current.map((f) => ({
+      ...f,
+      boardIds: f.boardIds.filter((bid) => bid !== id),
+    }));
+    await persistIndex(nextBoards, nextFolders);
+    if (currentBoardId === id) {
+      setCurrentBoardId(null);
+      setShowWelcome(true);
+    }
+  };
+
+  const restoreTrash = async (trashId: string) => {
+    const newId = generateId();
+    const res = await boardStore.restoreBoard(trashId, newId);
+    if (!res) return;
+    setTrashedBoards(res.remaining);
+    const now = Date.now();
+    const meta: BoardMeta = { id: newId, name: res.name, created: now, modified: now, isPinned: false };
+    await persistIndex([meta, ...boardsRef.current], foldersRef.current);
+  };
+
+  const permDeleteTrash = async (trashId: string) => {
+    const remaining = await boardStore.permanentlyDeleteTrash(trashId);
+    setTrashedBoards(remaining);
+  };
+
+  const emptyTrash = async () => {
+    const remaining = await boardStore.emptyTrash();
+    setTrashedBoards(remaining);
+  };
+
+  const createFolder = async (name: string) => {
+    const folder: BoardFolder = { id: generateId(), name, boardIds: [] };
+    await persistIndex(boardsRef.current, [...foldersRef.current, folder]);
+  };
+
+  const renameFolder = async (id: string, name: string) => {
+    const next = foldersRef.current.map((f) => (f.id === id ? { ...f, name } : f));
+    await persistIndex(boardsRef.current, next);
+  };
+
+  const deleteFolder = async (id: string) => {
+    const next = foldersRef.current.filter((f) => f.id !== id);
+    await persistIndex(boardsRef.current, next);
+  };
+
+  // MARK: - Import / Export (.wb, PNG, Vector PDF, Scenes PDF)
+
+  const handleImportWBFile = async (file: File) => {
+    try {
+      const text = await file.text();
+      const decoded = decodeWBJson(text);
+      const baseName = file.name.replace(/\.wb$/i, '');
+      await createBoard(undefined, decoded, baseName);
+    } catch {
+      drawingStore.setError('Could not read .wb file. Ensure it is a valid Tissue Box JSON export.');
+    }
+  };
+
+  const handleExportWB = () => {
+    const json = encodeWBJson(drawingStore.exportSaveData());
+    downloadBlob(new Blob([json], { type: 'application/json' }), `${currentBoardName}.wb`);
+  };
+
+  const handleExportPNG = async (overrideBoardId?: string) => {
+    const data = overrideBoardId
+      ? await boardStore.loadBoard(overrideBoardId)
+      : drawingStore.exportSaveData();
+    const name = overrideBoardId
+      ? boardsRef.current.find((b) => b.id === overrideBoardId)?.name ?? 'Tissue'
+      : currentBoardName;
+    if (!data) return;
+    const blob = await renderPNGBlob({
+      strokes: data.strokes,
+      placedImages: data.placedImages,
+      fills: data.fills,
+      penPresets: drawingStore.penPresets,
+      sharpiePresets: drawingStore.sharpiePresets,
+      fillPresets: drawingStore.fillPresets,
+      isDarkMode: state.appSettings.isDarkMode,
+    });
+    if (!blob) {
+      drawingStore.setError('Nothing on this tissue to export.');
+      return;
+    }
+    downloadBlob(blob, `${name}.png`);
+  };
+
+  const handleExportPDF = async () => {
+    const data = drawingStore.exportSaveData();
+    const bytes = await exportCanvasPDFBytes({
+      strokes: data.strokes,
+      placedImages: data.placedImages,
+      fills: data.fills,
+      penPresets: drawingStore.penPresets,
+      sharpiePresets: drawingStore.sharpiePresets,
+      fillPresets: drawingStore.fillPresets,
+      isDarkMode: state.appSettings.isDarkMode,
+      isWarmPaper: state.appSettings.isWarmPaper,
+    });
+    if (!bytes) {
+      drawingStore.setError('Nothing on this tissue to export.');
+      return;
+    }
+    downloadBlob(new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }), `${currentBoardName}.pdf`);
+  };
+
+  const handleExportScenesPDF = async () => {
+    const data = drawingStore.exportSaveData();
+    const bytes = await exportScenesPDFBytes({
+      scenes: data.scenes,
+      strokes: data.strokes,
+      placedImages: data.placedImages,
+      fills: data.fills,
+      penPresets: drawingStore.penPresets,
+      sharpiePresets: drawingStore.sharpiePresets,
+      fillPresets: drawingStore.fillPresets,
+      isDarkMode: state.appSettings.isDarkMode,
+      isWarmPaper: state.appSettings.isWarmPaper,
+    });
+    if (!bytes) {
+      drawingStore.setError('Add at least one scene to export a slide deck PDF.');
+      return;
+    }
+    downloadBlob(new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' }), `${currentBoardName}-Scenes.pdf`);
+  };
+
+  // System clipboard image paste (canvas mode only)
   useEffect(() => {
+    if (showWelcome) return;
     const onPaste = async (e: ClipboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const items = Array.from(e.clipboardData?.items ?? []);
@@ -50,10 +391,11 @@ export const App: React.FC = () => {
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, []);
+  }, [showWelcome]);
 
-  // Keyboard shortcuts
+  // Canvas keyboard shortcuts
   useEffect(() => {
+    if (showWelcome || showHelp || showAbout || showClearConfirm || showRenameTissue) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const mod = e.metaKey || e.ctrlKey;
@@ -64,6 +406,21 @@ export const App: React.FC = () => {
           e.preventDefault();
           if (e.shiftKey) drawingStore.redo();
           else drawingStore.undo();
+          return;
+        }
+        if (key === 's') {
+          e.preventDefault();
+          handleExportWB();
+          return;
+        }
+        if (key === 'o') {
+          e.preventDefault();
+          wbInputRef.current?.click();
+          return;
+        }
+        if (key === 'w') {
+          e.preventDefault();
+          closeBoard();
           return;
         }
         if (key === 'c') {
@@ -97,11 +454,22 @@ export const App: React.FC = () => {
 
       if (!mod && !e.altKey) {
         if (e.key === 'Escape') {
+          if (isCustomizing) {
+            setIsCustomizing(false);
+            return;
+          }
           if (showScenes) {
             setShowScenes(false);
             return;
           }
-          if (state.currentTool === 'select' && (drawingStore.hasAnySelectionOrLasso || state.showQuickMenu)) {
+          if (showMore) {
+            setShowMore(false);
+            return;
+          }
+          if (
+            state.currentTool === 'select' &&
+            (drawingStore.hasAnySelectionOrLasso || state.showQuickMenu)
+          ) {
             e.preventDefault();
             drawingStore.clearLassoSelection();
             return;
@@ -181,40 +549,19 @@ export const App: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [state.currentTool, state.selectedImageIds, state.showQuickMenu, showScenes]);
-
-  const handleToolClick = (tool: Tool) => {
-    setShowScenes(false);
-    if (state.currentTool === tool) {
-      setSettingsTool(settingsTool === tool || tool === 'select' ? null : tool);
-    } else {
-      drawingStore.selectTool(tool);
-      setSettingsTool(state.appSettings.revealSettingsOnSingleTap && tool !== 'select' ? tool : null);
-    }
-  };
-
-  const toolActiveStyle = (tool: Tool): React.CSSProperties | undefined => {
-    if (state.currentTool !== tool) return undefined;
-    if (tool === 'pen') {
-      const c = drawingStore.activePenColor;
-      return { backgroundColor: colorToCss(c), color: contrastOnColor(c) };
-    }
-    if (tool === 'sharpie') {
-      const c = drawingStore.activeSharpieColor;
-      return { backgroundColor: colorToCss(c), color: contrastOnColor(c) };
-    }
-    if (tool === 'fill') {
-      const c = drawingStore.activeFillColor;
-      return { backgroundColor: colorToCss(c), color: contrastOnColor(c) };
-    }
-    return undefined;
-  };
-
-  const cycleBackground = () => {
-    const order: CanvasBackground[] = ['grid', 'dots', 'ruled', 'none'];
-    const idx = order.indexOf(state.appSettings.canvasBackground);
-    drawingStore.setCanvasBackground(order[(idx + 1) % order.length]);
-  };
+  }, [
+    showWelcome,
+    showHelp,
+    showAbout,
+    showClearConfirm,
+    showRenameTissue,
+    state.currentTool,
+    state.selectedImageIds,
+    state.showQuickMenu,
+    showScenes,
+    showMore,
+    isCustomizing,
+  ]);
 
   return (
     <div className={`app-root ${state.appSettings.isDarkMode ? 'theme-dark' : ''}`}>
@@ -233,167 +580,159 @@ export const App: React.FC = () => {
         }}
       />
 
-      <CanvasStage
-        onBeginDraw={() => {
-          setSettingsTool(null);
-          setShowScenes(false);
+      <input
+        ref={wbInputRef}
+        type="file"
+        accept=".wb,application/json"
+        className="sr-only"
+        onChange={async (e) => {
+          const file = e.target.files?.[0];
+          if (file) await handleImportWBFile(file);
+          e.target.value = '';
         }}
       />
 
-      <QuickSelectionMenu />
+      {showWelcome ? (
+        <WelcomeScreen
+          boards={boards}
+          folders={folders}
+          trashedBoards={trashedBoards}
+          thumbnails={thumbnails}
+          isDarkMode={state.appSettings.isDarkMode}
+          onToggleDarkMode={() => drawingStore.toggleDarkMode()}
+          onCreateBoard={(folderId) => createBoard(folderId)}
+          onOpenBoard={openBoard}
+          onOpenWBFile={() => wbInputRef.current?.click()}
+          onDropWBFile={handleImportWBFile}
+          onRenameBoard={renameBoard}
+          onTogglePinBoard={togglePinBoard}
+          onMoveBoardToFolder={moveBoardToFolder}
+          onExportBoardPNG={(id) => handleExportPNG(id)}
+          onTrashBoard={trashBoard}
+          onRestoreTrash={restoreTrash}
+          onPermanentDeleteTrash={permDeleteTrash}
+          onEmptyTrash={emptyTrash}
+          onCreateFolder={createFolder}
+          onRenameFolder={renameFolder}
+          onDeleteFolder={deleteFolder}
+          onShowHelp={() => setShowHelp(true)}
+          onShowAbout={() => setShowAbout(true)}
+        />
+      ) : (
+        <>
+          <CanvasStage
+            onBeginDraw={() => {
+              setSettingsTool(null);
+              setShowScenes(false);
+              setShowMore(false);
+            }}
+          />
 
-      {state.isToolbarVisible && (
-        <div className={`toolbar-overlay dock-${state.appSettings.toolbarDockEdge}`}>
-          <div className="glass-capsule toolbar-bar" onPointerDown={(e) => e.stopPropagation()}>
-            {(['pen', 'sharpie', 'fill', 'eraser', 'select'] as Tool[]).map((t) => (
-              <button
-                key={t}
-                type="button"
-                className={`toolbar-btn ${state.currentTool === t ? 'active' : ''}`}
-                style={toolActiveStyle(t)}
-                title={t.charAt(0).toUpperCase() + t.slice(1)}
-                onClick={() => handleToolClick(t)}
-              >
-                <Icon name={t} size={18} />
-              </button>
-            ))}
+          <QuickSelectionMenu />
 
-            <div className="scenes-group">
+          {state.isToolbarVisible && (
+            <div className={`toolbar-overlay dock-${state.appSettings.toolbarDockEdge}`}>
+              <Toolbar
+                settingsTool={settingsTool}
+                setSettingsTool={setSettingsTool}
+                showScenes={showScenes}
+                setShowScenes={setShowScenes}
+                showMore={showMore}
+                setShowMore={setShowMore}
+                isCustomizing={isCustomizing}
+                setIsCustomizing={setIsCustomizing}
+                hasActiveBoard={currentBoardId !== null}
+                onHome={closeBoard}
+                onImportImage={() => imageInputRef.current?.click()}
+                onOpenWB={() => wbInputRef.current?.click()}
+                onExportWB={handleExportWB}
+                onExportPNG={() => handleExportPNG()}
+                onExportPDF={handleExportPDF}
+                onRenameTissue={() => setShowRenameTissue(true)}
+                onClearConfirm={() => setShowClearConfirm(true)}
+                onShowHelp={() => setShowHelp(true)}
+                onShowAbout={() => setShowAbout(true)}
+              />
+
+              {settingsTool && !isCustomizing && <ToolSettingsPill tool={settingsTool} />}
+              {!isCustomizing && <SelectionPill />}
+              {showScenes && !isCustomizing && (
+                <ScenesPopover
+                  onClose={() => setShowScenes(false)}
+                  onExportScenesPDF={handleExportScenesPDF}
+                />
+              )}
+            </div>
+          )}
+
+          {showZoomPill && state.isToolbarVisible && (
+            <div
+              className={`glass-capsule zoom-pill ${
+                state.appSettings.toolbarDockEdge === 'bottom' ? 'raised' : ''
+              }`}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
               <button
                 type="button"
-                className="toolbar-btn compact"
-                disabled={state.scenes.length === 0}
-                title="Previous Scene (,)"
-                onClick={() => drawingStore.goToPreviousScene()}
+                className="zoom-label-btn"
+                title="Reset Zoom to 100%"
+                onClick={() => drawingStore.requestResetZoom()}
               >
-                <Icon name="chevronLeft" size={15} />
+                {Math.round(state.zoomDisplayScale * 100)}%
               </button>
+              <div className="pill-divider short" />
               <button
                 type="button"
-                className={`toolbar-btn ${showScenes ? 'subtle-active' : ''}`}
-                title="Scenes"
-                onClick={() => {
-                  setSettingsTool(null);
-                  setShowScenes((v) => !v);
-                }}
+                className="zoom-icon-btn"
+                title="Fit All Content"
+                onClick={() => drawingStore.requestFitToContent()}
               >
-                <Icon name="scenes" size={17} />
-                {state.scenes.length > 0 && <span className="count-badge">{state.scenes.length}</span>}
-              </button>
-              <button
-                type="button"
-                className="toolbar-btn compact"
-                disabled={state.scenes.length === 0}
-                title="Next Scene (.)"
-                onClick={() => drawingStore.goToNextScene()}
-              >
-                <Icon name="chevronRight" size={15} />
+                <Icon name="fit" size={13} />
               </button>
             </div>
-
-            <div className="toolbar-divider" />
-
-            <button
-              type="button"
-              className="toolbar-btn"
-              title="Import Image (Ctrl/⌘I)"
-              onClick={() => imageInputRef.current?.click()}
-            >
-              <Icon name="image" size={17} />
-            </button>
-            <button
-              type="button"
-              className="toolbar-btn"
-              disabled={!state.canUndo}
-              title="Undo"
-              onClick={() => drawingStore.undo()}
-            >
-              <Icon name="undo" size={17} />
-            </button>
-            <button
-              type="button"
-              className="toolbar-btn"
-              disabled={!state.canRedo}
-              title="Redo"
-              onClick={() => drawingStore.redo()}
-            >
-              <Icon name="redo" size={17} />
-            </button>
-            <button
-              type="button"
-              className="toolbar-btn"
-              title={`Background: ${state.appSettings.canvasBackground}`}
-              onClick={cycleBackground}
-            >
-              <Icon
-                name={
-                  state.appSettings.canvasBackground === 'none'
-                    ? 'plain'
-                    : state.appSettings.canvasBackground
-                }
-                size={17}
-              />
-            </button>
-            <button
-              type="button"
-              className={`toolbar-btn ${state.appSettings.isWarmPaper && !state.appSettings.isDarkMode ? 'active' : ''}`}
-              title="Warm Café Napkin Paper"
-              onClick={() => drawingStore.toggleWarmPaper()}
-            >
-              <Icon name="warmPaper" size={17} />
-            </button>
-            <button
-              type="button"
-              className="toolbar-btn"
-              title={state.appSettings.isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-              onClick={() => drawingStore.toggleDarkMode()}
-            >
-              <Icon name={state.appSettings.isDarkMode ? 'sun' : 'moon'} size={17} />
-            </button>
-            <button
-              type="button"
-              className="toolbar-btn destructive"
-              title={drawingStore.hasSelection ? 'Delete Selected' : 'Clear Canvas'}
-              disabled={
-                state.strokes.length === 0 &&
-                state.fills.length === 0 &&
-                state.placedImages.length === 0
-              }
-              onClick={() =>
-                drawingStore.hasSelection ? drawingStore.deleteSelected() : drawingStore.clearCanvas()
-              }
-            >
-              <Icon name="trash" size={17} />
-            </button>
-          </div>
-
-          {settingsTool && <ToolSettingsPill tool={settingsTool} />}
-          <SelectionPill />
-          {showScenes && <ScenesPopover onClose={() => setShowScenes(false)} />}
-        </div>
+          )}
+        </>
       )}
 
-      {showZoomPill && state.isToolbarVisible && (
-        <div
-          className={`glass-capsule zoom-pill ${state.appSettings.toolbarDockEdge === 'bottom' ? 'raised' : ''}`}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
+      {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
+
+      {showClearConfirm && (
+        <ConfirmModal
+          title="Clear Canvas?"
+          message="This will permanently remove all strokes, fills, and images from this tissue (undoable with Ctrl/⌘Z)."
+          confirmLabel="Clear"
+          onConfirm={() => {
+            drawingStore.clearCanvas();
+            setShowClearConfirm(false);
+          }}
+          onCancel={() => setShowClearConfirm(false)}
+        />
+      )}
+
+      {showRenameTissue && currentBoardId && (
+        <PromptModal
+          title="Rename Tissue"
+          placeholder="Tissue name"
+          initialValue={currentBoardName}
+          submitLabel="Rename"
+          onSubmit={(name) => {
+            renameBoard(currentBoardId, name);
+            setShowRenameTissue(false);
+          }}
+          onCancel={() => setShowRenameTissue(false)}
+        />
+      )}
+
+      {state.lastErrorMessage && (
+        <div className="glass-capsule error-toast">
+          <span>{state.lastErrorMessage}</span>
           <button
             type="button"
-            className="zoom-label-btn"
-            title="Reset Zoom to 100%"
-            onClick={() => drawingStore.requestResetZoom()}
+            className="row-icon-btn"
+            onClick={() => drawingStore.setError(null)}
           >
-            {Math.round(state.zoomDisplayScale * 100)}%
-          </button>
-          <div className="pill-divider short" />
-          <button
-            type="button"
-            className="zoom-icon-btn"
-            title="Fit All Content"
-            onClick={() => drawingStore.requestFitToContent()}
-          >
-            <Icon name="fit" size={13} />
+            <Icon name="close" size={14} />
           </button>
         </div>
       )}
