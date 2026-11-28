@@ -85,47 +85,7 @@ enum StrokeRenderer {
     static func drawTextLabel(_ label: TextLabel, in ctx: CGContext, textPresets: [Color]) {
         guard !label.text.isEmpty else { return }
         let color = resolveTextColor(for: label, textPresets: textPresets)
-        let lines = label.text.split(separator: "\n", omittingEmptySubsequences: false)
-        let lineHeight = label.fontSize * 1.28
-        let center = label.cgCenter
-
-        ctx.saveGState()
-        ctx.setBlendMode(.normal)
-        if label.rotation != 0 {
-            ctx.translateBy(x: center.x, y: center.y)
-            ctx.rotate(by: label.cgRotation)
-            ctx.translateBy(x: -center.x, y: -center.y)
-        }
-
-        #if os(iOS)
-        let font = UIFont.systemFont(ofSize: label.fontSize, weight: label.isBold ? .bold : .regular)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: UIColor(color),
-        ]
-        UIGraphicsPushContext(ctx)
-        for (idx, line) in lines.enumerated() {
-            let str = String(line) as NSString
-            str.draw(at: CGPoint(x: label.cgPosition.x + 4, y: label.cgPosition.y + 2 + CGFloat(idx) * lineHeight), withAttributes: attrs)
-        }
-        UIGraphicsPopContext()
-        #else
-        let font = NSFont.systemFont(ofSize: label.fontSize, weight: label.isBold ? .bold : .regular)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor(color),
-        ]
-        NSGraphicsContext.saveGraphicsState()
-        let nsCtx = NSGraphicsContext(cgContext: ctx, flipped: true)
-        NSGraphicsContext.current = nsCtx
-        for (idx, line) in lines.enumerated() {
-            let str = String(line) as NSString
-            str.draw(at: CGPoint(x: label.cgPosition.x + 4, y: label.cgPosition.y + 2 + CGFloat(idx) * lineHeight), withAttributes: attrs)
-        }
-        NSGraphicsContext.restoreGraphicsState()
-        #endif
-
-        ctx.restoreGState()
+        MarkdownTextEngine.drawTextLabel(label, in: ctx, color: color)
     }
 
     static func drawFill(_ fill: FillShape, in ctx: CGContext, fillPresets: [Color], cachedPath: CGPath? = nil) {

@@ -174,6 +174,7 @@ export class DrawingStore {
   lastMovePoint: Point = { x: 0, y: 0 };
   lastCanvasTapLocation: Point = { x: 0, y: 0 };
   pendingDeselectPoint: Point | null = null;
+  needsDefaultSceneCapture = false;
   private moveSnapshotTaken = false;
 
   private selectionRotationPivot: Point | null = null;
@@ -304,6 +305,7 @@ export class DrawingStore {
     this.spatialGrid.rebuild(data.strokes);
     this.resetSelectionRotationTracking();
     this.pendingDeselectPoint = null;
+    this.needsDefaultSceneCapture = false;
     this.emit(
       {
         strokes: data.strokes,
@@ -1154,9 +1156,31 @@ export class DrawingStore {
     this.emit({ isToolbarVisible: !this.state.isToolbarVisible });
   }
 
+  requestDefaultSceneCapture(): void {
+    this.needsDefaultSceneCapture = true;
+  }
+
+  captureDefaultSceneIfNeeded(): void {
+    if (!this.needsDefaultSceneCapture || this.state.scenes.length === 0) return;
+    this.needsDefaultSceneCapture = false;
+    const nextScenes = this.state.scenes.map((sc, idx) =>
+      idx === 0
+        ? {
+            ...sc,
+            centerX: this.state.currentViewportCenter.x,
+            centerY: this.state.currentViewportCenter.y,
+            scale: Math.max(this.state.currentViewportScale, 0.1),
+          }
+        : sc
+    );
+    this.emit({ scenes: nextScenes });
+    this.scheduleAutoSave();
+  }
+
   reportViewport(center: Point, scale: number): void {
     this.state.currentViewportCenter = center;
     this.state.currentViewportScale = scale;
+    this.captureDefaultSceneIfNeeded();
     if (Math.abs(this.state.zoomDisplayScale - scale) > 0.005) {
       this.emit({ zoomDisplayScale: scale });
     }

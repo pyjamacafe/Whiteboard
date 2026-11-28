@@ -41,6 +41,14 @@ import {
   textLabelCenter,
 } from './geometry';
 import { resolveShapeColor, resolveStrokeColor, resolveTextColor } from './renderer';
+import {
+  MARKDOWN_CODE_PADDING_X,
+  MARKDOWN_HORIZONTAL_INSET,
+  MARKDOWN_LINE_HEIGHT_MULT,
+  MARKDOWN_VERTICAL_INSET,
+  measureMarkdownPrefixWidth,
+  parseMarkdown,
+} from './markdown';
 import { stripDataUrlPrefix } from './wbCodec';
 
 function toPdfRgb(c: CodableColor) {
@@ -48,6 +56,15 @@ function toPdfRgb(c: CodableColor) {
     Math.max(0, Math.min(1, c.r)),
     Math.max(0, Math.min(1, c.g)),
     Math.max(0, Math.min(1, c.b))
+  );
+}
+
+function blendRgbOnBg(c: CodableColor, alpha: number, bgR: number, bgG: number, bgB: number) {
+  const a = Math.max(0, Math.min(1, alpha));
+  return rgb(
+    Math.max(0, Math.min(1, c.r * a + bgR * (1 - a))),
+    Math.max(0, Math.min(1, c.g * a + bgG * (1 - a))),
+    Math.max(0, Math.min(1, c.b * a + bgB * (1 - a)))
   );
 }
 
@@ -361,42 +378,210 @@ async function drawPageContent(
     }
   }
 
-  // 5. Selectable Vector Text Labels
+  // 5. Selectable Vector Text Labels (Monospace + Markdown)
   if (textLabels.length > 0) {
-    const regularFont = await doc.embedFont(StandardFonts.Helvetica);
-    const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+    const monoRegular = await doc.embedFont(StandardFonts.Courier);
+    const monoBold = await doc.embedFont(StandardFonts.CourierBold);
+    const monoItalic = await doc.embedFont(StandardFonts.CourierOblique);
+    const monoBoldItalic = await doc.embedFont(StandardFonts.CourierBoldOblique);
+
+    const pickFont = (bold: boolean, italic: boolean) => {
+      if (bold && italic) return monoBoldItalic;
+      if (bold) return monoBold;
+      if (italic) return monoItalic;
+      return monoRegular;
+    };
+
+    const sanitizePdfText = (s: string) => s.replace(/[^\x20-\xFF]/g, '?');
+
     for (const lbl of textLabels) {
       if (!lbl.text) continue;
-      const font = lbl.isBold ? boldFont : regularFont;
-      const color = toPdfRgb(resolveTextColor(lbl, textPresets));
-      const fontSize = lbl.fontSize * scale;
-      const lineHeight = lbl.fontSize * 1.28;
-      const lines = lbl.text.split('\n');
+      const resolved = resolveTextColor(lbl, textPresets);
+      const color = toPdfRgb(resolved);
+      const mutedColor = blendRgbOnBg(resolved, 0.75, bgR, bgG, bgB);
+      const codeBgColor = blendRgbOnBg(resolved, 0.12, bgR, bgG, bgB);
+      const barColor = blendRgbOnBg(resolved, 0.45, bgR, bgG, bgB);
+      const checkBgColor = blendRgbOnBg(resolved, 0.18, bgR, bgG, bgB);
+      const parsed = parseMarkdown(lbl.text);
       const center = textLabelCenter(lbl);
       const rot = lbl.rotation || 0;
       const pdfRotDeg = (-rot * 180) / Math.PI;
+      const xformPt = (pt: Point): Point => (rot ? rotatePoint(pt, center, rot) : pt);
 
-      for (let i = 0; i < lines.length; i++) {
-        const safeLine = lines[i].replace(/[^\x20-\xFF]/g, '?');
-        if (!safeLine) continue;
-        // Baseline point in canvas y-down coords (approx 0.85 * fontSize below top of line)
-        const baseCanvas: Point = {
-          x: lbl.position.x + 4,
-          y: lbl.position.y + 2 + i * lineHeight + lbl.fontSize * 0.88,
-        };
-        const pt = rot ? rotatePoint(baseCanvas, center, rot) : baseCanvas;
-        try {
-          page.drawText(safeLine, {
-            x: mapX(pt.x),
-            y: mapY(pt.y),
-            size: fontSize,
-            font,
-            color,
-            rotate: degrees(pdfRotDeg),
-          });
-        } catch {
-          // ignore unencodable glyphs
+      const drawCanvasLine = (a: Point, b: Point, lineWidthCanvas: number, strokeCol = color) => {
+        const pa = xformPt(a);
+        const pb = xformPt(b);
+        page.pushOperators(
+          pushGraphicsState(),
+          setLineCap(LineCapStyle.Round),
+          setLineJoin(LineJoinStyle.Round),
+          setStrokingColor(strokeCol),
+          setLineWidth(lineWidthCanvas * scale),
+          moveTo(mapX(pa.x), mapY(pa.y)),
+          lineTo(mapX(pb.x), mapY(pb.y)),
+          stroke(),
+          popGraphicsState()
+        );
+      };
+
+      const drawCanvasRect = (
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        fillCol?: ReturnType<typeof rgb>,
+        strokeCol?: ReturnType<typeof rgb>,
+        strokeW = 1.2
+      ) => {
+        const pts = [
+          xformPt({ x, y }),
+          xformPt({ x: x + w, y }),
+          xformPt({ x: x + w, y: y + h }),
+          xformPt({ x, y: y + h }),
+        ];
+        const ops: PDFOperator[] = [
+          moveTo(mapX(pts[0].x), mapY(pts[0].y)),
+          lineTo(mapX(pts[1].x), mapY(pts[1].y)),
+          lineTo(mapX(pts[2].x), mapY(pts[2].y)),
+          lineTo(mapX(pts[3].x), mapY(pts[3].y)),
+          closePath(),
+        ];
+        if (fillCol) {
+          page.pushOperators(
+            pushGraphicsState(),
+            setFillingColor(fillCol),
+            ...ops,
+            PDFOperator.of(PDFOperatorNames.FillNonZero),
+            popGraphicsState()
+          );
         }
+        if (strokeCol) {
+          page.pushOperators(
+            pushGraphicsState(),
+            setLineJoin(LineJoinStyle.Round),
+            setStrokingColor(strokeCol),
+            setLineWidth(strokeW * scale),
+            ...ops,
+            stroke(),
+            popGraphicsState()
+          );
+        }
+      };
+
+      const measurePdfText = (text: string, size: number, bold: boolean, italic: boolean) => {
+        const safe = sanitizePdfText(text);
+        return pickFont(bold, italic).widthOfTextAtSize(safe, size);
+      };
+
+      let cursorY = lbl.position.y + MARKDOWN_VERTICAL_INSET;
+      const startX = lbl.position.x + MARKDOWN_HORIZONTAL_INSET;
+
+      for (const line of parsed) {
+        const lineFontSize = lbl.fontSize * line.fontScale;
+        const lineHeight = lineFontSize * MARKDOWN_LINE_HEIGHT_MULT;
+        const prefixW = measureMarkdownPrefixWidth(line.kind, lineFontSize, measurePdfText, lbl.isBold);
+
+        if (line.kind.type === 'blockquote') {
+          drawCanvasRect(
+            startX + 2,
+            cursorY + lineFontSize * 0.12,
+            Math.max(2, lineFontSize * 0.12),
+            lineHeight * 0.78,
+            barColor
+          );
+        } else if (line.kind.type === 'bullet') {
+          const bx = startX + line.kind.indentLevel * lineFontSize * 1.1 + lineFontSize * 0.35;
+          const by = cursorY + lineFontSize * 0.62;
+          const r = Math.max(2, lineFontSize * 0.14);
+          drawCanvasRect(bx - r, by - r, r * 2, r * 2, color);
+        } else if (line.kind.type === 'numbered') {
+          const mx = startX + line.kind.indentLevel * lineFontSize * 1.1;
+          const pt = xformPt({ x: mx, y: cursorY + lineFontSize * 0.88 });
+          try {
+            page.drawText(sanitizePdfText(line.kind.marker), {
+              x: mapX(pt.x),
+              y: mapY(pt.y),
+              size: lineFontSize * scale,
+              font: pickFont(lbl.isBold, false),
+              color,
+              rotate: degrees(pdfRotDeg),
+            });
+          } catch {
+            // ignore
+          }
+        } else if (line.kind.type === 'checklist') {
+          const boxSize = Math.max(10, lineFontSize * 0.76);
+          const bx = startX + line.kind.indentLevel * lineFontSize * 1.1 + lineFontSize * 0.1;
+          const by = cursorY + (lineFontSize * 1.15 - boxSize) / 2;
+          drawCanvasRect(
+            bx,
+            by,
+            boxSize,
+            boxSize,
+            line.kind.checked ? checkBgColor : undefined,
+            color,
+            Math.max(1.2, lineFontSize * 0.08)
+          );
+          if (line.kind.checked) {
+            const lw = Math.max(1.2, lineFontSize * 0.08);
+            const p1 = { x: bx + boxSize * 0.22, y: by + boxSize * 0.52 };
+            const p2 = { x: bx + boxSize * 0.44, y: by + boxSize * 0.74 };
+            const p3 = { x: bx + boxSize * 0.80, y: by + boxSize * 0.28 };
+            drawCanvasLine(p1, p2, lw, color);
+            drawCanvasLine(p2, p3, lw, color);
+          }
+        }
+
+        let cursorX = startX + prefixW;
+        const isCheckedChecklist = line.kind.type === 'checklist' && line.kind.checked;
+        const ink = line.kind.type === 'blockquote' || isCheckedChecklist ? mutedColor : color;
+
+        for (const span of line.spans) {
+          const safeSpan = sanitizePdfText(span.text);
+          if (!safeSpan) continue;
+          const isBold = lbl.isBold || line.forcesBold || span.isBold;
+          const isItalic = line.defaultsItalic || span.isItalic;
+          const font = pickFont(isBold, isItalic);
+          const runW = font.widthOfTextAtSize(safeSpan, lineFontSize);
+
+          if (span.isCode) {
+            drawCanvasRect(
+              cursorX,
+              cursorY + lineFontSize * 0.04,
+              runW + MARKDOWN_CODE_PADDING_X * 2,
+              lineFontSize * 1.12,
+              codeBgColor
+            );
+            cursorX += MARKDOWN_CODE_PADDING_X;
+          }
+
+          const basePt = xformPt({ x: cursorX, y: cursorY + lineFontSize * 0.88 });
+          try {
+            page.drawText(safeSpan, {
+              x: mapX(basePt.x),
+              y: mapY(basePt.y),
+              size: lineFontSize * scale,
+              font,
+              color: ink,
+              rotate: degrees(pdfRotDeg),
+            });
+          } catch {
+            // ignore unencodable glyphs
+          }
+
+          if (span.isUnderline) {
+            const uy = cursorY + lineFontSize * 1.06;
+            drawCanvasLine({ x: cursorX, y: uy }, { x: cursorX + runW, y: uy }, Math.max(1, lineFontSize * 0.065), ink);
+          }
+          if (span.isStrikethrough || isCheckedChecklist) {
+            const sy = cursorY + lineFontSize * 0.56;
+            drawCanvasLine({ x: cursorX, y: sy }, { x: cursorX + runW, y: sy }, Math.max(1, lineFontSize * 0.065), ink);
+          }
+
+          cursorX += runW + (span.isCode ? MARKDOWN_CODE_PADDING_X : 0);
+        }
+
+        cursorY += lineHeight;
       }
     }
   }

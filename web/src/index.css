@@ -1207,7 +1207,7 @@ kbd {
   border: 1.5px dashed rgba(0, 122, 255, 0.8);
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.42);
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   resize: none;
   overflow: hidden;
   outline: none;

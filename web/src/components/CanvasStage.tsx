@@ -23,6 +23,7 @@ import {
   textLabelRotatedCorners,
 } from '../engine/geometry';
 import { colorToCss, type Point } from '../types/model';
+import { toggleMarkdownWrap } from '../engine/markdown';
 
 interface CanvasStageProps {
   onBeginDraw?: () => void;
@@ -69,6 +70,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
   viewportRef.current = viewport;
 
   const [canvasSize, setCanvasSize] = useState({ width: 1024, height: 768 });
+  const [hasMeasuredSize, setHasMeasuredSize] = useState(false);
   const canvasSizeRef = useRef(canvasSize);
   canvasSizeRef.current = canvasSize;
 
@@ -94,7 +96,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const update = () => setCanvasSize({ width: el.clientWidth, height: el.clientHeight });
+    const update = () => {
+      if (el.clientWidth > 0 && el.clientHeight > 0) {
+        const nextSize = { width: el.clientWidth, height: el.clientHeight };
+        canvasSizeRef.current = nextSize;
+        setCanvasSize(nextSize);
+        setHasMeasuredSize(true);
+      }
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
@@ -125,13 +134,14 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
 
   // Report viewport center & scale to store
   useEffect(() => {
+    if (!hasMeasuredSize) return;
     const safeScale = Math.max(viewport.scale, 0.01);
     const center = {
       x: (canvasSize.width / 2 - viewport.offsetX) / safeScale,
       y: (canvasSize.height / 2 - viewport.offsetY) / safeScale,
     };
     drawingStore.reportViewport(center, safeScale);
-  }, [viewport, canvasSize]);
+  }, [viewport, canvasSize, hasMeasuredSize]);
 
   // Smooth animate viewport to target center & scale
   const animateTo = (targetCenter: Point, targetScale: number) => {
@@ -181,30 +191,32 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
   }, [state.isEditingText, state.editingTextId]);
 
   useEffect(() => {
-    if (state.needsRecenter) {
-      drawingStore.consumeRecenter();
-      const box = boundingBox(state.strokes, state.placedImages, state.fills, 60, state.shapes, state.textLabels);
-      if (box) {
-        animateTo({ x: box.x + box.width / 2, y: box.y + box.height / 2 }, 1);
-      } else {
-        animateTo({ x: 0, y: 0 }, 1);
-      }
+    if (!hasMeasuredSize || !state.needsRecenter) return;
+    drawingStore.consumeRecenter();
+    const box = boundingBox(state.strokes, state.placedImages, state.fills, 60, state.shapes, state.textLabels);
+    if (box) {
+      animateTo({ x: box.x + box.width / 2, y: box.y + box.height / 2 }, 1);
+    } else if (state.scenes.length > 0) {
+      animateTo({ x: state.scenes[0].centerX, y: state.scenes[0].centerY }, state.scenes[0].scale);
+    } else {
+      animateTo({ x: 0, y: 0 }, 1);
     }
-  }, [state.needsRecenter]);
+  }, [state.needsRecenter, hasMeasuredSize]);
 
   useEffect(() => {
-    if (state.needsFitToContent) {
-      drawingStore.consumeFitToContent();
-      const box = boundingBox(state.strokes, state.placedImages, state.fills, 60, state.shapes, state.textLabels);
-      if (box) {
-        const sz = canvasSizeRef.current;
-        const fitScale = Math.min(sz.width / box.width, sz.height / box.height, 2);
-        animateTo({ x: box.x + box.width / 2, y: box.y + box.height / 2 }, Math.max(fitScale, 0.2));
-      } else {
-        animateTo({ x: 0, y: 0 }, 1);
-      }
+    if (!hasMeasuredSize || !state.needsFitToContent) return;
+    drawingStore.consumeFitToContent();
+    const box = boundingBox(state.strokes, state.placedImages, state.fills, 60, state.shapes, state.textLabels);
+    if (box) {
+      const sz = canvasSizeRef.current;
+      const fitScale = Math.min(sz.width / box.width, sz.height / box.height, 2);
+      animateTo({ x: box.x + box.width / 2, y: box.y + box.height / 2 }, Math.max(fitScale, 0.2));
+    } else if (state.scenes.length > 0) {
+      animateTo({ x: state.scenes[0].centerX, y: state.scenes[0].centerY }, state.scenes[0].scale);
+    } else {
+      animateTo({ x: 0, y: 0 }, 1);
     }
-  }, [state.needsFitToContent]);
+  }, [state.needsFitToContent, hasMeasuredSize]);
 
   useEffect(() => {
     if (state.needsResetZoom) {
@@ -1136,6 +1148,34 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
             onChange={(e) => drawingStore.setEditingTextDraft(e.target.value)}
             onKeyDown={(e) => {
               e.stopPropagation();
+              const mod = e.metaKey || e.ctrlKey;
+              if (mod && !e.altKey) {
+                const k = e.key.toLowerCase();
+                let markers: [string, string] | null = null;
+                if (k === 'b' && !e.shiftKey) markers = ['**', '**'];
+                else if (k === 'i' && !e.shiftKey) markers = ['*', '*'];
+                else if (k === 'u' && !e.shiftKey) markers = ['<u>', '</u>'];
+                else if (k === 'x' && e.shiftKey) markers = ['~~', '~~'];
+                else if ((k === 'e' || k === '`') && !e.shiftKey) markers = ['`', '`'];
+                if (markers) {
+                  e.preventDefault();
+                  const el = e.currentTarget;
+                  const res = toggleMarkdownWrap(
+                    el.value,
+                    el.selectionStart ?? el.value.length,
+                    el.selectionEnd ?? el.value.length,
+                    markers[0],
+                    markers[1]
+                  );
+                  drawingStore.setEditingTextDraft(res.text);
+                  requestAnimationFrame(() => {
+                    if (inlineTextRef.current) {
+                      inlineTextRef.current.setSelectionRange(res.selectionStart, res.selectionEnd);
+                    }
+                  });
+                  return;
+                }
+              }
               if (e.key === 'Escape') {
                 e.preventDefault();
                 drawingStore.cancelTextEditing();

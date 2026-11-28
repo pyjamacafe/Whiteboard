@@ -545,32 +545,9 @@ nonisolated struct TextLabel: Identifiable, Codable, Equatable, Sendable {
         StrokeRenderer.resolveTextColor(for: self, textPresets: model.textPresets)
     }
 
-    /// Measures the unrotated multi-line bounding size in canvas points.
+    /// Measures the unrotated multi-line bounding size in canvas points (monospace + Markdown).
     func measuredSize() -> CGSize {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let lineHeight = fontSize * 1.28
-        #if os(macOS)
-        let font = NSFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        var maxW: CGFloat = 0
-        for line in lines {
-            let str = line.isEmpty ? " " : String(line)
-            let w = (str as NSString).size(withAttributes: attrs).width
-            if w > maxW { maxW = w }
-        }
-        #else
-        let font = UIFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font]
-        var maxW: CGFloat = 0
-        for line in lines {
-            let str = line.isEmpty ? " " : String(line)
-            let w = (str as NSString).size(withAttributes: attrs).width
-            if w > maxW { maxW = w }
-        }
-        #endif
-        let w = max(24, ceil(maxW) + 8)
-        let h = max(lineHeight, CGFloat(max(lines.count, 1)) * lineHeight + 4)
-        return CGSize(width: w, height: h)
+        MarkdownTextEngine.measureLabelSize(text: text, fontSize: fontSize, baseBold: isBold)
     }
 
     var cgCenter: CGPoint {
@@ -1833,6 +1810,8 @@ final class DrawingModel {
         scenes.removeAll()
         activeSceneId = nil
         pendingSceneNavigation = nil
+        currentViewportCenter = .zero
+        currentViewportScale = 1.0
         needsDefaultSceneCapture = false
         imageCache.removeAll()
         spatialGrid.invalidate()

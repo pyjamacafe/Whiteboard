@@ -15,9 +15,11 @@ import {
   SpatialHashGrid,
   textLabelCenter,
   textLabelContainsPoint,
+  textLabelSize,
 } from '../engine/geometry';
 import { computeFillContours } from '../engine/floodFill';
 import { CanvasHistory } from '../engine/history';
+import { parseMarkdown, toggleMarkdownWrap } from '../engine/markdown';
 import { decodeWBJson, encodeWBJson } from '../engine/wbCodec';
 import { exportCanvasPDFBytes, exportScenesPDFBytes } from '../engine/pdfExport';
 import { BoardStore } from '../store/boardStore';
@@ -449,6 +451,23 @@ describe('DrawingStore Phase 2 (Lasso, Rotation Handle, Images, Scenes)', () => 
     store.deleteScene(s1.id);
     expect(store.getSnapshot().scenes.length).toBe(1);
   });
+
+  it('captures actual initial viewport center for default Scene 1', () => {
+    const store = new DrawingStore(false);
+    const defaultScene = { id: generateId(), name: 'Scene 1', centerX: 0, centerY: 0, scale: 1 };
+    store.loadSaveData({ strokes: [], fills: [], placedImages: [], shapes: [], textLabels: [], scenes: [defaultScene] });
+    store.requestDefaultSceneCapture();
+    store.reportViewport({ x: 720, y: 450 }, 1);
+
+    expect(store.getSnapshot().scenes[0].centerX).toBe(720);
+    expect(store.getSnapshot().scenes[0].centerY).toBe(450);
+    expect(store.getSnapshot().scenes[0].scale).toBe(1);
+
+    // Subsequent panning must NOT overwrite Scene 1
+    store.reportViewport({ x: 1500, y: 1200 }, 1);
+    expect(store.getSnapshot().scenes[0].centerX).toBe(720);
+    expect(store.getSnapshot().scenes[0].centerY).toBe(450);
+  });
 });
 
 describe('Phase 3 (BoardStore Trash/Restore & Vector PDF Export)', () => {
@@ -688,5 +707,79 @@ describe('Shapes & TextLabels Phase 1 (Geometry, FloodFill, .wb Codec)', () => {
     expect(pdfBytes).not.toBeNull();
     expect(new TextDecoder().decode(pdfBytes!.slice(0, 5))).toBe('%PDF-');
     expect(pdfBytes!.length).toBeGreaterThan(800);
+  });
+
+  it('parses Markdown blocks/inline spans, toggles formatting shortcuts, and exports Markdown vector PDF', async () => {
+    const md = [
+      '# Title',
+      '## Subheading',
+      'Plain **bold** *italic* <u>under</u> ~~strike~~ `code` snake_case',
+      '- Bullet item',
+      '1. Numbered item',
+      '- [ ] Todo',
+      '- [x] Done',
+      '> Quoted note',
+    ].join('\n');
+
+    const lines = parseMarkdown(md);
+    expect(lines.length).toBe(8);
+    expect(lines[0].kind).toEqual({ type: 'heading', level: 1 });
+    expect(lines[1].kind).toEqual({ type: 'heading', level: 2 });
+    expect(lines[2].kind).toEqual({ type: 'paragraph' });
+    expect(lines[2].spans.some((s) => s.text === 'bold' && s.isBold)).toBe(true);
+    expect(lines[2].spans.some((s) => s.text === 'italic' && s.isItalic)).toBe(true);
+    expect(lines[2].spans.some((s) => s.text === 'under' && s.isUnderline)).toBe(true);
+    expect(lines[2].spans.some((s) => s.text === 'strike' && s.isStrikethrough)).toBe(true);
+    expect(lines[2].spans.some((s) => s.text === 'code' && s.isCode)).toBe(true);
+    expect(lines[2].spans.some((s) => s.text.includes('snake_case') && !s.isItalic)).toBe(true);
+    expect(lines[3].kind).toEqual({ type: 'bullet', indentLevel: 0 });
+    expect(lines[4].kind).toEqual({ type: 'numbered', marker: '1.', indentLevel: 0 });
+    expect(lines[5].kind).toEqual({ type: 'checklist', checked: false, indentLevel: 0 });
+    expect(lines[6].kind).toEqual({ type: 'checklist', checked: true, indentLevel: 0 });
+    expect(lines[7].kind).toEqual({ type: 'blockquote' });
+
+    // Formatting shortcut wrap/unwrap
+    const wrapped = toggleMarkdownWrap('hello world', 6, 11, '**', '**');
+    expect(wrapped).toEqual({ text: 'hello **world**', selectionStart: 8, selectionEnd: 13 });
+    const unwrapped = toggleMarkdownWrap(wrapped.text, wrapped.selectionStart, wrapped.selectionEnd, '**', '**');
+    expect(unwrapped).toEqual({ text: 'hello world', selectionStart: 6, selectionEnd: 11 });
+    const collapsed = toggleMarkdownWrap('abc', 3, 3, '*', '*');
+    expect(collapsed).toEqual({ text: 'abc**', selectionStart: 4, selectionEnd: 4 });
+    const collapsedUnwrap = toggleMarkdownWrap(collapsed.text, 4, 4, '*', '*');
+    expect(collapsedUnwrap).toEqual({ text: 'abc', selectionStart: 3, selectionEnd: 3 });
+
+    // Heading measures taller than plain text
+    const plain: TextLabel = {
+      id: generateId(),
+      text: 'Title',
+      position: { x: 20, y: 20 },
+      fontSize: 22,
+      color: DEFAULT_LIGHT_PRESETS[0],
+      presetIndex: 0,
+      isBold: false,
+      rotation: 0,
+    };
+    const heading: TextLabel = { ...plain, id: generateId(), text: '# Title' };
+    expect(textLabelSize(heading).height).toBeGreaterThan(textLabelSize(plain).height);
+
+    // Export vector PDF with Markdown text label
+    const mdLabel: TextLabel = { ...plain, id: generateId(), text: md };
+    const pdfBytes = await exportCanvasPDFBytes({
+      strokes: [],
+      placedImages: [],
+      fills: [],
+      shapes: [],
+      textLabels: [mdLabel],
+      penPresets: DEFAULT_LIGHT_PRESETS,
+      sharpiePresets: DEFAULT_LIGHT_PRESETS,
+      fillPresets: DEFAULT_LIGHT_PRESETS,
+      shapePresets: DEFAULT_LIGHT_PRESETS,
+      textPresets: DEFAULT_LIGHT_PRESETS,
+      isDarkMode: false,
+      isWarmPaper: false,
+    });
+    expect(pdfBytes).not.toBeNull();
+    expect(new TextDecoder().decode(pdfBytes!.slice(0, 5))).toBe('%PDF-');
+    expect(pdfBytes!.length).toBeGreaterThan(1000);
   });
 });

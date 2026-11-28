@@ -10,6 +10,15 @@ import type {
   Stroke,
   TextLabel,
 } from '../types/model';
+import {
+  MARKDOWN_CODE_PADDING_X,
+  MARKDOWN_HORIZONTAL_INSET,
+  MARKDOWN_LINE_HEIGHT_MULT,
+  MARKDOWN_VERTICAL_INSET,
+  measureMarkdownPrefixWidth,
+  monospaceCanvasFont,
+  parseMarkdown,
+} from './markdown';
 
 export function rectsIntersect(a: Rect, b: Rect): boolean {
   return !(
@@ -638,32 +647,56 @@ export function resizedFreeRect(
 let measureCanvasCtx: CanvasRenderingContext2D | null = null;
 
 export function textLabelSize(label: TextLabel): { width: number; height: number } {
-  const lines = label.text.split('\n');
-  const lineHeight = label.fontSize * 1.28;
-  let maxW = 0;
+  const parsed = parseMarkdown(label.text);
+  let ctx: CanvasRenderingContext2D | null = null;
 
   if (typeof document !== 'undefined') {
     if (!measureCanvasCtx) {
       const c = document.createElement('canvas');
       measureCanvasCtx = c.getContext('2d');
     }
-    if (measureCanvasCtx) {
-      measureCanvasCtx.font = `${label.isBold ? '700' : '400'} ${label.fontSize}px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif`;
-      for (const line of lines) {
-        const w = measureCanvasCtx.measureText(line || ' ').width;
-        if (w > maxW) maxW = w;
+    ctx = measureCanvasCtx;
+  }
+
+  const measureText = (text: string, size: number, bold: boolean, italic: boolean): number => {
+    if (!text) return 0;
+    if (ctx) {
+      ctx.font = monospaceCanvasFont(size, bold, italic);
+      return ctx.measureText(text).width;
+    }
+    return text.length * size * 0.6;
+  };
+
+  let maxW = 0;
+  let totalH = 0;
+
+  for (const line of parsed) {
+    const lineFontSize = label.fontSize * line.fontScale;
+    const lineHeight = lineFontSize * MARKDOWN_LINE_HEIGHT_MULT;
+    let lineW = measureMarkdownPrefixWidth(line.kind, lineFontSize, measureText, label.isBold);
+
+    if (line.spans.length === 0) {
+      lineW = Math.max(
+        lineW,
+        measureText(' ', lineFontSize, label.isBold || line.forcesBold, line.defaultsItalic)
+      );
+    } else {
+      for (const span of line.spans) {
+        const isBold = label.isBold || line.forcesBold || span.isBold;
+        const isItalic = line.defaultsItalic || span.isItalic;
+        const w = measureText(span.text, lineFontSize, isBold, isItalic);
+        lineW += w + (span.isCode ? MARKDOWN_CODE_PADDING_X * 2 : 0);
       }
     }
+
+    if (lineW > maxW) maxW = lineW;
+    totalH += lineHeight;
   }
-  if (maxW === 0) {
-    for (const line of lines) {
-      const w = (line.length || 1) * label.fontSize * (label.isBold ? 0.64 : 0.58);
-      if (w > maxW) maxW = w;
-    }
-  }
+
+  const minLineH = label.fontSize * MARKDOWN_LINE_HEIGHT_MULT;
   return {
-    width: Math.max(24, Math.ceil(maxW) + 8),
-    height: Math.max(lineHeight, Math.max(1, lines.length) * lineHeight + 4),
+    width: Math.max(24, Math.ceil(maxW) + MARKDOWN_HORIZONTAL_INSET * 2),
+    height: Math.max(minLineH, Math.ceil(totalH) + MARKDOWN_VERTICAL_INSET * 2),
   };
 }
 

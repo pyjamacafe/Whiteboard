@@ -39,7 +39,7 @@ export const HelpModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       color: '#32ade6',
       title: 'Text',
       key: 'T',
-      detail: 'Click anywhere to add a multi-line text label with size presets (S / M / L / XL), Bold, and theme-adaptive colors. Double-click any text label to re-edit; press Enter to commit or ⇧Enter for a new line.',
+      detail: `Click anywhere to add a monospace text label with Markdown support (# headings, **bold**, *italic*, ~~strike~~, \`code\`, lists, and checklists). While typing, use ${MOD}B / ${MOD}I / ${MOD}U / ${MOD}⇧X / ${MOD}E to format text; press Enter to commit or ⇧Enter for a new line.`,
     },
     {
       icon: 'eraser',
@@ -65,8 +65,11 @@ export const HelpModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   ];
 
   const shortcuts: [string, string][] = [
+    ['Back to Home', 'H'],
     ['Color preset 1–8', '1 – 8'],
     ['Eraser target (All / Pen / Sharpie / Fill)', 'E, 0–3'],
+    ['Text Bold / Italic / Underline', `${MOD}B / ${MOD}I / ${MOD}U`],
+    ['Text Strike / Inline code', `${MOD}⇧X / ${MOD}E`],
     ['Add scene', '⇧X'],
     ['Previous / Next scene', ', / .'],
     ['Toggle toolbar', 'Tab'],
@@ -146,7 +149,7 @@ export const AboutModal: React.FC<{ onClose: () => void }> = ({ onClose }) => (
       <div className="modal-body about-body">
         <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Tissue Box" className="about-logo" />
         <h1>Tissue Box</h1>
-        <div className="about-version">Version 1.5.0 (Web / PWA)</div>
+        <div className="about-version">Version 1.6.0 (Web / PWA)</div>
         <p className="about-tagline">
           Like a café napkin for quick sketching — capture and convey ideas effortlessly on Mac, iPad, Windows, Linux, and the Web.
         </p>

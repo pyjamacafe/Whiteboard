@@ -334,6 +334,12 @@ struct ContentView: View {
                 .keyboardShortcut("o", modifiers: .command)
             Button("") { model.closeBoard() }
                 .keyboardShortcut("w", modifiers: .command)
+            Button("") {
+                if !model.showWelcome && !model.isEditingText && !showRenameTissue && !showHelp && !model.showAbout {
+                    model.closeBoard()
+                }
+            }
+            .keyboardShortcut("h", modifiers: [])
             Button("") { showImageImporter = true }
                 .keyboardShortcut("i", modifiers: .command)
             Button("") { model.addScene() }

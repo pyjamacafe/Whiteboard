@@ -40,7 +40,7 @@ struct HelpView: View {
                                      detail: "Drag to create crisp rectangles, ellipses, triangles, diamonds, lines, and arrows. Hold ⇧ while dragging for perfect squares, circles, or 15° angles; toggle translucent fill in options.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "character.textbox", color: .cyan, title: "Text", key: "T",
-                                     detail: "Click or tap anywhere to add a multi-line text label with size presets (S / M / L / XL), Bold, and theme-adaptive colors. Double-click any text label to re-edit; press Enter to commit or ⇧Enter for a new line.")
+                                     detail: "Click or tap anywhere to add a monospace text label with Markdown support (# headings, **bold**, *italic*, ~~strike~~, `code`, lists, and checklists). While typing, use ⌘B / ⌘I / ⌘U / ⌘⇧X / ⌘E to format text; press Enter to commit or ⇧Enter for a new line.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "eraser", color: .pink, title: "Eraser", key: "E",
                                      detail: "Switch between Full Stroke and Partial erase, tap the layer icon (or press 0–3) to target All, Pen, Sharpie, or Fill.")
@@ -69,11 +69,17 @@ struct HelpView: View {
                                 ("Resize selected image", "⌘+ / ⌘-"),
                             ])
                             Divider().opacity(0.4)
+                            shortcutSubgroup("Text Formatting (while editing)", rows: [
+                                ("Bold / Italic / Underline", "⌘B / ⌘I / ⌘U"),
+                                ("Strikethrough / Inline code", "⌘⇧X / ⌘E"),
+                                ("New line / Commit", "⇧↩ / ↩"),
+                            ])
+                            Divider().opacity(0.4)
                             shortcutSubgroup("Files & Library", rows: [
+                                ("Back to Home", "H / ⌘W"),
                                 ("New tissue", "⌘N"),
                                 ("Search tissues", "⌘F"),
                                 ("Save / Open .wb", "⌘S / ⌘O"),
-                                ("Close tissue", "⌘W"),
                             ])
                         }
                     }

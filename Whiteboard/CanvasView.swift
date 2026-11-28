@@ -582,6 +582,7 @@ class DrawingCanvasView: UIView {
     private var sceneAnimToOffset: CGSize = .zero
     private var sceneAnimFromScale: CGFloat = 1.0
     private var sceneAnimToScale: CGFloat = 1.0
+    private var pendingDefaultSceneCaptureScheduled = false
 
     private func reportViewport() {
         guard let model, bounds.width > 0, bounds.height > 0 else { return }
@@ -591,7 +592,31 @@ class DrawingCanvasView: UIView {
             y: (bounds.height / 2 - offset.height) / safeScale
         )
         model.currentViewportScale = safeScale
-        model.captureDefaultSceneIfNeeded()
+        if model.needsDefaultSceneCapture, window != nil, !pendingDefaultSceneCaptureScheduled {
+            pendingDefaultSceneCaptureScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.pendingDefaultSceneCaptureScheduled = false
+                guard let model = self.model,
+                      self.window != nil,
+                      self.bounds.width > 0,
+                      self.bounds.height > 0 else { return }
+                let settledScale = max(self.scale, 0.01)
+                model.currentViewportCenter = CGPoint(
+                    x: (self.bounds.width / 2 - self.offset.width) / settledScale,
+                    y: (self.bounds.height / 2 - self.offset.height) / settledScale
+                )
+                model.currentViewportScale = settledScale
+                model.captureDefaultSceneIfNeeded()
+            }
+        }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            reportViewport()
+        }
     }
 
     override func layoutSubviews() {
@@ -602,10 +627,13 @@ class DrawingCanvasView: UIView {
     private let gridView = CanvasGridView()
     private let committedLayer = CommittedLayerView()
     private let liveOverlay = LiveOverlayView()
-    private lazy var inlineTextView: UITextView = {
-        let tv = UITextView()
+    private lazy var inlineTextView: InlineCanvasUITextView = {
+        let tv = InlineCanvasUITextView()
         tv.backgroundColor = .clear
         tv.isScrollEnabled = false
+        tv.autocorrectionType = .no
+        tv.smartQuotesType = .no
+        tv.smartDashesType = .no
         tv.textContainerInset = UIEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
         tv.textContainer.lineFragmentPadding = 0
         tv.layer.cornerRadius = 4
@@ -613,6 +641,21 @@ class DrawingCanvasView: UIView {
         tv.layer.borderColor = UIColor.systemBlue.withAlphaComponent(0.7).cgColor
         tv.isHidden = true
         tv.delegate = self
+        tv.onCommit = { [weak self] in
+            guard let self, let model = self.model, model.isEditingText else { return }
+            model.editingTextDraft = self.inlineTextView.text ?? ""
+            model.commitTextEditing()
+            self.syncInlineTextEditor()
+            self.committedLayer.setNeedsDisplay()
+            self.liveOverlay.setNeedsDisplay()
+        }
+        tv.onCancel = { [weak self] in
+            guard let self, let model = self.model, model.isEditingText else { return }
+            model.cancelTextEditing()
+            self.syncInlineTextEditor()
+            self.committedLayer.setNeedsDisplay()
+            self.liveOverlay.setNeedsDisplay()
+        }
         return tv
     }()
     private var dashPhase: CGFloat = 0
@@ -882,9 +925,10 @@ class DrawingCanvasView: UIView {
             if inlineTextView.text != model.editingTextDraft {
                 inlineTextView.text = model.editingTextDraft
             }
-            inlineTextView.font = UIFont.systemFont(
-                ofSize: max(10, model.editingTextFontSize * scale),
-                weight: model.editingTextIsBold ? .bold : .regular
+            inlineTextView.font = MarkdownTextEngine.monospaceFont(
+                size: max(10, model.editingTextFontSize * scale),
+                bold: model.editingTextIsBold,
+                italic: false
             )
             inlineTextView.textColor = UIColor(model.editingTextDisplayColor)
             inlineTextView.tintColor = .systemBlue
@@ -903,9 +947,10 @@ class DrawingCanvasView: UIView {
     private func positionInlineTextEditor() {
         guard let model, model.isEditingText, !inlineTextView.isHidden else { return }
         let safeScale = max(scale, 0.1)
-        inlineTextView.font = UIFont.systemFont(
-            ofSize: max(10, model.editingTextFontSize * safeScale),
-            weight: model.editingTextIsBold ? .bold : .regular
+        inlineTextView.font = MarkdownTextEngine.monospaceFont(
+            size: max(10, model.editingTextFontSize * safeScale),
+            bold: model.editingTextIsBold,
+            italic: false
         )
         let origin = CGPoint(
             x: model.editingTextPosition.x * safeScale + offset.width,
@@ -962,6 +1007,24 @@ class DrawingCanvasView: UIView {
 
     private func centerOnContent() {
         stopSceneAnimation()
+        if let model, bounds.width > 0, bounds.height > 0 {
+            if let box = GeometryEngine.boundingBox(
+                of: model.strokes,
+                images: model.placedImages,
+                fills: model.fills,
+                shapes: model.shapes,
+                textLabels: model.textLabels,
+                padding: 60
+            ), box.width > 0, box.height > 0 {
+                let target = CanvasScene(name: "Center", center: CGPoint(x: box.midX, y: box.midY), scale: 1.0)
+                animateToScene(target)
+                return
+            }
+            if let firstScene = model.scenes.first {
+                animateToScene(firstScene)
+                return
+            }
+        }
         offset = .zero
         scale = 1.0
     }
@@ -1425,6 +1488,65 @@ extension DrawingCanvasView: UIGestureRecognizerDelegate {
     }
 }
 
+// MARK: - Inline TextView (iOS) with Markdown Formatting Shortcuts
+
+final class InlineCanvasUITextView: UITextView {
+    var onCommit: (() -> Void)?
+    var onCancel: (() -> Void)?
+
+    private func applyMarkdownWrap(open: String, close: String) {
+        let current = text ?? ""
+        let res = MarkdownTextEngine.toggleWrap(in: current, selection: selectedRange, open: open, close: close)
+        text = res.text
+        selectedRange = NSRange(location: res.selectionLocation, length: res.selectionLength)
+        delegate?.textViewDidChange?(self)
+    }
+
+    override func toggleBoldface(_ sender: Any?) {
+        applyMarkdownWrap(open: "**", close: "**")
+    }
+
+    override func toggleItalics(_ sender: Any?) {
+        applyMarkdownWrap(open: "*", close: "*")
+    }
+
+    override func toggleUnderline(_ sender: Any?) {
+        applyMarkdownWrap(open: "<u>", close: "</u>")
+    }
+
+    override var keyCommands: [UIKeyCommand]? {
+        var cmds = super.keyCommands ?? []
+        let strike = UIKeyCommand(input: "x", modifierFlags: [.command, .shift], action: #selector(handleStrikethroughShortcut))
+        strike.wantsPriorityOverSystemBehavior = true
+        let code = UIKeyCommand(input: "e", modifierFlags: .command, action: #selector(handleCodeShortcut))
+        code.wantsPriorityOverSystemBehavior = true
+        let codeTick = UIKeyCommand(input: "`", modifierFlags: .command, action: #selector(handleCodeShortcut))
+        codeTick.wantsPriorityOverSystemBehavior = true
+        let commit = UIKeyCommand(input: "\r", modifierFlags: [], action: #selector(handleReturnCommit))
+        commit.wantsPriorityOverSystemBehavior = true
+        let cancel = UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(handleEscapeCancel))
+        cancel.wantsPriorityOverSystemBehavior = true
+        cmds.append(contentsOf: [strike, code, codeTick, commit, cancel])
+        return cmds
+    }
+
+    @objc private func handleStrikethroughShortcut() {
+        applyMarkdownWrap(open: "~~", close: "~~")
+    }
+
+    @objc private func handleCodeShortcut() {
+        applyMarkdownWrap(open: "`", close: "`")
+    }
+
+    @objc private func handleReturnCommit() {
+        onCommit?()
+    }
+
+    @objc private func handleEscapeCancel() {
+        onCancel?()
+    }
+}
+
 // MARK: - Inline TextView Delegate (iOS)
 
 extension DrawingCanvasView: UITextViewDelegate {
@@ -1646,33 +1768,12 @@ private struct CommittedStrokesCanvas: View {
             }
             pathCache.prune(activeIds: Set(model.strokes.map(\.id)))
 
-            // Text labels (rendered above strokes)
+            // Text labels (rendered above strokes using shared monospace + Markdown renderer)
             for lbl in model.textLabels {
                 if isEditingText && editingTextId == lbl.id { continue }
                 guard !lbl.text.isEmpty, lbl.rotatedBoundingBox().intersects(visibleCanvasRect) else { continue }
-                let color = lbl.displayColor(for: model)
-                let lines = lbl.text.split(separator: "\n", omittingEmptySubsequences: false)
-                let lineHeight = lbl.fontSize * 1.28
-                let weight: Font.Weight = lbl.isBold ? .bold : .regular
-
-                var txtCtx = context
-                if lbl.rotation != 0 {
-                    let c = lbl.cgCenter
-                    txtCtx.translateBy(x: c.x, y: c.y)
-                    txtCtx.rotate(by: Angle(radians: lbl.rotation))
-                    txtCtx.translateBy(x: -c.x, y: -c.y)
-                }
-                for (idx, line) in lines.enumerated() {
-                    let resolved = txtCtx.resolve(
-                        Text(String(line))
-                            .font(.system(size: lbl.fontSize, weight: weight))
-                            .foregroundStyle(color)
-                    )
-                    txtCtx.draw(
-                        resolved,
-                        at: CGPoint(x: lbl.cgPosition.x + 4, y: lbl.cgPosition.y + 2 + CGFloat(idx) * lineHeight),
-                        anchor: .topLeading
-                    )
+                context.withCGContext { cgCtx in
+                    StrokeRenderer.drawTextLabel(lbl, in: cgCtx, textPresets: model.textPresets)
                 }
             }
         }
@@ -2052,7 +2153,7 @@ struct CanvasView: View {
                 let originY = model.editingTextPosition.y * safeScale + offset.height
                 let draftLines = model.editingTextDraft.split(separator: "\n", omittingEmptySubsequences: false)
                 let scaledFont = max(10, model.editingTextFontSize * safeScale)
-                let nsFont = NSFont.systemFont(ofSize: scaledFont, weight: model.editingTextIsBold ? .bold : .regular)
+                let nsFont = MarkdownTextEngine.monospaceFont(size: scaledFont, bold: model.editingTextIsBold, italic: false)
                 let maxLineW = draftLines.reduce(CGFloat(0)) { acc, line in
                     let str = line.isEmpty ? " " : String(line)
                     return max(acc, (str as NSString).size(withAttributes: [.font: nsFont]).width)
@@ -2195,6 +2296,11 @@ struct CanvasView: View {
                 }
 
                 switch char {
+                case "h" where !hasShift:
+                    if !model.showWelcome && !model.showAbout && !model.isEditingText {
+                        model.closeBoard()
+                        return nil
+                    }
                 case "p":
                     model.selectTool(.pen)
                     return nil
@@ -2313,6 +2419,22 @@ struct CanvasView: View {
     private func centerOnContent(canvasSize: CGSize) {
         sceneAnimTimer?.invalidate()
         sceneAnimTimer = nil
+        if let box = GeometryEngine.boundingBox(
+            of: model.strokes,
+            images: model.placedImages,
+            fills: model.fills,
+            shapes: model.shapes,
+            textLabels: model.textLabels,
+            padding: 60
+        ), box.width > 0, box.height > 0 {
+            let target = CanvasScene(name: "Center", center: CGPoint(x: box.midX, y: box.midY), scale: 1.0)
+            animateMacToScene(target)
+            return
+        }
+        if let firstScene = model.scenes.first {
+            animateMacToScene(firstScene)
+            return
+        }
         offset = .zero
         scale = 1.0
         reportMacViewport()
@@ -2895,7 +3017,7 @@ private struct MacInlineTextEditor: NSViewRepresentable {
         tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         tv.isHorizontallyResizable = true
         tv.isVerticallyResizable = true
-        tv.font = NSFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
+        tv.font = MarkdownTextEngine.monospaceFont(size: fontSize, bold: isBold, italic: false)
         tv.textColor = color
         tv.insertionPointColor = color
         tv.string = text
@@ -2915,7 +3037,7 @@ private struct MacInlineTextEditor: NSViewRepresentable {
         if tv.string != text {
             tv.string = text
         }
-        let targetFont = NSFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
+        let targetFont = MarkdownTextEngine.monospaceFont(size: fontSize, bold: isBold, italic: false)
         if tv.font != targetFont {
             tv.font = targetFont
         }
@@ -2938,6 +3060,48 @@ private struct MacInlineTextEditor: NSViewRepresentable {
     final class InlineCanvasTextView: NSTextView {
         var onCommit: (() -> Void)?
         var onCancel: (() -> Void)?
+
+        private func applyMarkdownWrap(open: String, close: String) {
+            let res = MarkdownTextEngine.toggleWrap(in: string, selection: selectedRange(), open: open, close: close)
+            let fullRange = NSRange(location: 0, length: (string as NSString).length)
+            if shouldChangeText(in: fullRange, replacementString: res.text) {
+                replaceCharacters(in: fullRange, with: res.text)
+                didChangeText()
+            } else {
+                string = res.text
+                didChangeText()
+            }
+            setSelectedRange(NSRange(location: res.selectionLocation, length: res.selectionLength))
+        }
+
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let hasCmd = flags.contains(.command)
+            let hasShift = flags.contains(.shift)
+            let hasCtrlOrOpt = flags.contains(.control) || flags.contains(.option)
+            if hasCmd && !hasCtrlOrOpt, let ch = event.charactersIgnoringModifiers?.lowercased() {
+                switch ch {
+                case "b" where !hasShift:
+                    applyMarkdownWrap(open: "**", close: "**")
+                    return true
+                case "i" where !hasShift:
+                    applyMarkdownWrap(open: "*", close: "*")
+                    return true
+                case "u" where !hasShift:
+                    applyMarkdownWrap(open: "<u>", close: "</u>")
+                    return true
+                case "x" where hasShift:
+                    applyMarkdownWrap(open: "~~", close: "~~")
+                    return true
+                case "e" where !hasShift, "`" where !hasShift:
+                    applyMarkdownWrap(open: "`", close: "`")
+                    return true
+                default:
+                    break
+                }
+            }
+            return super.performKeyEquivalent(with: event)
+        }
 
         override func keyDown(with event: NSEvent) {
             if event.keyCode == 53 { // Escape

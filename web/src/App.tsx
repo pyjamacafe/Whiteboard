@@ -189,6 +189,9 @@ export const App: React.FC = () => {
 
     setCurrentBoardId(id);
     drawingStore.loadSaveData(saveData);
+    if (!initialData) {
+      drawingStore.requestDefaultSceneCapture();
+    }
     setShowWelcome(false);
     setSettingsTool(null);
     setShowScenes(false);
@@ -518,6 +521,10 @@ export const App: React.FC = () => {
               : null
           );
         };
+        if (key === 'h' && !e.shiftKey && !state.isEditingText) {
+          closeBoard();
+          return;
+        }
         if (key === 'p') {
           selectToolWithMoreOptions('pen');
           return;
@@ -589,6 +596,7 @@ export const App: React.FC = () => {
     showClearConfirm,
     showRenameTissue,
     state.currentTool,
+    state.isEditingText,
     state.pinnedToolbarItems,
     state.appSettings.revealSettingsOnSingleTap,
     state.selectedImageIds,

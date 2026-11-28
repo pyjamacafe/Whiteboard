@@ -576,6 +576,23 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertEqual(model.scenes[0].center.x, 500, accuracy: 0.01)
         XCTAssertEqual(model.scenes[0].center.y, 350, accuracy: 0.01)
 
+        // Subsequent panning must not overwrite Scene 1
+        model.currentViewportCenter = CGPoint(x: 1200, y: 900)
+        model.captureDefaultSceneIfNeeded()
+        XCTAssertEqual(model.scenes[0].center.x, 500, accuracy: 0.01)
+        XCTAssertEqual(model.scenes[0].center.y, 350, accuracy: 0.01)
+
+        // Creating another board must clear stale viewport coordinates before capture
+        let secondModel = DrawingModel(store: store, userDefaults: testDefaults)
+        secondModel.currentViewportCenter = CGPoint(x: 2400, y: 1800)
+        secondModel.createBoard(name: "Fresh Tissue")
+        XCTAssertEqual(secondModel.scenes[0].center.x, 0, accuracy: 0.01)
+        XCTAssertEqual(secondModel.scenes[0].center.y, 0, accuracy: 0.01)
+        secondModel.currentViewportCenter = CGPoint(x: 597, y: 417)
+        secondModel.captureDefaultSceneIfNeeded()
+        XCTAssertEqual(secondModel.scenes[0].center.x, 597, accuracy: 0.01)
+        XCTAssertEqual(secondModel.scenes[0].center.y, 417, accuracy: 0.01)
+
         model.currentViewportCenter = CGPoint(x: 800, y: -300)
         model.currentViewportScale = 0.75
         let s2 = model.addScene(name: "Architecture")
@@ -1151,5 +1168,68 @@ final class WhiteboardTests: XCTestCase {
         let pdf = model.pdfData(size: size, offset: offset)
         XCTAssertNotNil(pdf)
         XCTAssertGreaterThan(pdf?.count ?? 0, 500)
+    }
+
+    func testMarkdownTextParsingFormattingToggleAndExport() throws {
+        let md = """
+        # Title
+        ## Subheading
+        Plain **bold** *italic* <u>under</u> ~~strike~~ `code` snake_case
+        - Bullet item
+        1. Numbered item
+        - [ ] Todo
+        - [x] Done
+        > Quoted note
+        """
+        let lines = MarkdownTextEngine.parse(md)
+        XCTAssertEqual(lines.count, 8)
+        XCTAssertEqual(lines[0].kind, .heading(level: 1))
+        XCTAssertEqual(lines[1].kind, .heading(level: 2))
+        XCTAssertEqual(lines[2].kind, .paragraph)
+        XCTAssertTrue(lines[2].spans.contains(where: { $0.text == "bold" && $0.isBold }))
+        XCTAssertTrue(lines[2].spans.contains(where: { $0.text == "italic" && $0.isItalic }))
+        XCTAssertTrue(lines[2].spans.contains(where: { $0.text == "under" && $0.isUnderline }))
+        XCTAssertTrue(lines[2].spans.contains(where: { $0.text == "strike" && $0.isStrikethrough }))
+        XCTAssertTrue(lines[2].spans.contains(where: { $0.text == "code" && $0.isCode }))
+        XCTAssertTrue(lines[2].spans.contains(where: { $0.text.contains("snake_case") && !$0.isItalic }))
+        XCTAssertEqual(lines[3].kind, .bullet(indentLevel: 0))
+        XCTAssertEqual(lines[4].kind, .numbered(marker: "1.", indentLevel: 0))
+        XCTAssertEqual(lines[5].kind, .checklist(checked: false, indentLevel: 0))
+        XCTAssertEqual(lines[6].kind, .checklist(checked: true, indentLevel: 0))
+        XCTAssertEqual(lines[7].kind, .blockquote)
+
+        // Formatting shortcut wrap & unwrap toggle
+        let wrapped = MarkdownTextEngine.toggleWrap(in: "hello world", selection: NSRange(location: 6, length: 5), open: "**", close: "**")
+        XCTAssertEqual(wrapped.text, "hello **world**")
+        XCTAssertEqual(wrapped.selectionLocation, 8)
+        XCTAssertEqual(wrapped.selectionLength, 5)
+
+        let unwrapped = MarkdownTextEngine.toggleWrap(in: wrapped.text, selection: NSRange(location: wrapped.selectionLocation, length: wrapped.selectionLength), open: "**", close: "**")
+        XCTAssertEqual(unwrapped.text, "hello world")
+        XCTAssertEqual(unwrapped.selectionLocation, 6)
+        XCTAssertEqual(unwrapped.selectionLength, 5)
+
+        let collapsed = MarkdownTextEngine.toggleWrap(in: "abc", selection: NSRange(location: 3, length: 0), open: "*", close: "*")
+        XCTAssertEqual(collapsed.text, "abc**")
+        XCTAssertEqual(collapsed.selectionLocation, 4)
+        XCTAssertEqual(collapsed.selectionLength, 0)
+
+        let collapsedUnwrap = MarkdownTextEngine.toggleWrap(in: collapsed.text, selection: NSRange(location: 4, length: 0), open: "*", close: "*")
+        XCTAssertEqual(collapsedUnwrap.text, "abc")
+        XCTAssertEqual(collapsedUnwrap.selectionLocation, 3)
+
+        // Heading label measures taller than plain single-line text and renders cleanly to PNG & PDF
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.createBoard(name: "Markdown Test")
+        let plainLabel = TextLabel(text: "Title", position: .zero, fontSize: 22, color: .black)
+        let headingLabel = TextLabel(text: "# Title", position: .zero, fontSize: 22, color: .black)
+        XCTAssertGreaterThan(headingLabel.measuredSize().height, plainLabel.measuredSize().height)
+
+        model.beginTextEditing(at: CGPoint(x: 40, y: 40))
+        model.editingTextDraft = md
+        model.commitTextEditing()
+        let (size, offset) = model.canvasBoundingRect()
+        XCTAssertGreaterThan(model.pngData(size: size, offset: offset, scale: 2)?.count ?? 0, 500)
+        XCTAssertGreaterThan(model.pdfData(size: size, offset: offset)?.count ?? 0, 500)
     }
 }

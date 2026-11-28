@@ -17,6 +17,15 @@ import {
   textLabelCenter,
 } from './geometry';
 import { traceStrokeToContext } from './floodFill';
+import {
+  MARKDOWN_CODE_PADDING_X,
+  MARKDOWN_HORIZONTAL_INSET,
+  MARKDOWN_LINE_HEIGHT_MULT,
+  MARKDOWN_VERTICAL_INSET,
+  measureMarkdownPrefixWidth,
+  monospaceCanvasFont,
+  parseMarkdown,
+} from './markdown';
 import { imageBase64ToDataUrl } from './wbCodec';
 
 export function resolveStrokeColor(
@@ -142,6 +151,28 @@ export function drawCanvasShape(
   ctx.restore();
 }
 
+function traceRoundedRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+): void {
+  const rad = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rad, y);
+  ctx.lineTo(x + w - rad, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rad);
+  ctx.lineTo(x + w, y + h - rad);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rad, y + h);
+  ctx.lineTo(x + rad, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rad);
+  ctx.lineTo(x, y + rad);
+  ctx.quadraticCurveTo(x, y, x + rad, y);
+  ctx.closePath();
+}
+
 export function drawTextLabel(
   ctx: CanvasRenderingContext2D,
   label: TextLabel,
@@ -149,8 +180,12 @@ export function drawTextLabel(
 ): void {
   if (!label.text) return;
   const resolved = resolveTextColor(label, textPresets);
-  const lines = label.text.split('\n');
-  const lineHeight = label.fontSize * 1.28;
+  const parsed = parseMarkdown(label.text);
+  const fullColor = colorToCss(resolved);
+  const mutedColor = colorToCss(resolved, 0.75);
+  const barColor = colorToCss(resolved, 0.45);
+  const codeBgColor = colorToCss(resolved, 0.12);
+  const checkBgColor = colorToCss(resolved, 0.18);
 
   ctx.save();
   if (label.rotation) {
@@ -159,13 +194,132 @@ export function drawTextLabel(
     ctx.rotate(label.rotation);
     ctx.translate(-c.x, -c.y);
   }
-  ctx.fillStyle = colorToCss(resolved);
-  ctx.font = `${label.isBold ? '700' : '400'} ${label.fontSize}px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif`;
+
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  for (let i = 0; i < lines.length; i++) {
-    ctx.fillText(lines[i], label.position.x + 4, label.position.y + 2 + i * lineHeight);
+
+  const measureText = (text: string, size: number, bold: boolean, italic: boolean): number => {
+    ctx.font = monospaceCanvasFont(size, bold, italic);
+    return ctx.measureText(text).width;
+  };
+
+  let cursorY = label.position.y + MARKDOWN_VERTICAL_INSET;
+  const startX = label.position.x + MARKDOWN_HORIZONTAL_INSET;
+
+  for (const line of parsed) {
+    const lineFontSize = label.fontSize * line.fontScale;
+    const lineHeight = lineFontSize * MARKDOWN_LINE_HEIGHT_MULT;
+    const prefixW = measureMarkdownPrefixWidth(line.kind, lineFontSize, measureText, label.isBold);
+
+    // Draw block prefix decoration
+    if (line.kind.type === 'blockquote') {
+      ctx.fillStyle = barColor;
+      traceRoundedRect(
+        ctx,
+        startX + 2,
+        cursorY + lineFontSize * 0.12,
+        Math.max(2, lineFontSize * 0.12),
+        lineHeight * 0.78,
+        1.5
+      );
+      ctx.fill();
+    } else if (line.kind.type === 'bullet') {
+      const bx = startX + line.kind.indentLevel * lineFontSize * 1.1 + lineFontSize * 0.35;
+      const by = cursorY + lineFontSize * 0.62;
+      const r = Math.max(2, lineFontSize * 0.14);
+      ctx.fillStyle = fullColor;
+      ctx.beginPath();
+      ctx.arc(bx, by, r, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (line.kind.type === 'numbered') {
+      const mx = startX + line.kind.indentLevel * lineFontSize * 1.1;
+      ctx.font = monospaceCanvasFont(lineFontSize, label.isBold, false);
+      ctx.fillStyle = fullColor;
+      ctx.fillText(line.kind.marker, mx, cursorY);
+    } else if (line.kind.type === 'checklist') {
+      const boxSize = Math.max(10, lineFontSize * 0.76);
+      const bx = startX + line.kind.indentLevel * lineFontSize * 1.1 + lineFontSize * 0.1;
+      const by = cursorY + (lineFontSize * 1.15 - boxSize) / 2;
+      traceRoundedRect(ctx, bx, by, boxSize, boxSize, Math.max(2, boxSize * 0.2));
+      if (line.kind.checked) {
+        ctx.fillStyle = checkBgColor;
+        ctx.fill();
+      }
+      ctx.strokeStyle = fullColor;
+      ctx.lineWidth = Math.max(1.2, lineFontSize * 0.08);
+      ctx.stroke();
+      if (line.kind.checked) {
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(bx + boxSize * 0.22, by + boxSize * 0.52);
+        ctx.lineTo(bx + boxSize * 0.44, by + boxSize * 0.74);
+        ctx.lineTo(bx + boxSize * 0.80, by + boxSize * 0.28);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    // Draw inline spans
+    let cursorX = startX + prefixW;
+    const isCheckedChecklist = line.kind.type === 'checklist' && line.kind.checked;
+    const isMuted = line.kind.type === 'blockquote' || isCheckedChecklist;
+
+    for (const span of line.spans) {
+      const isBold = label.isBold || line.forcesBold || span.isBold;
+      const isItalic = line.defaultsItalic || span.isItalic;
+      ctx.font = monospaceCanvasFont(lineFontSize, isBold, isItalic);
+      const runW = ctx.measureText(span.text).width;
+
+      if (span.isCode) {
+        ctx.fillStyle = codeBgColor;
+        traceRoundedRect(
+          ctx,
+          cursorX,
+          cursorY + lineFontSize * 0.04,
+          runW + MARKDOWN_CODE_PADDING_X * 2,
+          lineFontSize * 1.12,
+          4
+        );
+        ctx.fill();
+        cursorX += MARKDOWN_CODE_PADDING_X;
+      }
+
+      const ink = isMuted ? mutedColor : fullColor;
+      ctx.fillStyle = ink;
+      ctx.fillText(span.text, cursorX, cursorY);
+
+      if (span.isUnderline) {
+        ctx.save();
+        ctx.strokeStyle = ink;
+        ctx.lineWidth = Math.max(1, lineFontSize * 0.065);
+        const uy = cursorY + lineFontSize * 1.06;
+        ctx.beginPath();
+        ctx.moveTo(cursorX, uy);
+        ctx.lineTo(cursorX + runW, uy);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      if (span.isStrikethrough || isCheckedChecklist) {
+        ctx.save();
+        ctx.strokeStyle = ink;
+        ctx.lineWidth = Math.max(1, lineFontSize * 0.065);
+        const sy = cursorY + lineFontSize * 0.56;
+        ctx.beginPath();
+        ctx.moveTo(cursorX, sy);
+        ctx.lineTo(cursorX + runW, sy);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      cursorX += runW + (span.isCode ? MARKDOWN_CODE_PADDING_X : 0);
+    }
+
+    cursorY += lineHeight;
   }
+
   ctx.restore();
 }
 
