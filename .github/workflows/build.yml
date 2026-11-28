@@ -1,4 +1,4 @@
-name: Build macOS App
+name: Build macOS & iOS App
 
 on:
   push:
@@ -9,52 +9,69 @@ on:
 
 jobs:
   build:
-    name: Build and Archive
-    runs-on: macos-14
+    name: Build macOS 27 & iOS 27
+    runs-on: xcode-27
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: Show Xcode version
-        run: xcodebuild -version
-
-      - name: Build and Archive
+      - name: Show Xcode version and SDKs
         run: |
-          xcodebuild clean archive \
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Build Tissue Box (Release, macOS 27 arm64)
+        run: |
+          xcodebuild \
             -project Whiteboard.xcodeproj \
             -scheme Whiteboard \
             -configuration Release \
-            -archivePath ${{ runner.temp }}/Whiteboard.xcarchive \
             -destination "generic/platform=macOS" \
+            -derivedDataPath "${{ runner.temp }}/DerivedData-macOS" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=27.0 \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            clean build
+
+      - name: Build Tissue Box (Release, iOS 27 arm64)
+        run: |
+          xcodebuild \
+            -project Whiteboard.xcodeproj \
+            -scheme Whiteboard \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath "${{ runner.temp }}/DerivedData-iOS" \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=27.0 \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
 
-      - name: Export .app bundle
+      - name: Package macOS DMG & iOS IPA
         run: |
-          mkdir -p ${{ runner.temp }}/export
-          cp -R ${{ runner.temp }}/Whiteboard.xcarchive/Products/Applications/Whiteboard.app ${{ runner.temp }}/export/
+          MAC_APP="${{ runner.temp }}/DerivedData-macOS/Build/Products/Release/Tissue Box.app"
+          IOS_APP="${{ runner.temp }}/DerivedData-iOS/Build/Products/Release-iphoneos/Tissue Box.app"
+          OUT="${{ runner.temp }}/dist"
+          IPA_STAGE="${{ runner.temp }}/ipa-stage"
 
-      - name: Create DMG
-        run: |
+          mkdir -p "$OUT" "$IPA_STAGE/Payload"
+
           hdiutil create \
-            -volname "Whiteboard" \
-            -srcfolder ${{ runner.temp }}/export/Whiteboard.app \
+            -volname "Tissue Box" \
+            -srcfolder "$MAC_APP" \
             -ov -format UDZO \
-            ${{ runner.temp }}/Whiteboard.dmg
+            "$OUT/TissueBox-macOS-arm64.dmg"
 
-      - name: Upload DMG
+          cp -R "$IOS_APP" "$IPA_STAGE/Payload/"
+          (cd "$IPA_STAGE" && zip -qry "$OUT/TissueBox-iOS-arm64.ipa" Payload)
+
+      - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Whiteboard-macOS
-          path: ${{ runner.temp }}/Whiteboard.dmg
-
-      - name: Upload .app bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: Whiteboard-app
-          path: ${{ runner.temp }}/export/Whiteboard.app
+          name: TissueBox-macOS-iOS-27
+          path: ${{ runner.temp }}/dist/*
