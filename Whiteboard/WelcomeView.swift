@@ -568,11 +568,22 @@ struct WelcomeView: View {
                         } else {
                             BlankCanvasPreview(
                                 background: model.appSettings.canvasBackground,
-                                isDarkMode: isDark
+                                isDarkMode: isDark,
+                                isWarmPaper: model.appSettings.isWarmPaper
                             )
                         }
                     }
                     .clipped()
+
+                if board.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.orange)
+                        .padding(5)
+                        .background(.ultraThinMaterial, in: Circle())
+                        .padding(8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
 
                 // Clean overflow menu (revealed on hover on macOS, always subtly visible on iOS)
                 #if os(macOS)
@@ -707,9 +718,16 @@ struct WelcomeView: View {
                     .controlSize(.small)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(board.name)
-                        .font(.system(size: 14, weight: .medium))
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        if board.isPinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.orange)
+                        }
+                        Text(board.name)
+                            .font(.system(size: 14, weight: .medium))
+                            .lineLimit(1)
+                    }
                     Text(relativeDate(board.modified))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -863,6 +881,9 @@ struct WelcomeView: View {
     @ViewBuilder
     private func boardContextMenu(_ board: BoardMeta) -> some View {
         Button { openBoard(board) } label: { Label("Open", systemImage: "arrow.up.right.square") }
+        Button { model.togglePinBoard(id: board.id) } label: {
+            Label(board.isPinned ? "Unpin" : "Pin to Top", systemImage: board.isPinned ? "pin.slash" : "pin")
+        }
         Button { startRename(board) } label: { Label("Rename", systemImage: "pencil") }
         Menu {
             Button("No Folder") { model.moveBoard(boardId: board.id, toFolder: nil) }
@@ -1114,9 +1135,21 @@ struct WelcomeView: View {
         let q = searchText.trimmingCharacters(in: .whitespaces)
         let filtered = q.isEmpty ? base : base.filter { $0.name.localizedCaseInsensitiveContains(q) }
         switch sortMode {
-        case .name: return filtered.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        case .created: return filtered.sorted { $0.created > $1.created }
-        case .modified: return filtered.sorted { $0.modified > $1.modified }
+        case .name:
+            return filtered.sorted {
+                if $0.isPinned != $1.isPinned { return $0.isPinned }
+                return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+            }
+        case .created:
+            return filtered.sorted {
+                if $0.isPinned != $1.isPinned { return $0.isPinned }
+                return $0.created > $1.created
+            }
+        case .modified:
+            return filtered.sorted {
+                if $0.isPinned != $1.isPinned { return $0.isPinned }
+                return $0.modified > $1.modified
+            }
         }
     }
 
@@ -1185,11 +1218,14 @@ struct WelcomeView: View {
 private struct BlankCanvasPreview: View {
     let background: CanvasBackground
     let isDarkMode: Bool
+    var isWarmPaper: Bool = false
     var compact: Bool = false
 
     var body: some View {
         Canvas { context, size in
-            let bg = isDarkMode ? Color(red: 14/255, green: 14/255, blue: 16/255) : Color.white
+            let bg = isDarkMode
+                ? Color(red: 14/255, green: 14/255, blue: 16/255)
+                : (isWarmPaper ? Color(red: 250/255, green: 245/255, blue: 235/255) : Color.white)
             let fg = isDarkMode ? Color.white.opacity(0.10) : Color.black.opacity(0.08)
             context.fill(Path(CGRect(origin: .zero, size: size)), with: .color(bg))
 

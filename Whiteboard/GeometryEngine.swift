@@ -617,4 +617,108 @@ nonisolated enum GeometryEngine {
               newRect.origin.x.isFinite, newRect.origin.y.isFinite else { return nil }
         return newRect
     }
+
+    // MARK: - Shape Recognition (Draw & Hold)
+
+    /// Recognizes a hand-drawn straight line, circle/ellipse, or rectangle from raw stroke points.
+    /// Returns snapped points if a clean geometric match is found, or `nil` otherwise.
+    static func recognizeShape(from points: [CGPoint]) -> [CGPoint]? {
+        guard points.count >= 6, let first = points.first, let last = points.last else { return nil }
+
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        var totalLength: CGFloat = 0
+        for i in 1..<points.count {
+            let p = points[i]
+            if p.x < minX { minX = p.x }
+            if p.x > maxX { maxX = p.x }
+            if p.y < minY { minY = p.y }
+            if p.y > maxY { maxY = p.y }
+            totalLength += hypot(p.x - points[i - 1].x, p.y - points[i - 1].y)
+        }
+        let width = maxX - minX
+        let height = maxY - minY
+        let diag = hypot(width, height)
+        guard diag >= 28, totalLength >= 28 else { return nil }
+
+        let endDist = hypot(last.x - first.x, last.y - first.y)
+
+        // 1. Straight line check
+        if endDist >= 28 && totalLength <= endDist * 1.18 {
+            let ldx = last.x - first.x
+            let ldy = last.y - first.y
+            let lenSq = max(ldx * ldx + ldy * ldy, 1e-6)
+            var maxDev: CGFloat = 0
+            for p in points {
+                let t = min(max(((p.x - first.x) * ldx + (p.y - first.y) * ldy) / lenSq, 0), 1)
+                let projX = first.x + t * ldx
+                let projY = first.y + t * ldy
+                let d = hypot(p.x - projX, p.y - projY)
+                if d > maxDev { maxDev = d }
+            }
+            if maxDev / endDist < 0.085 {
+                let steps = 16
+                return (0...steps).map { i in
+                    let t = CGFloat(i) / CGFloat(steps)
+                    return CGPoint(x: first.x + (last.x - first.x) * t, y: first.y + (last.y - first.y) * t)
+                }
+            }
+        }
+
+        // Closed shape threshold: start and end reasonably close
+        let isClosed = endDist <= max(36, diag * 0.28)
+        guard isClosed, width >= 18, height >= 18 else { return nil }
+
+        // 2. Circle / Ellipse check
+        let cx = (minX + maxX) / 2
+        let cy = (minY + maxY) / 2
+        let rx = width / 2
+        let ry = height / 2
+        var radialErrSum: CGFloat = 0
+        for p in points {
+            let nx = (p.x - cx) / rx
+            let ny = (p.y - cy) / ry
+            radialErrSum += abs(hypot(nx, ny) - 1.0)
+        }
+        if radialErrSum / CGFloat(points.count) < 0.14 {
+            let aspect = rx / ry
+            let (finalRx, finalRy): (CGFloat, CGFloat) = (aspect > 0.85 && aspect < 1.18)
+                ? ((rx + ry) / 2, (rx + ry) / 2)
+                : (rx, ry)
+            let segments = 64
+            return (0...segments).map { i in
+                let angle = (CGFloat(i) / CGFloat(segments)) * .pi * 2
+                return CGPoint(x: cx + cos(angle) * finalRx, y: cy + sin(angle) * finalRy)
+            }
+        }
+
+        // 3. Axis-aligned Rectangle check
+        var edgeErrSum: CGFloat = 0
+        for p in points {
+            let dMin = min(min(abs(p.x - minX), abs(p.x - maxX)), min(abs(p.y - minY), abs(p.y - maxY)))
+            edgeErrSum += dMin
+        }
+        let perimeter = 2 * (width + height)
+        if (edgeErrSum / CGFloat(points.count)) / diag < 0.085 && totalLength >= perimeter * 0.78 && totalLength <= perimeter * 1.35 {
+            let corners = [
+                CGPoint(x: minX, y: minY),
+                CGPoint(x: maxX, y: minY),
+                CGPoint(x: maxX, y: maxY),
+                CGPoint(x: minX, y: maxY),
+                CGPoint(x: minX, y: minY),
+            ]
+            var dense: [CGPoint] = []
+            let stepsPerEdge = 8
+            for e in 0..<4 {
+                let a = corners[e], b = corners[e + 1]
+                for s in 0..<stepsPerEdge {
+                    let t = CGFloat(s) / CGFloat(stepsPerEdge)
+                    dense.append(CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t))
+                }
+            }
+            dense.append(corners[0])
+            return dense
+        }
+
+        return nil
+    }
 }

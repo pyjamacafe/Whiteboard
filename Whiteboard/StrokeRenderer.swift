@@ -189,6 +189,7 @@ enum StrokeRenderer {
         sharpiePresets: [Color],
         fillPresets: [Color] = [],
         isDarkMode: Bool,
+        isWarmPaper: Bool = false,
         size: CGSize,
         offset: CGPoint = .zero
     ) -> Data? {
@@ -201,7 +202,13 @@ enum StrokeRenderer {
         }
 
         pdf.beginPDFPage(nil)
-        pdf.setFillColor(isDarkMode ? CGColor(gray: 0, alpha: 1) : CGColor(gray: 1, alpha: 1))
+        if isDarkMode {
+            pdf.setFillColor(CGColor(gray: 0, alpha: 1))
+        } else if isWarmPaper {
+            pdf.setFillColor(CGColor(red: 250.0 / 255.0, green: 245.0 / 255.0, blue: 235.0 / 255.0, alpha: 1))
+        } else {
+            pdf.setFillColor(CGColor(gray: 1, alpha: 1))
+        }
         pdf.fill(CGRect(origin: .zero, size: size))
         pdf.translateBy(x: -offset.x, y: size.height + offset.y)
         pdf.scaleBy(x: 1, y: -1)
@@ -219,6 +226,121 @@ enum StrokeRenderer {
         pdf.endPDFPage()
         pdf.closePDF()
         return cfData as Data
+    }
+
+    /// Exports each `CanvasScene` as its own PDF page (1200×900 4:3 slide deck).
+    static func renderScenesPDFData(
+        scenes: [CanvasScene],
+        strokes: [Stroke],
+        placedImages: [PlacedImage],
+        fills: [FillShape] = [],
+        penPresets: [Color],
+        sharpiePresets: [Color],
+        fillPresets: [Color] = [],
+        isDarkMode: Bool,
+        isWarmPaper: Bool = false
+    ) -> Data? {
+        guard !scenes.isEmpty else { return nil }
+        let pageSize = CGSize(width: 1200, height: 900)
+        var mediaBox = CGRect(origin: .zero, size: pageSize)
+        guard let cfData = CFDataCreateMutable(nil, 0),
+              let consumer = CGDataConsumer(data: cfData),
+              let pdf = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            return nil
+        }
+
+        let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        for scene in scenes {
+            pdf.beginPDFPage(nil)
+            pdf.saveGState()
+            if isDarkMode {
+                pdf.setFillColor(CGColor(gray: 0, alpha: 1))
+            } else if isWarmPaper {
+                pdf.setFillColor(CGColor(red: 250.0 / 255.0, green: 245.0 / 255.0, blue: 235.0 / 255.0, alpha: 1))
+            } else {
+                pdf.setFillColor(CGColor(gray: 1, alpha: 1))
+            }
+            pdf.fill(CGRect(origin: .zero, size: pageSize))
+
+            pdf.translateBy(x: 0, y: pageSize.height)
+            pdf.scaleBy(x: 1, y: -1)
+            let s = min(max(scene.cgScale, 0.3), 5.0)
+            pdf.translateBy(
+                x: pageSize.width / 2 - scene.center.x * s,
+                y: pageSize.height / 2 - scene.center.y * s
+            )
+            pdf.scaleBy(x: s, y: s)
+
+            for img in placedImages { drawPlacedImage(img, in: pdf) }
+            for f in fills { drawFill(f, in: pdf, fillPresets: resolvedFillPresets) }
+            for st in strokes {
+                drawStroke(st, in: pdf, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
+            }
+            pdf.restoreGState()
+            pdf.endPDFPage()
+        }
+
+        pdf.closePDF()
+        return cfData as Data
+    }
+
+    /// Renders a mini preview thumbnail of a specific `CanvasScene` viewport (used lazily in Scenes popover).
+    static func renderSceneThumbnail(
+        scene: CanvasScene,
+        strokes: [Stroke],
+        placedImages: [PlacedImage],
+        fills: [FillShape] = [],
+        penPresets: [Color],
+        sharpiePresets: [Color],
+        fillPresets: [Color] = [],
+        isDarkMode: Bool,
+        isWarmPaper: Bool = false,
+        size: CGSize = CGSize(width: 96, height: 72)
+    ) -> PlatformImage? {
+        let w = Int(size.width.rounded()), h = Int(size.height.rounded())
+        guard w > 0, h > 0 else { return nil }
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: w,
+            height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        ctx.translateBy(x: 0, y: CGFloat(h))
+        ctx.scaleBy(x: 1, y: -1)
+        if isDarkMode {
+            ctx.setFillColor(CGColor(red: 0.08, green: 0.08, blue: 0.09, alpha: 1))
+        } else if isWarmPaper {
+            ctx.setFillColor(CGColor(red: 250.0 / 255.0, green: 245.0 / 255.0, blue: 235.0 / 255.0, alpha: 1))
+        } else {
+            ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        }
+        ctx.fill(CGRect(origin: .zero, size: size))
+
+        let refScale = (size.width / 1000.0) * min(max(scene.cgScale, 0.3), 5.0)
+        ctx.translateBy(
+            x: size.width / 2 - scene.center.x * refScale,
+            y: size.height / 2 - scene.center.y * refScale
+        )
+        ctx.scaleBy(x: refScale, y: refScale)
+
+        let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        for img in placedImages { drawPlacedImage(img, in: ctx) }
+        for f in fills { drawFill(f, in: ctx, fillPresets: resolvedFillPresets) }
+        for st in strokes {
+            drawStroke(st, in: ctx, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
+        }
+
+        guard let cgImg = ctx.makeImage() else { return nil }
+        #if os(iOS)
+        return UIImage(cgImage: cgImg)
+        #else
+        return NSImage(cgImage: cgImg, size: size)
+        #endif
     }
 
     // MARK: - Thumbnail

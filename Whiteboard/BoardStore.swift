@@ -96,6 +96,28 @@ nonisolated struct BoardMeta: Codable, Identifiable, Equatable, Sendable {
     var name: String
     var created: Date
     var modified: Date
+    var isPinned: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, created, modified, isPinned
+    }
+
+    init(id: String, name: String, created: Date, modified: Date, isPinned: Bool = false) {
+        self.id = id
+        self.name = name
+        self.created = created
+        self.modified = modified
+        self.isPinned = isPinned
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        created = try c.decode(Date.self, forKey: .created)
+        modified = try c.decode(Date.self, forKey: .modified)
+        isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
+    }
 }
 
 nonisolated struct BoardFolder: Codable, Identifiable, Equatable, Sendable {

@@ -749,4 +749,68 @@ final class WhiteboardTests: XCTestCase {
         reloaded.resetToolbarLayout()
         XCTAssertEqual(reloaded.pinnedToolbarItems, ToolbarItemID.defaultPinned)
     }
+
+    func testShapeRecognitionSnapsLineCircleAndRectangle() {
+        // Straight-ish line
+        let linePts = (0...10).map { i in CGPoint(x: CGFloat(i) * 15, y: sin(CGFloat(i)) * 1.5) }
+        let snappedLine = GeometryEngine.recognizeShape(from: linePts)
+        XCTAssertNotNil(snappedLine)
+        XCTAssertEqual(snappedLine?.first?.x ?? -1, 0, accuracy: 0.1)
+        XCTAssertEqual(snappedLine?.last?.x ?? -1, 150, accuracy: 0.1)
+
+        // Circle
+        let circlePts = (0...32).map { i -> CGPoint in
+            let a = (CGFloat(i) / 32.0) * .pi * 2
+            return CGPoint(x: 100 + cos(a) * 50, y: 100 + sin(a) * 50)
+        }
+        let snappedCircle = GeometryEngine.recognizeShape(from: circlePts)
+        XCTAssertNotNil(snappedCircle)
+        XCTAssertEqual(snappedCircle?.count, 65)
+
+        // Rectangle
+        var rectPts: [CGPoint] = []
+        for i in 0..<10 { rectPts.append(CGPoint(x: CGFloat(i) * 10, y: 0)) }
+        for i in 0..<10 { rectPts.append(CGPoint(x: 100, y: CGFloat(i) * 8)) }
+        for i in 0..<10 { rectPts.append(CGPoint(x: 100 - CGFloat(i) * 10, y: 80)) }
+        for i in 0...10 { rectPts.append(CGPoint(x: 0, y: 80 - CGFloat(i) * 8)) }
+        let snappedRect = GeometryEngine.recognizeShape(from: rectPts)
+        XCTAssertNotNil(snappedRect)
+    }
+
+    func testDuplicateRecolorTransformPinAndScenesPDFExport() throws {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.createBoard(name: "Deck")
+        let boardId = try XCTUnwrap(model.currentBoardId)
+
+        // Pin/favorite board
+        model.togglePinBoard(id: boardId)
+        XCTAssertTrue(model.boards.first(where: { $0.id == boardId })?.isPinned == true)
+
+        // Stroke + selection duplicate, recolor, transform
+        model.beginStroke(at: CGPoint(x: 0, y: 0), isEraser: false)
+        model.addPoint(CGPoint(x: 100, y: 0))
+        model.endStroke()
+        let origId = model.strokes[0].id
+        model.selectedStrokeIds = [origId]
+
+        model.duplicateSelected()
+        XCTAssertEqual(model.strokes.count, 2)
+        XCTAssertFalse(model.selectedStrokeIds.contains(origId))
+
+        model.recolorSelected(to: .red, presetIndex: 1)
+        let dupStroke = model.strokes.first(where: { $0.id != origId })!
+        XCTAssertEqual(dupStroke.presetIndex, 1)
+
+        let beforeWidth = abs(dupStroke.points.last!.x - dupStroke.points.first!.x)
+        model.transformSelected(scale: 1.5, rotation: 0)
+        let scaledDup = model.strokes.first(where: { $0.id != origId })!
+        let afterWidth = abs(scaledDup.points.last!.x - scaledDup.points.first!.x)
+        XCTAssertEqual(afterWidth, beforeWidth * 1.5, accuracy: 0.5)
+
+        // Multi-page Scenes PDF export
+        model.addScene(name: "Slide 2")
+        let pdf = model.scenesPDFData()
+        XCTAssertNotNil(pdf)
+        XCTAssertGreaterThan(pdf?.count ?? 0, 200)
+    }
 }

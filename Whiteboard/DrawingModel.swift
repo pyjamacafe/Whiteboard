@@ -112,7 +112,16 @@ nonisolated struct CodablePoint: Codable, Equatable, Sendable {
 }
 
 enum Tool: String, CaseIterable {
-    case pen, sharpie, fill, eraser, select
+    case pen, sharpie, fill, eraser, select, laser
+}
+
+enum ToolbarDockEdge: String, CaseIterable, Codable {
+    case top = "Top"
+    case bottom = "Bottom"
+    case left = "Left"
+    case right = "Right"
+
+    var isVertical: Bool { self == .left || self == .right }
 }
 
 /// Every configurable item that can live on either the floating canvas toolbar
@@ -123,6 +132,7 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     case fill
     case eraser
     case select
+    case laser
     case scenes
     case home
     case undo
@@ -133,7 +143,10 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     case importPhoto
     case importImage
     case center
+    case fitContent
     case darkMode
+    case warmPaper
+    case renameTissue
     case singleTapOptions
     case pencilOnly
     case exportWB
@@ -164,6 +177,7 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .fill: return "Fill"
         case .eraser: return "Eraser"
         case .select: return "Select"
+        case .laser: return "Laser"
         case .scenes: return "Scenes"
         case .home: return "Home"
         case .undo: return "Undo"
@@ -174,7 +188,10 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .importPhoto: return "Photos"
         case .importImage: return "Import Image"
         case .center: return "Center Canvas"
+        case .fitContent: return "Fit All"
         case .darkMode: return "Theme"
+        case .warmPaper: return "Warm Paper"
+        case .renameTissue: return "Rename"
         case .singleTapOptions: return "Single-Tap Options"
         case .pencilOnly: return "Pencil Only"
         case .exportWB: return "Save .wb"
@@ -193,6 +210,7 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .fill: return "drop.fill"
         case .eraser: return "eraser"
         case .select: return "cursorarrow.click"
+        case .laser: return "wand.and.rays"
         case .scenes: return "rectangle.stack"
         case .home: return "house"
         case .undo: return "arrow.uturn.backward"
@@ -203,7 +221,10 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .importPhoto: return "photo.on.rectangle"
         case .importImage: return "photo"
         case .center: return "viewfinder"
+        case .fitContent: return "arrow.up.left.and.arrow.down.right"
         case .darkMode: return "moon.fill"
+        case .warmPaper: return "cup.and.saucer"
+        case .renameTissue: return "character.cursor.ibeam"
         case .singleTapOptions: return "hand.tap"
         case .pencilOnly: return "applepencil"
         case .exportWB: return "square.and.arrow.down"
@@ -222,6 +243,7 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .fill: return .fill
         case .eraser: return .eraser
         case .select: return .select
+        case .laser: return .laser
         default: return nil
         }
     }
@@ -239,6 +261,8 @@ struct AppSettings {
     #else
     var pencilOnly: Bool = true
     #endif
+    var isWarmPaper: Bool = false
+    var toolbarDockEdge: ToolbarDockEdge = .top
     var isDarkMode: Bool = false {
         didSet {
             #if os(macOS)
@@ -419,6 +443,9 @@ final class DrawingModel {
     var isToolbarVisible: Bool = true
     var showWelcome: Bool = true
     var needsRecenter: Bool = false
+    var needsFitToContent: Bool = false
+    var needsResetZoom: Bool = false
+    var zoomDisplayScale: CGFloat = 1.0
     var welcomeFolderName: String?
     var lastErrorMessage: String?
     var pinnedToolbarItems: [ToolbarItemID] = ToolbarItemID.defaultPinned
@@ -428,8 +455,11 @@ final class DrawingModel {
     private(set) var committedRevision: Int = 0
     /// Bumped when background thumbnail generation finishes so WelcomeView refreshes.
     private(set) var thumbnailRevision: Int = 0
+    /// Bumped when background Scene thumbnail generation finishes.
+    private(set) var sceneThumbnailRevision: Int = 0
 
     @ObservationIgnored var currentStroke: Stroke?
+    @ObservationIgnored var laserPoints: [(point: CGPoint, time: CFTimeInterval)] = []
     @ObservationIgnored var previousTool: Tool = .pen
     @ObservationIgnored var lastCanvasTapLocation: CGPoint = .zero
     @ObservationIgnored var currentViewportCenter: CGPoint = .zero
@@ -460,6 +490,8 @@ final class DrawingModel {
 
     // Async thumbnail cache + in-flight deduplication
     @ObservationIgnored private let thumbnailCache = NSCache<NSString, PlatformImage>()
+    @ObservationIgnored private let sceneThumbnailCache = NSCache<NSString, PlatformImage>()
+    @ObservationIgnored private var inFlightSceneThumbnails: Set<String> = []
     @ObservationIgnored private var thumbnailKeys: Set<String> = []
     @ObservationIgnored private var inFlightThumbnails: Set<String> = []
     @ObservationIgnored private let thumbnailQueue = DispatchQueue(label: "com.whiteboard.thumbnails", qos: .userInitiated)
@@ -819,6 +851,12 @@ final class DrawingModel {
         saveBoards()
     }
 
+    func togglePinBoard(id: String) {
+        guard let idx = boards.firstIndex(where: { $0.id == id }) else { return }
+        boards[idx].isPinned.toggle()
+        saveBoards()
+    }
+
     // MARK: - Folders
 
     func createFolder(name: String) {
@@ -1155,6 +1193,26 @@ final class DrawingModel {
         currentStroke?.points.append(point)
     }
 
+    /// Snaps the active pen/sharpie stroke into a crisp geometric line, circle/ellipse, or rectangle
+    /// when the user pauses briefly ("Draw & Hold"). Returns `true` if snapped.
+    @discardableResult
+    func snapCurrentStrokeToShape() -> Bool {
+        guard var stroke = currentStroke, !stroke.isEraser else { return false }
+        guard let snapped = GeometryEngine.recognizeShape(from: stroke.points) else { return false }
+        stroke = Stroke(
+            id: stroke.id,
+            points: snapped,
+            color: stroke.uiColor,
+            lineWidth: stroke.lineWidth,
+            isEraser: false,
+            presetIndex: stroke.presetIndex,
+            isCatmullRom: false,
+            isSharpie: stroke.isSharpie
+        )
+        currentStroke = stroke
+        return true
+    }
+
     func endStroke() {
         guard let stroke = currentStroke else { return }
         currentStroke = nil
@@ -1447,7 +1505,154 @@ final class DrawingModel {
         scheduleAutoSave()
     }
 
-    // MARK: - Copy / Paste
+    // MARK: - Copy / Paste / Duplicate / Recolor / Transform
+
+    /// Duplicates the current lasso selection in-place with a (+24, +24) offset without touching the system clipboard.
+    func duplicateSelected() {
+        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty else { return }
+        saveState()
+        let dx: CGFloat = 24, dy: CGFloat = 24
+        var newStrokeIds = Set<UUID>()
+        var newImageIds = Set<UUID>()
+        var newFillIds = Set<UUID>()
+
+        for s in strokes where selectedStrokeIds.contains(s.id) {
+            let copy = Stroke(
+                points: s.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) },
+                color: s.uiColor,
+                lineWidth: s.lineWidth,
+                isEraser: false,
+                presetIndex: s.presetIndex,
+                isCatmullRom: s.isCatmullRom,
+                isSharpie: s.isSharpie
+            )
+            newStrokeIds.insert(copy.id)
+            strokes.append(copy)
+        }
+        for img in placedImages where selectedImageIds.contains(img.id) {
+            let copy = PlacedImage(
+                position: CGPoint(x: img.cgPosition.x + dx, y: img.cgPosition.y + dy),
+                size: img.cgSize,
+                imageData: img.imageData
+            )
+            newImageIds.insert(copy.id)
+            placedImages.append(copy)
+        }
+        for fill in fills where selectedFillIds.contains(fill.id) {
+            let shifted = fill.contours.map { loop in loop.map { CGPoint(x: $0.x + dx, y: $0.y + dy) } }
+            let copy = FillShape(contours: shifted, color: fill.uiColor, opacity: fill.opacity, presetIndex: fill.presetIndex)
+            newFillIds.insert(copy.id)
+            fills.append(copy)
+        }
+
+        selectedStrokeIds = newStrokeIds
+        selectedImageIds = newImageIds
+        selectedFillIds = newFillIds
+        if !selectionBoundary.isEmpty {
+            selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+        }
+        spatialGrid.rebuild(with: strokes)
+        updateUndoRedo()
+        scheduleAutoSave()
+    }
+
+    /// Recolors all currently selected strokes and fills in one undoable step.
+    func recolorSelected(to color: Color, presetIndex: Int = -1) {
+        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty else { return }
+        saveState()
+        if !selectedStrokeIds.isEmpty {
+            strokes = strokes.map { s in
+                guard selectedStrokeIds.contains(s.id) else { return s }
+                return Stroke(
+                    id: s.id,
+                    points: s.points,
+                    color: color,
+                    lineWidth: s.lineWidth,
+                    isEraser: s.isEraser,
+                    presetIndex: presetIndex,
+                    isCatmullRom: s.isCatmullRom,
+                    isSharpie: s.isSharpie
+                )
+            }
+        }
+        if !selectedFillIds.isEmpty {
+            fills = fills.map { f in
+                guard selectedFillIds.contains(f.id) else { return f }
+                return FillShape(id: f.id, contours: f.contours, color: color, opacity: f.opacity, presetIndex: presetIndex)
+            }
+        }
+        updateUndoRedo()
+        scheduleAutoSave()
+    }
+
+    /// Scales and/or rotates all selected strokes, fills, and images around their shared centroid.
+    func transformSelected(scale: CGFloat = 1.0, rotation: CGFloat = 0.0) {
+        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty || !selectedImageIds.isEmpty else { return }
+        let selStrokes = strokes.filter { selectedStrokeIds.contains($0.id) }
+        let selImages = placedImages.filter { selectedImageIds.contains($0.id) }
+        let selFills = fills.filter { selectedFillIds.contains($0.id) }
+        guard let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, padding: 0) else { return }
+        let cx = box.midX
+        let cy = box.midY
+        let cosA = cos(rotation)
+        let sinA = sin(rotation)
+
+        func xform(_ p: CGPoint) -> CGPoint {
+            let dx = (p.x - cx) * scale
+            let dy = (p.y - cy) * scale
+            return CGPoint(x: cx + dx * cosA - dy * sinA, y: cy + dx * sinA + dy * cosA)
+        }
+
+        saveState()
+        if !selectedStrokeIds.isEmpty {
+            strokes = strokes.map { s in
+                guard selectedStrokeIds.contains(s.id) else { return s }
+                return Stroke(
+                    id: s.id,
+                    points: s.points.map(xform),
+                    color: s.uiColor,
+                    lineWidth: max(0.5, s.lineWidth * scale),
+                    isEraser: s.isEraser,
+                    presetIndex: s.presetIndex,
+                    isCatmullRom: s.isCatmullRom,
+                    isSharpie: s.isSharpie
+                )
+            }
+        }
+        if !selectedFillIds.isEmpty {
+            fills = fills.map { f in
+                guard selectedFillIds.contains(f.id) else { return f }
+                return FillShape(
+                    id: f.id,
+                    contours: f.contours.map { $0.map(xform) },
+                    color: f.uiColor,
+                    opacity: f.opacity,
+                    presetIndex: f.presetIndex
+                )
+            }
+        }
+        if !selectedImageIds.isEmpty && scale != 1.0 {
+            placedImages = placedImages.map { img in
+                guard selectedImageIds.contains(img.id) else { return img }
+                let center = CGPoint(x: img.cgPosition.x + img.cgSize.width / 2, y: img.cgPosition.y + img.cgSize.height / 2)
+                let newCenter = xform(center)
+                let newW = max(10, img.cgSize.width * scale)
+                let newH = max(10, img.cgSize.height * scale)
+                return PlacedImage(
+                    id: img.id,
+                    position: CGPoint(x: newCenter.x - newW / 2, y: newCenter.y - newH / 2),
+                    size: CGSize(width: newW, height: newH),
+                    imageData: img.imageData
+                )
+            }
+        }
+        if !selectionBoundary.isEmpty {
+            selectionBoundary = selectionBoundary.map(xform)
+        }
+        spatialGrid.rebuild(with: strokes)
+        updateUndoRedo()
+        scheduleAutoSave()
+    }
 
     func copySelected() {
         guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty else { return }
@@ -2088,9 +2293,67 @@ final class DrawingModel {
             sharpiePresets: sharpiePresets,
             fillPresets: fillPresets,
             isDarkMode: appSettings.isDarkMode,
+            isWarmPaper: appSettings.isWarmPaper,
             size: size,
             offset: offset
         )
+    }
+
+    func scenesPDFData() -> Data? {
+        StrokeRenderer.renderScenesPDFData(
+            scenes: scenes,
+            strokes: strokes,
+            placedImages: placedImages,
+            fills: fills,
+            penPresets: penPresets,
+            sharpiePresets: sharpiePresets,
+            fillPresets: fillPresets,
+            isDarkMode: appSettings.isDarkMode,
+            isWarmPaper: appSettings.isWarmPaper
+        )
+    }
+
+    /// Returns a cached mini thumbnail for `scene`, lazily generating it on a background queue
+    /// only when requested (never during active drawing).
+    func sceneThumbnail(for scene: CanvasScene) -> PlatformImage? {
+        let isDark = appSettings.isDarkMode
+        let isWarm = appSettings.isWarmPaper
+        let key = "\(scene.id.uuidString)_\(committedRevision)_\(isDark ? "d" : isWarm ? "w" : "l")_\(Int(scene.centerX))_\(Int(scene.centerY))_\(Int(scene.scale * 100))"
+        if let cached = sceneThumbnailCache.object(forKey: key as NSString) {
+            return cached
+        }
+        guard !inFlightSceneThumbnails.contains(key) else { return nil }
+        inFlightSceneThumbnails.insert(key)
+
+        let strokesCopy = strokes
+        let imagesCopy = placedImages
+        let fillsCopy = fills
+        let pen = penPresets
+        let sharpie = sharpiePresets
+        let fillP = fillPresets
+
+        thumbnailQueue.async { [weak self] in
+            let rendered = StrokeRenderer.renderSceneThumbnail(
+                scene: scene,
+                strokes: strokesCopy,
+                placedImages: imagesCopy,
+                fills: fillsCopy,
+                penPresets: pen,
+                sharpiePresets: sharpie,
+                fillPresets: fillP,
+                isDarkMode: isDark,
+                isWarmPaper: isWarm
+            )
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.inFlightSceneThumbnails.remove(key)
+                if let rendered {
+                    self.sceneThumbnailCache.setObject(rendered, forKey: key as NSString)
+                    self.sceneThumbnailRevision &+= 1
+                }
+            }
+        }
+        return nil
     }
 
     // MARK: - Persistent Disk + Memory Async Thumbnails

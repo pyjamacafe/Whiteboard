@@ -28,12 +28,16 @@ struct ContentView: View {
     @State private var showHelp = false
     @State private var showSettingsSidebar = false
     @State private var windowHeight: CGFloat = 700
+    @State private var showRenameTissue = false
+    @State private var renameTissueText = ""
+    @State private var showZoomPill = false
+    @State private var zoomHideWorkItem: DispatchWorkItem?
     @State private var exportFormat: ExportFormat = .wb
     @State private var exportData: Data?
     @State private var exportName = "Untitled"
     @State private var exportType: UTType = .data
 
-    enum ExportFormat: String { case wb, png, pdf }
+    enum ExportFormat: String { case wb, png, pdf, scenesPDF }
 
     private var canvasWindowTitle: String {
         if let id = model.currentBoardId,
@@ -73,44 +77,20 @@ struct ContentView: View {
                         .ignoresSafeArea()
                     #endif
 
-                    VStack(spacing: 0) {
-                        #if compiler(>=6.2)
-                        if #available(macOS 26.0, iOS 26.0, *) {
-                            GlassEffectContainer(spacing: 10) {
-                                VStack(spacing: 6) {
-                                    if model.isToolbarVisible { toolbar }
-                                    if model.isToolbarVisible && isCustomizingToolbar {
-                                        customizeToolbarTray
-                                            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
-                                    } else if model.isToolbarVisible, let tool = settingsTool, tool != .select {
-                                        ToolSettingsView(model: model, tool: tool)
-                                            .onTapGesture { }
-                                    }
-                                }
-                            }
-                        } else {
-                            if model.isToolbarVisible { toolbar }
-                            if model.isToolbarVisible && isCustomizingToolbar {
-                                customizeToolbarTray
-                                    .padding(.top, 6)
-                            } else if model.isToolbarVisible, let tool = settingsTool, tool != .select {
-                                ToolSettingsView(model: model, tool: tool)
-                                    .padding(.top, 6)
-                                    .onTapGesture { }
+                    dockedToolbarOverlay
+
+                    // Transient Zoom Indicator + Fit-to-Content pill (bottom-trailing)
+                    if showZoomPill && model.isToolbarVisible {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Spacer()
+                                zoomIndicatorPill
+                                    .padding(.trailing, 16)
+                                    .padding(.bottom, model.appSettings.toolbarDockEdge == .bottom ? 76 : 16)
                             }
                         }
-                        #else
-                        if model.isToolbarVisible { toolbar }
-                        if model.isToolbarVisible && isCustomizingToolbar {
-                            customizeToolbarTray
-                                .padding(.top, 6)
-                        } else if model.isToolbarVisible, let tool = settingsTool, tool != .select {
-                            ToolSettingsView(model: model, tool: tool)
-                                .padding(.top, 6)
-                                .onTapGesture { }
-                        }
-                        #endif
-                        Spacer()
+                        .transition(.opacity.combined(with: .scale(scale: 0.92)))
                     }
 
                     #if os(iOS) && !targetEnvironment(macCatalyst)
@@ -285,6 +265,25 @@ struct ContentView: View {
             } message: {
                 Text("This will permanently delete all strokes and images.")
             }
+            .onChange(of: model.zoomDisplayScale) { _, _ in
+                withAnimation(.easeOut(duration: 0.16)) { showZoomPill = true }
+                zoomHideWorkItem?.cancel()
+                let item = DispatchWorkItem {
+                    withAnimation(.easeOut(duration: 0.25)) { showZoomPill = false }
+                }
+                zoomHideWorkItem = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
+            }
+            .alert("Rename Tissue", isPresented: $showRenameTissue) {
+                TextField("Tissue name", text: $renameTissueText)
+                Button("Rename") {
+                    let trimmed = renameTissueText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty, let id = model.currentBoardId {
+                        model.renameBoard(id: id, to: trimmed)
+                    }
+                }
+                Button("Cancel", role: .cancel) { }
+            }
             .alert("Error", isPresented: Binding(
                 get: { model.lastErrorMessage != nil },
                 set: { if !$0 { model.lastErrorMessage = nil } }
@@ -454,8 +453,204 @@ struct ContentView: View {
         )
     }
 
+    private var hasActiveSelection: Bool {
+        !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+    }
+
+    @ViewBuilder
+    private var dockedToolbarOverlay: some View {
+        let edge = model.appSettings.toolbarDockEdge
+        let secondaryPanel: some View = Group {
+            if model.isToolbarVisible && isCustomizingToolbar {
+                customizeToolbarTray
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if model.isToolbarVisible && model.currentTool == .select && hasActiveSelection {
+                selectionActionPill
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            } else if model.isToolbarVisible, let tool = settingsTool, tool != .select && tool != .laser {
+                ToolSettingsView(model: model, tool: tool)
+                    .onTapGesture { }
+            }
+        }
+
+        switch edge {
+        case .top:
+            VStack(spacing: 6) {
+                if model.isToolbarVisible { toolbar }
+                secondaryPanel
+                Spacer()
+            }
+            .padding(.top, 12)
+        case .bottom:
+            VStack(spacing: 6) {
+                Spacer()
+                secondaryPanel
+                if model.isToolbarVisible { toolbar }
+            }
+            .padding(.bottom, 14)
+        case .left:
+            HStack(alignment: .center, spacing: 8) {
+                if model.isToolbarVisible { toolbar }
+                VStack {
+                    secondaryPanel
+                    Spacer()
+                }
+                .padding(.top, 12)
+                Spacer()
+            }
+            .padding(.leading, 12)
+        case .right:
+            HStack(alignment: .center, spacing: 8) {
+                Spacer()
+                VStack {
+                    secondaryPanel
+                    Spacer()
+                }
+                .padding(.top, 12)
+                if model.isToolbarVisible { toolbar }
+            }
+            .padding(.trailing, 12)
+        }
+    }
+
+    private var zoomIndicatorPill: some View {
+        HStack(spacing: 6) {
+            Button(action: { model.needsResetZoom = true }) {
+                Text("\(Int((model.zoomDisplayScale * 100).rounded()))%")
+                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Reset Zoom to 100%")
+            .pointingHand()
+
+            Divider().frame(height: 16)
+
+            Button(action: { model.needsFitToContent = true }) {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Fit All Content")
+            .pointingHand()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .liquidGlassCapsule()
+        .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
+    }
+
+    private var selectionActionPill: some View {
+        HStack(spacing: 6) {
+            Button(action: { model.copySelected() }) {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 13))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Copy Selection")
+            .pointingHand()
+            .pencilHoverEffect()
+
+            Button(action: { model.duplicateSelected() }) {
+                Image(systemName: "plus.square.on.square")
+                    .font(.system(size: 13))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Duplicate Selection")
+            .pointingHand()
+            .pencilHoverEffect()
+
+            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
+                Divider().frame(height: 18)
+                HStack(spacing: 4) {
+                    ForEach(Array(model.penPresets.prefix(6).enumerated()), id: \.offset) { idx, color in
+                        Button(action: { model.recolorSelected(to: color, presetIndex: idx) }) {
+                            Circle()
+                                .fill(color)
+                                .frame(width: 16, height: 16)
+                                .overlay(Circle().stroke(Color.primary.opacity(0.25), lineWidth: 0.75))
+                                .frame(width: 22, height: 22)
+                                .contentShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Recolor Selection")
+                        .pointingHand()
+                        .pencilHoverEffect()
+                    }
+                }
+            }
+
+            Divider().frame(height: 18)
+
+            Button(action: { model.transformSelected(scale: 0.85, rotation: 0) }) {
+                Image(systemName: "minus.magnifyingglass")
+                    .font(.system(size: 13))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Shrink Selection")
+            .pointingHand()
+            .pencilHoverEffect()
+
+            Button(action: { model.transformSelected(scale: 1.15, rotation: 0) }) {
+                Image(systemName: "plus.magnifyingglass")
+                    .font(.system(size: 13))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Enlarge Selection")
+            .pointingHand()
+            .pencilHoverEffect()
+
+            Button(action: { model.transformSelected(scale: 1.0, rotation: .pi / 12) }) {
+                Image(systemName: "rotate.right")
+                    .font(.system(size: 13))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Rotate Selection 15°")
+            .pointingHand()
+            .pencilHoverEffect()
+
+            Divider().frame(height: 18)
+
+            Button(role: .destructive, action: { model.deleteSelected() }) {
+                Image(systemName: "trash")
+                    .font(.system(size: 13))
+                    .foregroundColor(.red)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .help("Delete Selection")
+            .pointingHand()
+            .pencilHoverEffect()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .liquidGlassCapsule()
+        .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
+        .onTapGesture { }
+    }
+
     private var toolbar: some View {
-        HStack(spacing: toolbarSpacing) {
+        let isVertical = model.appSettings.toolbarDockEdge.isVertical
+        let layout = isVertical
+            ? AnyLayout(VStackLayout(spacing: toolbarSpacing))
+            : AnyLayout(HStackLayout(spacing: toolbarSpacing))
+
+        return layout {
             ForEach(model.pinnedToolbarItems) { item in
                 if isCustomizingToolbar {
                     customizingToolbarChip(for: item)
@@ -466,7 +661,7 @@ struct ContentView: View {
 
             if !model.pinnedToolbarItems.isEmpty {
                 Divider()
-                    .frame(height: toolbarDividerH)
+                    .frame(width: isVertical ? toolbarDividerH : nil, height: isVertical ? nil : toolbarDividerH)
             }
 
             if isCustomizingToolbar {
@@ -490,8 +685,8 @@ struct ContentView: View {
             }
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, toolbarPadH)
-        .padding(.vertical, toolbarPadV)
+        .padding(.horizontal, isVertical ? toolbarPadV : toolbarPadH)
+        .padding(.vertical, isVertical ? toolbarPadH : toolbarPadV)
         .liquidGlassCapsule()
         .overlay(
             Capsule()
@@ -511,7 +706,6 @@ struct ContentView: View {
         } isTargeted: { targeted in
             toolbarDropTargeted = targeted
         }
-        .padding(.top, 12)
         .colorScheme(model.appSettings.isDarkMode ? .dark : .light)
     }
 
@@ -648,9 +842,22 @@ struct ContentView: View {
                 Label("Customize Toolbar", systemImage: "slider.horizontal.3")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
+                Button(action: cycleToolbarDockEdge) {
+                    Label(model.appSettings.toolbarDockEdge.rawValue, systemImage: "dock.rectangle")
+                        .font(.caption.weight(.medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.primary.opacity(0.08))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Dock Toolbar: Top / Bottom / Left / Right")
+                .pointingHand()
+
                 Button("Reset") {
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
                         model.resetToolbarLayout()
+                        model.appSettings.toolbarDockEdge = .top
                     }
                 }
                 .font(.caption.weight(.medium))
@@ -723,10 +930,21 @@ struct ContentView: View {
         .onTapGesture { }
     }
 
+    private func cycleToolbarDockEdge() {
+        let edges = ToolbarDockEdge.allCases
+        if let idx = edges.firstIndex(of: model.appSettings.toolbarDockEdge) {
+            withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+                model.appSettings.toolbarDockEdge = edges[(idx + 1) % edges.count]
+            }
+        }
+    }
+
     private func dynamicIcon(for item: ToolbarItemID) -> String {
         switch item {
         case .darkMode:
             return model.appSettings.isDarkMode ? "sun.max.fill" : "moon.fill"
+        case .warmPaper:
+            return model.appSettings.isWarmPaper ? "cup.and.saucer.fill" : "cup.and.saucer"
         case .singleTapOptions:
             return model.appSettings.revealSettingsOnSingleTap ? "hand.tap.fill" : "hand.tap"
         default:
@@ -739,6 +957,10 @@ struct ContentView: View {
         switch item {
         case .clear: return hasSelection ? "Delete Selected" : "Clear Tissue"
         case .darkMode: return model.appSettings.isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"
+        case .warmPaper: return model.appSettings.isWarmPaper ? "Switch to Crisp White Paper" : "Switch to Warm Café Napkin Paper"
+        case .renameTissue: return "Rename Tissue"
+        case .fitContent: return "Fit All Content"
+        case .laser: return "Laser Pointer (L)"
         case .singleTapOptions: return "Show Options on Single Tap"
         case .pencilOnly: return "Draw with Apple Pencil Only"
         case .importPhoto: return "Import from Photos"
@@ -755,6 +977,7 @@ struct ContentView: View {
             return model.currentTool == tool
         }
         switch item {
+        case .warmPaper: return model.appSettings.isWarmPaper && !model.appSettings.isDarkMode
         case .singleTapOptions: return model.appSettings.revealSettingsOnSingleTap
         case .pencilOnly: return model.appSettings.pencilOnly
         default: return false
@@ -769,6 +992,7 @@ struct ContentView: View {
         case .redo: return !model.canRedo
         case .clear: return isEmptyCanvas
         case .copy: return !hasSelection
+        case .renameTissue: return model.currentBoardId == nil
         default: return false
         }
     }
@@ -776,10 +1000,10 @@ struct ContentView: View {
     private func performToolbarAction(for item: ToolbarItemID, closePopover: Bool = false) {
         let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
         switch item {
-        case .pen, .sharpie, .fill, .eraser, .select:
+        case .pen, .sharpie, .fill, .eraser, .select, .laser:
             if let tool = item.associatedTool {
                 model.selectTool(tool)
-                settingsTool = model.appSettings.revealSettingsOnSingleTap ? tool : nil
+                settingsTool = (model.appSettings.revealSettingsOnSingleTap && tool != .laser && tool != .select) ? tool : nil
             }
             if closePopover { showSettings = false }
         case .scenes:
@@ -812,8 +1036,21 @@ struct ContentView: View {
         case .center:
             model.needsRecenter = true
             if closePopover { showSettings = false }
+        case .fitContent:
+            model.needsFitToContent = true
+            if closePopover { showSettings = false }
         case .darkMode:
             model.appSettings.isDarkMode.toggle()
+        case .warmPaper:
+            if model.appSettings.isDarkMode { model.appSettings.isDarkMode = false }
+            model.appSettings.isWarmPaper.toggle()
+        case .renameTissue:
+            if closePopover { showSettings = false }
+            if let id = model.currentBoardId,
+               let board = model.boards.first(where: { $0.id == id }) {
+                renameTissueText = board.name
+                showRenameTissue = true
+            }
         case .singleTapOptions:
             model.appSettings.revealSettingsOnSingleTap.toggle()
         case .pencilOnly:
@@ -1043,10 +1280,27 @@ struct ContentView: View {
         .popover(isPresented: $showScenes, attachmentAnchor: .rect(.bounds), arrowEdge: popoverArrowEdge) {
             VStack(spacing: 0) {
                 // Header
-                HStack {
+                HStack(spacing: 6) {
                     Text("Scenes")
                         .font(.system(size: 13, weight: .semibold))
                     Spacer()
+                    if !model.scenes.isEmpty {
+                        Button(action: {
+                            showScenes = false
+                            exportFormat = .scenesPDF
+                            exportAction()
+                        }) {
+                            Image(systemName: "doc.richtext")
+                                .font(.system(size: 12, weight: .medium))
+                                .frame(width: 26, height: 24)
+                                .background(Color.primary.opacity(0.08))
+                                .foregroundColor(.primary)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Export Scenes as Multi-Page PDF")
+                        .pointingHand()
+                    }
                     Button(action: { model.addScene() }) {
                         Label("Add", systemImage: "plus")
                             .font(.system(size: 12, weight: .medium))
@@ -1128,14 +1382,39 @@ struct ContentView: View {
     }
 
     private func sceneRow(scene: CanvasScene, index: Int) -> some View {
+        let _ = model.sceneThumbnailRevision
+        let thumb = model.sceneThumbnail(for: scene)
         let isActive = model.activeSceneId == scene.id
         return HStack(spacing: 8) {
-            Text("\(index + 1)")
-                .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                .foregroundColor(isActive ? .white : .secondary)
-                .frame(width: 20, height: 20)
-                .background(isActive ? Color.accentColor : Color.primary.opacity(0.08))
-                .clipShape(Circle())
+            // Lazy mini-thumbnail preview (rendered off-main-thread only when popover opens)
+            ZStack(alignment: .bottomLeading) {
+                Group {
+                    if let thumb {
+                        #if os(macOS)
+                        Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
+                        #else
+                        Image(uiImage: thumb).resizable().aspectRatio(contentMode: .fill)
+                        #endif
+                    } else {
+                        Color.primary.opacity(0.06)
+                    }
+                }
+                .frame(width: 44, height: 33)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(isActive ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: isActive ? 1.5 : 0.5)
+                )
+
+                Text("\(index + 1)")
+                    .font(.system(size: 9, weight: .bold).monospacedDigit())
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(isActive ? Color.accentColor : Color.black.opacity(0.55))
+                    .clipShape(Capsule())
+                    .padding(2)
+            }
 
             if renamingSceneId == scene.id {
                 TextField("Scene name", text: $renameSceneText)
@@ -1389,6 +1668,10 @@ struct ContentView: View {
             exportData = model.pdfData(size: size, offset: offset)
             exportType = .pdf
             exportName = baseName + ".pdf"
+        case .scenesPDF:
+            exportData = model.scenesPDFData()
+            exportType = .pdf
+            exportName = baseName + "-Scenes.pdf"
         }
         guard exportData != nil else {
             model.lastErrorMessage = "Failed to generate export data."
