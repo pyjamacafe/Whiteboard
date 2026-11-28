@@ -93,18 +93,19 @@ nonisolated enum FloodFillEngine {
     /// Maximum raster dimension (pixels) along either axis to guarantee <15ms runtime.
     private static let maxGridDimension: CGFloat = 1024
 
-    /// Computes closed vector contours enclosing `tapPoint` bounded by `strokes`.
+    /// Computes closed vector contours enclosing `tapPoint` bounded by `strokes` (and optional `shapes`).
     /// Returns `nil` if `tapPoint` is not inside an enclosed region.
     static func computeContours(
         at tapPoint: CGPoint,
         strokes: [Stroke],
+        shapes: [CanvasShape] = [],
         gapTolerance: CGFloat = 2.5
     ) -> [[CGPoint]]? {
         let barrierStrokes = strokes.filter { !$0.isEraser && $0.points.count >= 2 }
-        guard !barrierStrokes.isEmpty else { return nil }
+        guard !barrierStrokes.isEmpty || !shapes.isEmpty else { return nil }
 
-        // Gather strokes in a local neighborhood around tapPoint, expanding iteratively
-        // to include connected strokes up to a reasonable canvas span.
+        // Gather strokes & shapes in a local neighborhood around tapPoint, expanding iteratively
+        // to include connected elements up to a reasonable canvas span.
         let initialRadius: CGFloat = 600
         var searchRect = CGRect(
             x: tapPoint.x - initialRadius,
@@ -114,6 +115,7 @@ nonisolated enum FloodFillEngine {
         )
 
         var localStrokes: [Stroke] = []
+        var localShapes: [CanvasShape] = []
         var unionBounds = CGRect.null
         for s in barrierStrokes {
             let b = GeometryEngine.strokeBounds(s)
@@ -122,17 +124,32 @@ nonisolated enum FloodFillEngine {
                 unionBounds = unionBounds.isNull ? b : unionBounds.union(b)
             }
         }
-        guard !localStrokes.isEmpty, !unionBounds.isNull else { return nil }
+        for sh in shapes {
+            let b = sh.rotatedBoundingBox()
+            if b.intersects(searchRect) {
+                localShapes.append(sh)
+                unionBounds = unionBounds.isNull ? b : unionBounds.union(b)
+            }
+        }
+        guard (!localStrokes.isEmpty || !localShapes.isEmpty), !unionBounds.isNull else { return nil }
 
-        // If any included stroke extended beyond searchRect, pull in strokes touching unionBounds once more.
+        // If any included element extended beyond searchRect, pull in neighbors once more.
         if !searchRect.contains(unionBounds) {
             searchRect = unionBounds.insetBy(dx: -20, dy: -20)
             localStrokes.removeAll(keepingCapacity: true)
+            localShapes.removeAll(keepingCapacity: true)
             unionBounds = .null
             for s in barrierStrokes {
                 let b = GeometryEngine.strokeBounds(s)
                 if b.intersects(searchRect) {
                     localStrokes.append(s)
+                    unionBounds = unionBounds.isNull ? b : unionBounds.union(b)
+                }
+            }
+            for sh in shapes {
+                let b = sh.rotatedBoundingBox()
+                if b.intersects(searchRect) {
+                    localShapes.append(sh)
                     unionBounds = unionBounds.isNull ? b : unionBounds.union(b)
                 }
             }
@@ -177,6 +194,12 @@ nonisolated enum FloodFillEngine {
             for s in localStrokes {
                 guard let path = GeometryEngine.makeCGPath(for: s) else { continue }
                 ctx.setLineWidth(max(s.lineWidth + extraWidth, 1.5 / gridScale))
+                ctx.addPath(path)
+                ctx.strokePath()
+            }
+            for sh in localShapes {
+                let path = sh.makeCGPath()
+                ctx.setLineWidth(max(sh.lineWidth + extraWidth, 1.5 / gridScale))
                 ctx.addPath(path)
                 ctx.strokePath()
             }

@@ -185,6 +185,423 @@ nonisolated struct CodablePoint: Codable, Equatable, Sendable {
     var cgPoint: CGPoint { CGPoint(x: x, y: y) }
 }
 
+nonisolated enum ShapeKind: String, CaseIterable, Codable, Identifiable, Sendable {
+    case rectangle
+    case ellipse
+    case triangle
+    case diamond
+    case line
+    case arrow
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .rectangle: return "Rectangle"
+        case .ellipse: return "Ellipse"
+        case .triangle: return "Triangle"
+        case .diamond: return "Diamond"
+        case .line: return "Line"
+        case .arrow: return "Arrow"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .rectangle: return "rectangle"
+        case .ellipse: return "circle"
+        case .triangle: return "triangle"
+        case .diamond: return "diamond"
+        case .line: return "line.diagonal"
+        case .arrow: return "arrow.up.right"
+        }
+    }
+
+    var isLineLike: Bool { self == .line || self == .arrow }
+}
+
+nonisolated struct CanvasShape: Identifiable, Codable, Equatable, Sendable {
+    var id = UUID()
+    var kind: ShapeKind
+    var start: CodablePoint
+    var end: CodablePoint
+    var color: CodableColor
+    var presetIndex: Int
+    var lineWidth: CGFloat
+    var isFilled: Bool
+    var rotation: Double // radians, clockwise in canvas (y-down) coordinates (for 2D shapes)
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, start, end, color, presetIndex, lineWidth, isFilled, rotation
+    }
+
+    init(
+        id: UUID = UUID(),
+        kind: ShapeKind,
+        start: CGPoint,
+        end: CGPoint,
+        color: Color,
+        presetIndex: Int = -1,
+        lineWidth: CGFloat = 2.5,
+        isFilled: Bool = false,
+        rotation: Double = 0
+    ) {
+        self.id = id
+        self.kind = kind
+        self.start = CodablePoint(start)
+        self.end = CodablePoint(end)
+        self.color = CodableColor(color)
+        self.presetIndex = presetIndex
+        self.lineWidth = lineWidth
+        self.isFilled = isFilled
+        self.rotation = rotation
+    }
+
+    init(
+        id: UUID = UUID(),
+        kind: ShapeKind,
+        start: CGPoint,
+        end: CGPoint,
+        codableColor: CodableColor,
+        presetIndex: Int = -1,
+        lineWidth: CGFloat = 2.5,
+        isFilled: Bool = false,
+        rotation: Double = 0
+    ) {
+        self.id = id
+        self.kind = kind
+        self.start = CodablePoint(start)
+        self.end = CodablePoint(end)
+        self.color = codableColor
+        self.presetIndex = presetIndex
+        self.lineWidth = lineWidth
+        self.isFilled = isFilled
+        self.rotation = rotation
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        kind = try c.decode(ShapeKind.self, forKey: .kind)
+        start = try c.decode(CodablePoint.self, forKey: .start)
+        end = try c.decode(CodablePoint.self, forKey: .end)
+        color = try c.decode(CodableColor.self, forKey: .color)
+        presetIndex = try c.decodeIfPresent(Int.self, forKey: .presetIndex) ?? -1
+        lineWidth = try c.decodeIfPresent(CGFloat.self, forKey: .lineWidth) ?? 2.5
+        isFilled = try c.decodeIfPresent(Bool.self, forKey: .isFilled) ?? false
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+    }
+
+    var uiColor: Color { color.color }
+    var cgStart: CGPoint { start.cgPoint }
+    var cgEnd: CGPoint { end.cgPoint }
+    var cgRotation: CGFloat { CGFloat(rotation) }
+
+    var rect: CGRect {
+        let minX = min(start.x, end.x)
+        let minY = min(start.y, end.y)
+        return CGRect(
+            x: minX,
+            y: minY,
+            width: abs(end.x - start.x),
+            height: abs(end.y - start.y)
+        )
+    }
+
+    var cgCenter: CGPoint {
+        CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
+    }
+
+    /// Four corners [TL, TR, BR, BL] for 2D shapes, or [start, end] for line/arrow.
+    func rotatedCorners() -> [CGPoint] {
+        if kind.isLineLike {
+            return [cgStart, cgEnd]
+        }
+        let r = rect
+        let raw = [
+            CGPoint(x: r.minX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.maxY),
+            CGPoint(x: r.minX, y: r.maxY),
+        ]
+        guard rotation != 0 else { return raw }
+        let center = cgCenter
+        return raw.map { GeometryEngine.rotatePoint($0, around: center, by: cgRotation) }
+    }
+
+    func rotatedBoundingBox() -> CGRect {
+        let pad = lineWidth / 2 + (kind == .arrow ? max(10, lineWidth * 3.5) : 2)
+        if kind.isLineLike {
+            let minX = min(cgStart.x, cgEnd.x) - pad
+            let maxX = max(cgStart.x, cgEnd.x) + pad
+            let minY = min(cgStart.y, cgEnd.y) - pad
+            let maxY = max(cgStart.y, cgEnd.y) + pad
+            return CGRect(x: minX, y: minY, width: max(1, maxX - minX), height: max(1, maxY - minY))
+        }
+        let corners = rotatedCorners()
+        guard let first = corners.first else { return rect }
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        for c in corners.dropFirst() {
+            minX = min(minX, c.x); maxX = max(maxX, c.x)
+            minY = min(minY, c.y); maxY = max(maxY, c.y)
+        }
+        return CGRect(x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2)
+    }
+
+    /// Builds a `CGPath` in canvas coordinates (including rotation for 2D shapes).
+    func makeCGPath() -> CGPath {
+        let path = CGMutablePath()
+        if kind.isLineLike {
+            path.move(to: cgStart)
+            path.addLine(to: cgEnd)
+            if kind == .arrow {
+                let dx = cgEnd.x - cgStart.x
+                let dy = cgEnd.y - cgStart.y
+                let len = hypot(dx, dy)
+                if len > 1 {
+                    let headLen = min(max(12, lineWidth * 4.5), len * 0.45)
+                    let angle = atan2(dy, dx)
+                    let spread: CGFloat = .pi / 6
+                    let left = CGPoint(x: cgEnd.x - headLen * cos(angle - spread), y: cgEnd.y - headLen * sin(angle - spread))
+                    let right = CGPoint(x: cgEnd.x - headLen * cos(angle + spread), y: cgEnd.y - headLen * sin(angle + spread))
+                    path.move(to: left)
+                    path.addLine(to: cgEnd)
+                    path.addLine(to: right)
+                }
+            }
+            return path
+        }
+
+        let r = rect
+        let local = CGMutablePath()
+        switch kind {
+        case .rectangle:
+            local.addRect(r)
+        case .ellipse:
+            local.addEllipse(in: r)
+        case .triangle:
+            local.move(to: CGPoint(x: r.midX, y: r.minY))
+            local.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
+            local.addLine(to: CGPoint(x: r.minX, y: r.maxY))
+            local.closeSubpath()
+        case .diamond:
+            local.move(to: CGPoint(x: r.midX, y: r.minY))
+            local.addLine(to: CGPoint(x: r.maxX, y: r.midY))
+            local.addLine(to: CGPoint(x: r.midX, y: r.maxY))
+            local.addLine(to: CGPoint(x: r.minX, y: r.midY))
+            local.closeSubpath()
+        case .line, .arrow:
+            break
+        }
+
+        if rotation != 0 {
+            let c = cgCenter
+            var t = CGAffineTransform(translationX: c.x, y: c.y)
+                .rotated(by: cgRotation)
+                .translatedBy(x: -c.x, y: -c.y)
+            return local.copy(using: &t) ?? local
+        }
+        return local
+    }
+
+    func containsPoint(_ point: CGPoint, tolerance: CGFloat = 10) -> Bool {
+        let tol = max(tolerance, lineWidth / 2 + 6)
+        if kind.isLineLike {
+            return GeometryEngine.pointSegmentDistanceSquared(point, cgStart, cgEnd) <= tol * tol
+        }
+        let localPt = rotation != 0 ? GeometryEngine.rotatePoint(point, around: cgCenter, by: -cgRotation) : point
+        let r = rect
+        guard r.width >= 1, r.height >= 1 else { return false }
+
+        switch kind {
+        case .rectangle:
+            let outer = r.insetBy(dx: -tol, dy: -tol)
+            guard outer.contains(localPt) else { return false }
+            if isFilled { return true }
+            let inner = r.insetBy(dx: tol, dy: tol)
+            return inner.isEmpty || !inner.contains(localPt)
+        case .ellipse:
+            let rx = max(r.width / 2, 1)
+            let ry = max(r.height / 2, 1)
+            let nx = (localPt.x - r.midX) / (rx + tol)
+            let ny = (localPt.y - r.midY) / (ry + tol)
+            if nx * nx + ny * ny > 1 { return false }
+            if isFilled { return true }
+            let irx = max(rx - tol, 0)
+            let iry = max(ry - tol, 0)
+            if irx <= 1 || iry <= 1 { return true }
+            let inx = (localPt.x - r.midX) / irx
+            let iny = (localPt.y - r.midY) / iry
+            return inx * inx + iny * iny >= 1
+        case .triangle:
+            let poly = [
+                CGPoint(x: r.midX, y: r.minY),
+                CGPoint(x: r.maxX, y: r.maxY),
+                CGPoint(x: r.minX, y: r.maxY),
+            ]
+            if isFilled && GeometryEngine.pointInPolygon(localPt, poly) { return true }
+            return Self.pointNearPolygonEdges(localPt, poly, tolSq: tol * tol)
+        case .diamond:
+            let poly = [
+                CGPoint(x: r.midX, y: r.minY),
+                CGPoint(x: r.maxX, y: r.midY),
+                CGPoint(x: r.midX, y: r.maxY),
+                CGPoint(x: r.minX, y: r.midY),
+            ]
+            if isFilled && GeometryEngine.pointInPolygon(localPt, poly) { return true }
+            return Self.pointNearPolygonEdges(localPt, poly, tolSq: tol * tol)
+        case .line, .arrow:
+            return false
+        }
+    }
+
+    private static func pointNearPolygonEdges(_ p: CGPoint, _ poly: [CGPoint], tolSq: CGFloat) -> Bool {
+        for i in 0..<poly.count {
+            let a = poly[i]
+            let b = poly[(i + 1) % poly.count]
+            if GeometryEngine.pointSegmentDistanceSquared(p, a, b) <= tolSq { return true }
+        }
+        return false
+    }
+}
+
+nonisolated struct TextLabel: Identifiable, Codable, Equatable, Sendable {
+    var id = UUID()
+    var text: String
+    var position: CodablePoint
+    var fontSize: CGFloat
+    var color: CodableColor
+    var presetIndex: Int
+    var isBold: Bool
+    var rotation: Double // radians, clockwise in canvas (y-down) coordinates
+
+    enum CodingKeys: String, CodingKey {
+        case id, text, position, fontSize, color, presetIndex, isBold, rotation
+    }
+
+    init(
+        id: UUID = UUID(),
+        text: String,
+        position: CGPoint,
+        fontSize: CGFloat = 22,
+        color: Color,
+        presetIndex: Int = -1,
+        isBold: Bool = false,
+        rotation: Double = 0
+    ) {
+        self.id = id
+        self.text = text
+        self.position = CodablePoint(position)
+        self.fontSize = fontSize
+        self.color = CodableColor(color)
+        self.presetIndex = presetIndex
+        self.isBold = isBold
+        self.rotation = rotation
+    }
+
+    init(
+        id: UUID = UUID(),
+        text: String,
+        position: CGPoint,
+        fontSize: CGFloat = 22,
+        codableColor: CodableColor,
+        presetIndex: Int = -1,
+        isBold: Bool = false,
+        rotation: Double = 0
+    ) {
+        self.id = id
+        self.text = text
+        self.position = CodablePoint(position)
+        self.fontSize = fontSize
+        self.color = codableColor
+        self.presetIndex = presetIndex
+        self.isBold = isBold
+        self.rotation = rotation
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        text = try c.decode(String.self, forKey: .text)
+        position = try c.decode(CodablePoint.self, forKey: .position)
+        fontSize = try c.decodeIfPresent(CGFloat.self, forKey: .fontSize) ?? 22
+        color = try c.decode(CodableColor.self, forKey: .color)
+        presetIndex = try c.decodeIfPresent(Int.self, forKey: .presetIndex) ?? -1
+        isBold = try c.decodeIfPresent(Bool.self, forKey: .isBold) ?? false
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+    }
+
+    var uiColor: Color { color.color }
+    var cgPosition: CGPoint { position.cgPoint }
+    var cgRotation: CGFloat { CGFloat(rotation) }
+
+    /// Measures the unrotated multi-line bounding size in canvas points.
+    func measuredSize() -> CGSize {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lineHeight = fontSize * 1.28
+        #if os(macOS)
+        let font = NSFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        var maxW: CGFloat = 0
+        for line in lines {
+            let str = line.isEmpty ? " " : String(line)
+            let w = (str as NSString).size(withAttributes: attrs).width
+            if w > maxW { maxW = w }
+        }
+        #else
+        let font = UIFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        var maxW: CGFloat = 0
+        for line in lines {
+            let str = line.isEmpty ? " " : String(line)
+            let w = (str as NSString).size(withAttributes: attrs).width
+            if w > maxW { maxW = w }
+        }
+        #endif
+        let w = max(24, ceil(maxW) + 8)
+        let h = max(lineHeight, CGFloat(max(lines.count, 1)) * lineHeight + 4)
+        return CGSize(width: w, height: h)
+    }
+
+    var cgCenter: CGPoint {
+        let s = measuredSize()
+        return CGPoint(x: cgPosition.x + s.width / 2, y: cgPosition.y + s.height / 2)
+    }
+
+    func rotatedCorners() -> [CGPoint] {
+        let s = measuredSize()
+        let r = CGRect(origin: cgPosition, size: s)
+        let raw = [
+            CGPoint(x: r.minX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.minY),
+            CGPoint(x: r.maxX, y: r.maxY),
+            CGPoint(x: r.minX, y: r.maxY),
+        ]
+        guard rotation != 0 else { return raw }
+        let c = cgCenter
+        return raw.map { GeometryEngine.rotatePoint($0, around: c, by: cgRotation) }
+    }
+
+    func rotatedBoundingBox() -> CGRect {
+        let corners = rotatedCorners()
+        guard let first = corners.first else { return CGRect(origin: cgPosition, size: measuredSize()) }
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        for c in corners.dropFirst() {
+            minX = min(minX, c.x); maxX = max(maxX, c.x)
+            minY = min(minY, c.y); maxY = max(maxY, c.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    func containsPoint(_ point: CGPoint, padding: CGFloat = 6) -> Bool {
+        let s = measuredSize()
+        let c = cgCenter
+        let localPt = rotation != 0 ? GeometryEngine.rotatePoint(point, around: c, by: -cgRotation) : point
+        return abs(localPt.x - c.x) <= s.width / 2 + padding &&
+               abs(localPt.y - c.y) <= s.height / 2 + padding
+    }
+}
+
 enum Tool: String, CaseIterable {
     case pen, sharpie, fill, eraser, select
 }

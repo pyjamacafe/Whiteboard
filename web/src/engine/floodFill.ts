@@ -1,10 +1,15 @@
-import type { Point, Rect, Stroke } from '../types/model';
+import type { CanvasShape, Point, Rect, Stroke } from '../types/model';
 import {
+  isLineLikeShape,
   pointSegmentDistanceSquared,
   rectContainsPoint,
   rectInset,
   rectsIntersect,
   rectUnion,
+  rotatePoint,
+  shapeCenter,
+  shapeRect,
+  shapeRotatedBoundingBox,
   simplifyRDP,
   smoothCatmullRom,
   strokeBounds,
@@ -23,10 +28,11 @@ const MAX_GRID_DIMENSION = 1024;
 export function computeFillContours(
   tapPoint: Point,
   strokes: Stroke[],
-  gapTolerance = 2.5
+  gapTolerance = 2.5,
+  shapes: CanvasShape[] = []
 ): Point[][] | null {
   const barrierStrokes = strokes.filter((s) => !s.isEraser && s.points.length >= 2);
-  if (barrierStrokes.length === 0) return null;
+  if (barrierStrokes.length === 0 && shapes.length === 0) return null;
 
   const initialRadius = 600;
   let searchRect: Rect = {
@@ -37,6 +43,7 @@ export function computeFillContours(
   };
 
   let localStrokes: Stroke[] = [];
+  let localShapes: CanvasShape[] = [];
   let unionBounds: Rect | null = null;
 
   for (const s of barrierStrokes) {
@@ -46,9 +53,16 @@ export function computeFillContours(
       unionBounds = unionBounds ? rectUnion(unionBounds, b) : b;
     }
   }
-  if (localStrokes.length === 0 || !unionBounds) return null;
+  for (const sh of shapes) {
+    const b = shapeRotatedBoundingBox(sh);
+    if (rectsIntersect(b, searchRect)) {
+      localShapes.push(sh);
+      unionBounds = unionBounds ? rectUnion(unionBounds, b) : b;
+    }
+  }
+  if ((localStrokes.length === 0 && localShapes.length === 0) || !unionBounds) return null;
 
-  // Pull in strokes touching unionBounds once more if any extended outside initial searchRect
+  // Pull in neighbors once more if any extended outside initial searchRect
   if (
     unionBounds.x < searchRect.x ||
     unionBounds.y < searchRect.y ||
@@ -57,11 +71,19 @@ export function computeFillContours(
   ) {
     searchRect = rectInset(unionBounds, -20, -20);
     localStrokes = [];
+    localShapes = [];
     unionBounds = null;
     for (const s of barrierStrokes) {
       const b = strokeBounds(s);
       if (b && rectsIntersect(b, searchRect)) {
         localStrokes.push(s);
+        unionBounds = unionBounds ? rectUnion(unionBounds, b) : b;
+      }
+    }
+    for (const sh of shapes) {
+      const b = shapeRotatedBoundingBox(sh);
+      if (rectsIntersect(b, searchRect)) {
+        localShapes.push(sh);
         unionBounds = unionBounds ? rectUnion(unionBounds, b) : b;
       }
     }
@@ -79,8 +101,8 @@ export function computeFillContours(
   const h = Math.ceil(region.height * gridScale);
   if (w < 4 || h < 4) return null;
 
-  // 1. Rasterize barrier strokes into a 1-byte-per-pixel mask
-  const barrier = rasterizeBarriers(localStrokes, region, gridScale, w, h, gapTolerance);
+  // 1. Rasterize barrier strokes and shapes into a 1-byte-per-pixel mask
+  const barrier = rasterizeBarriers(localStrokes, localShapes, region, gridScale, w, h, gapTolerance);
   if (!barrier) return null;
 
   // 2. Locate open seed pixel (nudging slightly if tap landed directly on a stroke)
@@ -207,8 +229,54 @@ export function computeFillContours(
   return contours.length === 0 ? null : contours;
 }
 
+function shapeBarrierPolylines(shape: CanvasShape): Point[][] {
+  if (isLineLikeShape(shape.kind)) {
+    return [[shape.start, shape.end]];
+  }
+  const r = shapeRect(shape);
+  const midX = r.x + r.width / 2;
+  const midY = r.y + r.height / 2;
+  let pts: Point[] = [];
+  if (shape.kind === 'rectangle') {
+    pts = [
+      { x: r.x, y: r.y },
+      { x: r.x + r.width, y: r.y },
+      { x: r.x + r.width, y: r.y + r.height },
+      { x: r.x, y: r.y + r.height },
+      { x: r.x, y: r.y },
+    ];
+  } else if (shape.kind === 'triangle') {
+    pts = [
+      { x: midX, y: r.y },
+      { x: r.x + r.width, y: r.y + r.height },
+      { x: r.x, y: r.y + r.height },
+      { x: midX, y: r.y },
+    ];
+  } else if (shape.kind === 'diamond') {
+    pts = [
+      { x: midX, y: r.y },
+      { x: r.x + r.width, y: midY },
+      { x: midX, y: r.y + r.height },
+      { x: r.x, y: midY },
+      { x: midX, y: r.y },
+    ];
+  } else {
+    const segs = 48;
+    for (let i = 0; i <= segs; i++) {
+      const a = (i / segs) * Math.PI * 2;
+      pts.push({ x: midX + Math.cos(a) * (r.width / 2), y: midY + Math.sin(a) * (r.height / 2) });
+    }
+  }
+  if (shape.rotation) {
+    const c = shapeCenter(shape);
+    pts = pts.map((p) => rotatePoint(p, c, shape.rotation));
+  }
+  return [pts];
+}
+
 function rasterizeBarriers(
   strokes: Stroke[],
+  shapes: CanvasShape[],
   region: Rect,
   gridScale: number,
   w: number,
@@ -238,6 +306,16 @@ function rasterizeBarriers(
         traceStrokeToContext(ctx, s);
         ctx.stroke();
       }
+      for (const sh of shapes) {
+        ctx.lineWidth = Math.max(sh.lineWidth + extraWidth, 1.5 / gridScale);
+        for (const poly of shapeBarrierPolylines(sh)) {
+          if (poly.length < 2) continue;
+          ctx.beginPath();
+          ctx.moveTo(poly[0].x, poly[0].y);
+          for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+          ctx.stroke();
+        }
+      }
       ctx.restore();
 
       const img = ctx.getImageData(0, 0, w, h).data;
@@ -251,12 +329,11 @@ function rasterizeBarriers(
 
   // Pure software rasterizer fallback (used in Vitest / headless Node environments)
   const out = new Uint8Array(w * h);
-  for (const s of strokes) {
-    const lineW = Math.max(s.lineWidth + extraWidth, 1.5 / gridScale);
+  const rasterPolyline = (pts: Point[], baseWidth: number) => {
+    const lineW = Math.max(baseWidth + extraWidth, 1.5 / gridScale);
     const radiusPx = Math.max(0.75, (lineW * gridScale) / 2);
     const rCeil = Math.ceil(radiusPx);
     const rSq = radiusPx * radiusPx;
-    const pts = s.points;
     for (let i = 0; i < pts.length - 1; i++) {
       const ax = (pts[i].x - region.x) * gridScale;
       const ay = (pts[i].y - region.y) * gridScale;
@@ -278,6 +355,11 @@ function rasterizeBarriers(
         }
       }
     }
+  };
+
+  for (const s of strokes) rasterPolyline(s.points, s.lineWidth);
+  for (const sh of shapes) {
+    for (const poly of shapeBarrierPolylines(sh)) rasterPolyline(poly, sh.lineWidth);
   }
   return out;
 }

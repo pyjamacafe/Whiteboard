@@ -1,11 +1,14 @@
 import type {
   CanvasScene,
+  CanvasShape,
   CodableColor,
   FillShape,
   PlacedImage,
   Point,
   SaveData,
+  ShapeKind,
   Stroke,
+  TextLabel,
 } from '../types/model';
 import { generateId } from '../types/model';
 
@@ -82,6 +85,27 @@ export function encodeWBJson(data: SaveData): string {
       centerY: sc.centerY,
       scale: sc.scale,
     })),
+    shapes: (data.shapes ?? []).map((sh) => ({
+      id: sh.id,
+      kind: sh.kind,
+      start: { x: sh.start.x, y: sh.start.y },
+      end: { x: sh.end.x, y: sh.end.y },
+      color: sh.color,
+      presetIndex: sh.presetIndex,
+      lineWidth: sh.lineWidth,
+      isFilled: sh.isFilled,
+      rotation: sh.rotation || 0,
+    })),
+    textLabels: (data.textLabels ?? []).map((t) => ({
+      id: t.id,
+      text: t.text,
+      position: { x: t.position.x, y: t.position.y },
+      fontSize: t.fontSize,
+      color: t.color,
+      presetIndex: t.presetIndex,
+      isBold: t.isBold,
+      rotation: t.rotation || 0,
+    })),
   };
   return JSON.stringify(payload);
 }
@@ -151,7 +175,49 @@ export function decodeWBJson(jsonText: string): SaveData {
     };
   });
 
-  return { strokes, placedImages, fills, scenes };
+  const validShapeKinds = new Set<ShapeKind>([
+    'rectangle',
+    'ellipse',
+    'triangle',
+    'diamond',
+    'line',
+    'arrow',
+  ]);
+  const rawShapes = Array.isArray(raw.shapes) ? raw.shapes : [];
+  const shapes: CanvasShape[] = rawShapes.map((item) => {
+    const o = item as Record<string, unknown>;
+    const rawKind = typeof o.kind === 'string' && validShapeKinds.has(o.kind as ShapeKind)
+      ? (o.kind as ShapeKind)
+      : 'rectangle';
+    return {
+      id: typeof o.id === 'string' ? o.id : generateId(),
+      kind: rawKind,
+      start: decodePoint(o.start),
+      end: decodePoint(o.end),
+      color: decodeColor(o.color),
+      presetIndex: typeof o.presetIndex === 'number' ? o.presetIndex : -1,
+      lineWidth: typeof o.lineWidth === 'number' ? o.lineWidth : 2.5,
+      isFilled: Boolean(o.isFilled),
+      rotation: typeof o.rotation === 'number' && Number.isFinite(o.rotation) ? o.rotation : 0,
+    };
+  });
+
+  const rawTextLabels = Array.isArray(raw.textLabels) ? raw.textLabels : [];
+  const textLabels: TextLabel[] = rawTextLabels.map((item) => {
+    const o = item as Record<string, unknown>;
+    return {
+      id: typeof o.id === 'string' ? o.id : generateId(),
+      text: typeof o.text === 'string' ? o.text : '',
+      position: decodePoint(o.position),
+      fontSize: typeof o.fontSize === 'number' && o.fontSize > 0 ? o.fontSize : 22,
+      color: decodeColor(o.color),
+      presetIndex: typeof o.presetIndex === 'number' ? o.presetIndex : -1,
+      isBold: Boolean(o.isBold),
+      rotation: typeof o.rotation === 'number' && Number.isFinite(o.rotation) ? o.rotation : 0,
+    };
+  });
+
+  return { strokes, placedImages, fills, scenes, shapes, textLabels };
 }
 
 export function stripDataUrlPrefix(b64: string): string {

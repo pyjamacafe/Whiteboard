@@ -33,16 +33,27 @@ nonisolated struct SaveData: Codable, Sendable {
     let placedImages: [PlacedImage]
     let fills: [FillShape]
     let scenes: [CanvasScene]
+    let shapes: [CanvasShape]
+    let textLabels: [TextLabel]
 
     enum CodingKeys: String, CodingKey {
-        case strokes, placedImages, fills, scenes
+        case strokes, placedImages, fills, scenes, shapes, textLabels
     }
 
-    init(strokes: [Stroke], placedImages: [PlacedImage], fills: [FillShape] = [], scenes: [CanvasScene] = []) {
+    init(
+        strokes: [Stroke],
+        placedImages: [PlacedImage],
+        fills: [FillShape] = [],
+        scenes: [CanvasScene] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = []
+    ) {
         self.strokes = strokes
         self.placedImages = placedImages
         self.fills = fills
         self.scenes = scenes
+        self.shapes = shapes
+        self.textLabels = textLabels
     }
 
     init(from decoder: Decoder) throws {
@@ -51,6 +62,8 @@ nonisolated struct SaveData: Codable, Sendable {
         placedImages = try c.decodeIfPresent([PlacedImage].self, forKey: .placedImages) ?? []
         fills = try c.decodeIfPresent([FillShape].self, forKey: .fills) ?? []
         scenes = try c.decodeIfPresent([CanvasScene].self, forKey: .scenes) ?? []
+        shapes = try c.decodeIfPresent([CanvasShape].self, forKey: .shapes) ?? []
+        textLabels = try c.decodeIfPresent([TextLabel].self, forKey: .textLabels) ?? []
     }
 }
 
@@ -88,17 +101,29 @@ private nonisolated struct BinaryBoardData: Codable, Sendable {
     let imageRefs: [StoredImageRef]
     let fills: [FillShape]
     let scenes: [CanvasScene]
+    let shapes: [CanvasShape]
+    let textLabels: [TextLabel]
 
     enum CodingKeys: String, CodingKey {
-        case version, strokes, imageRefs, fills, scenes
+        case version, strokes, imageRefs, fills, scenes, shapes, textLabels
     }
 
-    init(version: Int, strokes: [Stroke], imageRefs: [StoredImageRef], fills: [FillShape] = [], scenes: [CanvasScene] = []) {
+    init(
+        version: Int,
+        strokes: [Stroke],
+        imageRefs: [StoredImageRef],
+        fills: [FillShape] = [],
+        scenes: [CanvasScene] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = []
+    ) {
         self.version = version
         self.strokes = strokes
         self.imageRefs = imageRefs
         self.fills = fills
         self.scenes = scenes
+        self.shapes = shapes
+        self.textLabels = textLabels
     }
 
     init(from decoder: Decoder) throws {
@@ -108,6 +133,8 @@ private nonisolated struct BinaryBoardData: Codable, Sendable {
         imageRefs = try c.decode([StoredImageRef].self, forKey: .imageRefs)
         fills = try c.decodeIfPresent([FillShape].self, forKey: .fills) ?? []
         scenes = try c.decodeIfPresent([CanvasScene].self, forKey: .scenes) ?? []
+        shapes = try c.decodeIfPresent([CanvasShape].self, forKey: .shapes) ?? []
+        textLabels = try c.decodeIfPresent([TextLabel].self, forKey: .textLabels) ?? []
     }
 }
 
@@ -312,7 +339,14 @@ nonisolated final class BoardStore: @unchecked Sendable {
                     ))
                 }
             }
-            return SaveData(strokes: binary.strokes, placedImages: images, fills: binary.fills, scenes: binary.scenes)
+            return SaveData(
+                strokes: binary.strokes,
+                placedImages: images,
+                fills: binary.fills,
+                scenes: binary.scenes,
+                shapes: binary.shapes,
+                textLabels: binary.textLabels
+            )
         }
         return try JSONDecoder().decode(SaveData.self, from: data)
     }
@@ -330,7 +364,15 @@ nonisolated final class BoardStore: @unchecked Sendable {
         let refs = saveData.placedImages.map {
             StoredImageRef(id: $0.id, position: $0.position, size: $0.size, rotation: $0.rotation)
         }
-        let payload = BinaryBoardData(version: 4, strokes: saveData.strokes, imageRefs: refs, fills: saveData.fills, scenes: saveData.scenes)
+        let payload = BinaryBoardData(
+            version: 5,
+            strokes: saveData.strokes,
+            imageRefs: refs,
+            fills: saveData.fills,
+            scenes: saveData.scenes,
+            shapes: saveData.shapes,
+            textLabels: saveData.textLabels
+        )
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         return try encoder.encode(payload)

@@ -54,11 +54,40 @@ export interface CanvasScene {
   scale: number;
 }
 
+export type ShapeKind = 'rectangle' | 'ellipse' | 'triangle' | 'diamond' | 'line' | 'arrow';
+
+export interface CanvasShape {
+  id: string;
+  kind: ShapeKind;
+  start: Point;
+  end: Point;
+  color: CodableColor;
+  presetIndex: number;
+  lineWidth: number;
+  isFilled: boolean;
+  /** Radians, clockwise in canvas (y-down) coordinates (for 2D shapes) */
+  rotation: number;
+}
+
+export interface TextLabel {
+  id: string;
+  text: string;
+  position: Point;
+  fontSize: number;
+  color: CodableColor;
+  presetIndex: number;
+  isBold: boolean;
+  /** Radians, clockwise in canvas (y-down) coordinates */
+  rotation: number;
+}
+
 export interface SaveData {
   strokes: Stroke[];
   placedImages: PlacedImage[];
   fills: FillShape[];
   scenes: CanvasScene[];
+  shapes?: CanvasShape[];
+  textLabels?: TextLabel[];
 }
 
 export interface BoardMeta {
@@ -196,6 +225,27 @@ export interface EraserSettings {
   eraseTarget: EraseTarget;
 }
 
+export interface ShapeSettings {
+  kind: ShapeKind;
+  lightColor: CodableColor;
+  darkColor: CodableColor;
+  lineWidth: number;
+  widthOptions: number[];
+  isFilled: boolean;
+  lightPresets: CodableColor[];
+  darkPresets: CodableColor[];
+}
+
+export interface TextSettings {
+  lightColor: CodableColor;
+  darkColor: CodableColor;
+  fontSize: number;
+  sizeOptions: number[];
+  isBold: boolean;
+  lightPresets: CodableColor[];
+  darkPresets: CodableColor[];
+}
+
 export const DEFAULT_LIGHT_PRESETS: CodableColor[] = [
   { r: 0.05, g: 0.05, b: 0.05, a: 1 },
   { r: 0.95, g: 0.0, b: 0.1, a: 1 },
@@ -289,6 +339,31 @@ export function defaultEraserSettings(): EraserSettings {
     mode: 'full',
     size: 10,
     eraseTarget: 'all',
+  };
+}
+
+export function defaultShapeSettings(): ShapeSettings {
+  return {
+    kind: 'rectangle',
+    lightColor: { ...DEFAULT_LIGHT_PRESETS[0] },
+    darkColor: { ...DEFAULT_DARK_PRESETS[0] },
+    lineWidth: 2.5,
+    widthOptions: [2, 2.5, 3, 3.5, 4],
+    isFilled: false,
+    lightPresets: DEFAULT_LIGHT_PRESETS.map((c) => ({ ...c })),
+    darkPresets: DEFAULT_DARK_PRESETS.map((c) => ({ ...c })),
+  };
+}
+
+export function defaultTextSettings(): TextSettings {
+  return {
+    lightColor: { ...DEFAULT_LIGHT_PRESETS[0] },
+    darkColor: { ...DEFAULT_DARK_PRESETS[0] },
+    fontSize: 22,
+    sizeOptions: [16, 22, 30, 42],
+    isBold: false,
+    lightPresets: DEFAULT_LIGHT_PRESETS.map((c) => ({ ...c })),
+    darkPresets: DEFAULT_DARK_PRESETS.map((c) => ({ ...c })),
   };
 }
 

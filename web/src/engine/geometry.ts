@@ -1,11 +1,14 @@
 import type {
+  CanvasShape,
   EraserMode,
   EraseTarget,
   FillShape,
   PlacedImage,
   Point,
   Rect,
+  ShapeKind,
   Stroke,
+  TextLabel,
 } from '../types/model';
 
 export function rectsIntersect(a: Rect, b: Rect): boolean {
@@ -453,11 +456,269 @@ export function strokeBounds(stroke: Stroke): Rect | null {
   };
 }
 
+export function isLineLikeShape(kind: ShapeKind): boolean {
+  return kind === 'line' || kind === 'arrow';
+}
+
+export function shapeRect(shape: CanvasShape): Rect {
+  const minX = Math.min(shape.start.x, shape.end.x);
+  const minY = Math.min(shape.start.y, shape.end.y);
+  return {
+    x: minX,
+    y: minY,
+    width: Math.abs(shape.end.x - shape.start.x),
+    height: Math.abs(shape.end.y - shape.start.y),
+  };
+}
+
+export function shapeCenter(shape: CanvasShape): Point {
+  return {
+    x: (shape.start.x + shape.end.x) / 2,
+    y: (shape.start.y + shape.end.y) / 2,
+  };
+}
+
+export function shapeRotatedCorners(shape: CanvasShape): Point[] {
+  if (isLineLikeShape(shape.kind)) {
+    return [{ ...shape.start }, { ...shape.end }];
+  }
+  const r = shapeRect(shape);
+  const raw: Point[] = [
+    { x: r.x, y: r.y },
+    { x: r.x + r.width, y: r.y },
+    { x: r.x + r.width, y: r.y + r.height },
+    { x: r.x, y: r.y + r.height },
+  ];
+  if (!shape.rotation) return raw;
+  const c = shapeCenter(shape);
+  return raw.map((p) => rotatePoint(p, c, shape.rotation));
+}
+
+export function shapeRotatedBoundingBox(shape: CanvasShape): Rect {
+  const pad = shape.lineWidth / 2 + (shape.kind === 'arrow' ? Math.max(10, shape.lineWidth * 3.5) : 2);
+  if (isLineLikeShape(shape.kind)) {
+    const minX = Math.min(shape.start.x, shape.end.x) - pad;
+    const maxX = Math.max(shape.start.x, shape.end.x) + pad;
+    const minY = Math.min(shape.start.y, shape.end.y) - pad;
+    const maxY = Math.max(shape.start.y, shape.end.y) + pad;
+    return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+  }
+  const corners = shapeRotatedCorners(shape);
+  let minX = corners[0].x;
+  let maxX = corners[0].x;
+  let minY = corners[0].y;
+  let maxY = corners[0].y;
+  for (let i = 1; i < corners.length; i++) {
+    const c = corners[i];
+    if (c.x < minX) minX = c.x;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.y > maxY) maxY = c.y;
+  }
+  return {
+    x: minX - pad,
+    y: minY - pad,
+    width: Math.max(1, maxX - minX) + pad * 2,
+    height: Math.max(1, maxY - minY) + pad * 2,
+  };
+}
+
+export function shapeContainsPoint(shape: CanvasShape, point: Point, tolerance = 10): boolean {
+  const tol = Math.max(tolerance, shape.lineWidth / 2 + 6);
+  const tolSq = tol * tol;
+  if (isLineLikeShape(shape.kind)) {
+    return pointSegmentDistanceSquared(point, shape.start, shape.end) <= tolSq;
+  }
+  const c = shapeCenter(shape);
+  const localPt = shape.rotation ? rotatePoint(point, c, -shape.rotation) : point;
+  const r = shapeRect(shape);
+  if (r.width < 1 || r.height < 1) return false;
+  const midX = r.x + r.width / 2;
+  const midY = r.y + r.height / 2;
+
+  if (shape.kind === 'rectangle') {
+    const outer = rectInset(r, -tol, -tol);
+    if (!rectContainsPoint(outer, localPt)) return false;
+    if (shape.isFilled) return true;
+    const inner = rectInset(r, tol, tol);
+    return inner.width <= 0 || inner.height <= 0 || !rectContainsPoint(inner, localPt);
+  }
+
+  if (shape.kind === 'ellipse') {
+    const rx = Math.max(r.width / 2, 1);
+    const ry = Math.max(r.height / 2, 1);
+    const nx = (localPt.x - midX) / (rx + tol);
+    const ny = (localPt.y - midY) / (ry + tol);
+    if (nx * nx + ny * ny > 1) return false;
+    if (shape.isFilled) return true;
+    const irx = Math.max(rx - tol, 0);
+    const iry = Math.max(ry - tol, 0);
+    if (irx <= 1 || iry <= 1) return true;
+    const inx = (localPt.x - midX) / irx;
+    const iny = (localPt.y - midY) / iry;
+    return inx * inx + iny * iny >= 1;
+  }
+
+  const poly: Point[] =
+    shape.kind === 'triangle'
+      ? [
+          { x: midX, y: r.y },
+          { x: r.x + r.width, y: r.y + r.height },
+          { x: r.x, y: r.y + r.height },
+        ]
+      : [
+          { x: midX, y: r.y },
+          { x: r.x + r.width, y: midY },
+          { x: midX, y: r.y + r.height },
+          { x: r.x, y: midY },
+        ];
+
+  if (shape.isFilled && pointInPolygon(localPt, poly)) return true;
+  for (let i = 0; i < poly.length; i++) {
+    if (pointSegmentDistanceSquared(localPt, poly[i], poly[(i + 1) % poly.length]) <= tolSq) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function constrainShapeEnd(start: Point, end: Point, kind: ShapeKind): Point {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  if (isLineLikeShape(kind)) {
+    const len = Math.hypot(dx, dy);
+    if (len <= 0.001) return end;
+    const angle = Math.atan2(dy, dx);
+    const snapped = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+    return { x: start.x + Math.cos(snapped) * len, y: start.y + Math.sin(snapped) * len };
+  }
+  const side = Math.max(Math.abs(dx), Math.abs(dy));
+  return {
+    x: start.x + (dx >= 0 ? side : -side),
+    y: start.y + (dy >= 0 ? side : -side),
+  };
+}
+
+export function resizedFreeRect(
+  start: Rect,
+  corner: number,
+  offset: { width: number; height: number },
+  minSize = 10,
+  lockAspect = false
+): Rect | null {
+  if (lockAspect) return resizedRect(start, corner, offset, minSize);
+  if (!Number.isFinite(start.width) || !Number.isFinite(start.height)) return null;
+  let minX = start.x;
+  let maxX = start.x + start.width;
+  let minY = start.y;
+  let maxY = start.y + start.height;
+  switch (corner) {
+    case 0:
+      minX = Math.min(maxX - minSize, minX + offset.width);
+      minY = Math.min(maxY - minSize, minY + offset.height);
+      break;
+    case 1:
+      maxX = Math.max(minX + minSize, maxX + offset.width);
+      minY = Math.min(maxY - minSize, minY + offset.height);
+      break;
+    case 2:
+      maxX = Math.max(minX + minSize, maxX + offset.width);
+      maxY = Math.max(minY + minSize, maxY + offset.height);
+      break;
+    case 3:
+      minX = Math.min(maxX - minSize, minX + offset.width);
+      maxY = Math.max(minY + minSize, maxY + offset.height);
+      break;
+    default:
+      return null;
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+let measureCanvasCtx: CanvasRenderingContext2D | null = null;
+
+export function textLabelSize(label: TextLabel): { width: number; height: number } {
+  const lines = label.text.split('\n');
+  const lineHeight = label.fontSize * 1.28;
+  let maxW = 0;
+
+  if (typeof document !== 'undefined') {
+    if (!measureCanvasCtx) {
+      const c = document.createElement('canvas');
+      measureCanvasCtx = c.getContext('2d');
+    }
+    if (measureCanvasCtx) {
+      measureCanvasCtx.font = `${label.isBold ? '700' : '400'} ${label.fontSize}px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif`;
+      for (const line of lines) {
+        const w = measureCanvasCtx.measureText(line || ' ').width;
+        if (w > maxW) maxW = w;
+      }
+    }
+  }
+  if (maxW === 0) {
+    for (const line of lines) {
+      const w = (line.length || 1) * label.fontSize * (label.isBold ? 0.64 : 0.58);
+      if (w > maxW) maxW = w;
+    }
+  }
+  return {
+    width: Math.max(24, Math.ceil(maxW) + 8),
+    height: Math.max(lineHeight, Math.max(1, lines.length) * lineHeight + 4),
+  };
+}
+
+export function textLabelCenter(label: TextLabel): Point {
+  const s = textLabelSize(label);
+  return { x: label.position.x + s.width / 2, y: label.position.y + s.height / 2 };
+}
+
+export function textLabelRotatedCorners(label: TextLabel): Point[] {
+  const s = textLabelSize(label);
+  const { x, y } = label.position;
+  const raw: Point[] = [
+    { x, y },
+    { x: x + s.width, y },
+    { x: x + s.width, y: y + s.height },
+    { x, y: y + s.height },
+  ];
+  if (!label.rotation) return raw;
+  const c = textLabelCenter(label);
+  return raw.map((p) => rotatePoint(p, c, label.rotation));
+}
+
+export function textLabelRotatedBoundingBox(label: TextLabel): Rect {
+  const corners = textLabelRotatedCorners(label);
+  let minX = corners[0].x;
+  let maxX = corners[0].x;
+  let minY = corners[0].y;
+  let maxY = corners[0].y;
+  for (let i = 1; i < corners.length; i++) {
+    const c = corners[i];
+    if (c.x < minX) minX = c.x;
+    if (c.x > maxX) maxX = c.x;
+    if (c.y < minY) minY = c.y;
+    if (c.y > maxY) maxY = c.y;
+  }
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+export function textLabelContainsPoint(label: TextLabel, point: Point, padding = 6): boolean {
+  const s = textLabelSize(label);
+  const c = textLabelCenter(label);
+  const localPt = label.rotation ? rotatePoint(point, c, -label.rotation) : point;
+  return (
+    Math.abs(localPt.x - c.x) <= s.width / 2 + padding &&
+    Math.abs(localPt.y - c.y) <= s.height / 2 + padding
+  );
+}
+
 export function boundingBox(
   strokes: Stroke[],
   images: PlacedImage[],
   fills: FillShape[] = [],
-  padding = 0
+  padding = 0,
+  shapes: CanvasShape[] = [],
+  textLabels: TextLabel[] = []
 ): Rect | null {
   let minX = Infinity;
   let maxX = -Infinity;
@@ -490,6 +751,27 @@ export function boundingBox(
   for (const fill of fills) {
     const r = fillBoundingBox(fill);
     if (!r) continue;
+    minX = Math.min(minX, r.x);
+    maxX = Math.max(maxX, r.x + r.width);
+    minY = Math.min(minY, r.y);
+    maxY = Math.max(maxY, r.y + r.height);
+    hasContent = true;
+  }
+
+  for (const shape of shapes) {
+    const r = shapeRotatedBoundingBox(shape);
+    if (r.width <= 0 || r.height <= 0) continue;
+    minX = Math.min(minX, r.x);
+    maxX = Math.max(maxX, r.x + r.width);
+    minY = Math.min(minY, r.y);
+    maxY = Math.max(maxY, r.y + r.height);
+    hasContent = true;
+  }
+
+  for (const label of textLabels) {
+    if (!label.text) continue;
+    const r = textLabelRotatedBoundingBox(label);
+    if (r.width <= 0 || r.height <= 0) continue;
     minX = Math.min(minX, r.x);
     maxX = Math.max(maxX, r.x + r.width);
     minY = Math.min(minY, r.y);

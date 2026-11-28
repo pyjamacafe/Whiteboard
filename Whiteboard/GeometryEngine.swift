@@ -305,7 +305,14 @@ nonisolated enum GeometryEngine {
         return CGRect(x: minX - margin, y: minY - margin, width: (maxX - minX) + margin * 2, height: (maxY - minY) + margin * 2)
     }
 
-    static func boundingBox(of strokes: [Stroke], images: [PlacedImage], fills: [FillShape] = [], padding: CGFloat = 0) -> CGRect? {
+    static func boundingBox(
+        of strokes: [Stroke],
+        images: [PlacedImage],
+        fills: [FillShape] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = [],
+        padding: CGFloat = 0
+    ) -> CGRect? {
         var minX = CGFloat.greatestFiniteMagnitude
         var maxX = -CGFloat.greatestFiniteMagnitude
         var minY = CGFloat.greatestFiniteMagnitude
@@ -337,6 +344,26 @@ nonisolated enum GeometryEngine {
         for fill in fills {
             let rect = fill.boundingBox()
             guard !rect.isNull else { continue }
+            minX = min(minX, rect.minX)
+            maxX = max(maxX, rect.maxX)
+            minY = min(minY, rect.minY)
+            maxY = max(maxY, rect.maxY)
+            hasContent = true
+        }
+
+        for shape in shapes {
+            let rect = shape.rotatedBoundingBox()
+            guard !rect.isNull, rect.width > 0, rect.height > 0 else { continue }
+            minX = min(minX, rect.minX)
+            maxX = max(maxX, rect.maxX)
+            minY = min(minY, rect.minY)
+            maxY = max(maxY, rect.maxY)
+            hasContent = true
+        }
+
+        for label in textLabels where !label.text.isEmpty {
+            let rect = label.rotatedBoundingBox()
+            guard !rect.isNull, rect.width > 0, rect.height > 0 else { continue }
             minX = min(minX, rect.minX)
             maxX = max(maxX, rect.maxX)
             minY = min(minY, rect.minY)
@@ -616,6 +643,51 @@ nonisolated enum GeometryEngine {
         guard newRect.width >= minSize, newRect.height >= minSize,
               newRect.origin.x.isFinite, newRect.origin.y.isFinite else { return nil }
         return newRect
+    }
+
+    /// Free-aspect corner resize for 2D shapes (optionally constraining to square when `lockAspect` is true).
+    static func resizedFreeRect(
+        start: CGRect,
+        corner: Int,
+        offset: CGSize,
+        minSize: CGFloat = 10,
+        lockAspect: Bool = false
+    ) -> CGRect? {
+        if lockAspect {
+            return resizedRect(start: start, corner: corner, offset: offset, minSize: minSize)
+        }
+        guard start.width.isFinite, start.height.isFinite,
+              offset.width.isFinite, offset.height.isFinite else { return nil }
+        var minX = start.minX, maxX = start.maxX
+        var minY = start.minY, maxY = start.maxY
+        switch corner {
+        case 0: minX = min(maxX - minSize, start.minX + offset.width); minY = min(maxY - minSize, start.minY + offset.height)
+        case 1: maxX = max(minX + minSize, start.maxX + offset.width); minY = min(maxY - minSize, start.minY + offset.height)
+        case 2: maxX = max(minX + minSize, start.maxX + offset.width); maxY = max(minY + minSize, start.maxY + offset.height)
+        case 3: minX = min(maxX - minSize, start.minX + offset.width); maxY = max(minY + minSize, start.maxY + offset.height)
+        default: return nil
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Constrains a shape drag endpoint when Shift is held:
+    /// - For lines/arrows: snaps angle to nearest 45° increment.
+    /// - For 2D shapes: constrains bounding box to a square (1:1 aspect ratio).
+    static func constrainShapeEnd(start: CGPoint, end: CGPoint, kind: ShapeKind) -> CGPoint {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        if kind.isLineLike {
+            let len = hypot(dx, dy)
+            guard len > 0.001 else { return end }
+            let angle = atan2(dy, dx)
+            let snapped = (angle / (.pi / 4)).rounded() * (.pi / 4)
+            return CGPoint(x: start.x + cos(snapped) * len, y: start.y + sin(snapped) * len)
+        }
+        let side = max(abs(dx), abs(dy))
+        return CGPoint(
+            x: start.x + (dx >= 0 ? side : -side),
+            y: start.y + (dy >= 0 ? side : -side)
+        )
     }
 
     // MARK: - Rotation Helpers

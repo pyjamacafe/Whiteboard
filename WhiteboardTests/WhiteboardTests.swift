@@ -970,4 +970,83 @@ final class WhiteboardTests: XCTestCase {
         model.endLasso(scale: 1.0)
         XCTAssertTrue(model.selectionBoundary.isEmpty)
     }
+
+    func testCanvasShapeAndTextLabelPersistenceGeometryAndFloodFill() throws {
+        let rectShape = CanvasShape(
+            kind: .rectangle,
+            start: CGPoint(x: 20, y: 20),
+            end: CGPoint(x: 120, y: 100),
+            color: .blue,
+            presetIndex: 5,
+            lineWidth: 3,
+            isFilled: false,
+            rotation: 0
+        )
+        let arrowShape = CanvasShape(
+            kind: .arrow,
+            start: CGPoint(x: 0, y: 0),
+            end: CGPoint(x: 100, y: 0),
+            color: .red,
+            presetIndex: 1,
+            lineWidth: 2.5
+        )
+        let label = TextLabel(
+            text: "Hello\nTissue Box",
+            position: CGPoint(x: 150, y: 50),
+            fontSize: 24,
+            color: .black,
+            presetIndex: 0,
+            isBold: true,
+            rotation: .pi / 6
+        )
+
+        // Geometry & hit-testing
+        XCTAssertTrue(rectShape.containsPoint(CGPoint(x: 20, y: 60)))
+        XCTAssertFalse(rectShape.containsPoint(CGPoint(x: 70, y: 60))) // unfilled interior
+        XCTAssertTrue(arrowShape.containsPoint(CGPoint(x: 50, y: 1)))
+        XCTAssertTrue(label.containsPoint(label.cgCenter))
+
+        // Shift-constrain for square & 45-degree arrow
+        let constrainedSquare = GeometryEngine.constrainShapeEnd(
+            start: CGPoint(x: 10, y: 10),
+            end: CGPoint(x: 90, y: 40),
+            kind: .rectangle
+        )
+        XCTAssertEqual(constrainedSquare.x, 90, accuracy: 0.1)
+        XCTAssertEqual(constrainedSquare.y, 90, accuracy: 0.1)
+
+        // Flood fill works inside a closed CanvasShape
+        let fillContours = FloodFillEngine.computeContours(
+            at: CGPoint(x: 70, y: 60),
+            strokes: [],
+            shapes: [rectShape],
+            gapTolerance: 2.0
+        )
+        XCTAssertNotNil(fillContours)
+        XCTAssertGreaterThanOrEqual(fillContours?.count ?? 0, 1)
+
+        // Round-trip through BoardStore binary plist AND portable JSON SaveData
+        let save = SaveData(
+            strokes: [],
+            placedImages: [],
+            fills: [],
+            scenes: [],
+            shapes: [rectShape, arrowShape],
+            textLabels: [label]
+        )
+        try store.saveBoardSync(id: "shapes_text_bin", saveData: save)
+        let loaded = try store.loadBoard(id: "shapes_text_bin")
+        XCTAssertEqual(loaded.shapes.count, 2)
+        XCTAssertEqual(loaded.shapes[0].kind, .rectangle)
+        XCTAssertEqual(loaded.shapes[1].kind, .arrow)
+        XCTAssertEqual(loaded.textLabels.count, 1)
+        XCTAssertEqual(loaded.textLabels[0].text, "Hello\nTissue Box")
+        XCTAssertTrue(loaded.textLabels[0].isBold)
+        XCTAssertEqual(loaded.textLabels[0].rotation, .pi / 6, accuracy: 1e-4)
+
+        let json = try JSONEncoder().encode(save)
+        let decodedJson = try JSONDecoder().decode(SaveData.self, from: json)
+        XCTAssertEqual(decodedJson.shapes.count, 2)
+        XCTAssertEqual(decodedJson.textLabels.count, 1)
+    }
 }

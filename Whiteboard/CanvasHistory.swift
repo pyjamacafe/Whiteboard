@@ -6,26 +6,38 @@ struct CanvasSnapshot {
     let strokes: [Stroke]
     let placedImages: [PlacedImage]
     let fills: [FillShape]
+    let shapes: [CanvasShape]
+    let textLabels: [TextLabel]
     let selectedStrokeIds: Set<UUID>
     let selectedImageIds: Set<UUID>
     let selectedFillIds: Set<UUID>
+    let selectedShapeIds: Set<UUID>
+    let selectedTextIds: Set<UUID>
     let selectionBoundary: [CGPoint]
 
     init(
         strokes: [Stroke],
         placedImages: [PlacedImage],
         fills: [FillShape] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = [],
         selectedStrokeIds: Set<UUID>,
         selectedImageIds: Set<UUID>,
         selectedFillIds: Set<UUID> = [],
+        selectedShapeIds: Set<UUID> = [],
+        selectedTextIds: Set<UUID> = [],
         selectionBoundary: [CGPoint]
     ) {
         self.strokes = strokes
         self.placedImages = placedImages
         self.fills = fills
+        self.shapes = shapes
+        self.textLabels = textLabels
         self.selectedStrokeIds = selectedStrokeIds
         self.selectedImageIds = selectedImageIds
         self.selectedFillIds = selectedFillIds
+        self.selectedShapeIds = selectedShapeIds
+        self.selectedTextIds = selectedTextIds
         self.selectionBoundary = selectionBoundary
     }
 }

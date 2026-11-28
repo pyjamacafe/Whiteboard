@@ -1,16 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   boundingBox,
+  constrainShapeEnd,
   eraseStrokes,
   fillContainsPoint,
   imageRotatedCorners,
   pointInPolygon,
   recognizeShape,
   resizedRect,
+  shapeContainsPoint,
   simplifyRDP,
   smoothCatmullRom,
   snapRotationAngle,
   SpatialHashGrid,
+  textLabelCenter,
+  textLabelContainsPoint,
 } from '../engine/geometry';
 import { computeFillContours } from '../engine/floodFill';
 import { CanvasHistory } from '../engine/history';
@@ -21,10 +25,12 @@ import { DrawingStore } from '../store/drawingStore';
 import {
   DEFAULT_LIGHT_PRESETS,
   generateId,
+  type CanvasShape,
   type FillShape,
   type PlacedImage,
   type Point,
   type Stroke,
+  type TextLabel,
 } from '../types/model';
 
 const black = { r: 0, g: 0, b: 0, a: 1 };
@@ -513,5 +519,70 @@ describe('Phase 3 (BoardStore Trash/Restore & Vector PDF Export)', () => {
     });
     expect(deckBytes).not.toBeNull();
     expect(deckBytes!.length).toBeGreaterThan(300);
+  });
+});
+
+describe('Shapes & TextLabels Phase 1 (Geometry, FloodFill, .wb Codec)', () => {
+  it('hit-tests shapes/text, constrains drag proportions, fills inside shapes, and round-trips .wb JSON', () => {
+    const rect: CanvasShape = {
+      id: generateId(),
+      kind: 'rectangle',
+      start: { x: 20, y: 20 },
+      end: { x: 120, y: 100 },
+      color: { r: 0, g: 0.35, b: 1, a: 1 },
+      presetIndex: 5,
+      lineWidth: 3,
+      isFilled: false,
+      rotation: 0,
+    };
+    const arrow: CanvasShape = {
+      id: generateId(),
+      kind: 'arrow',
+      start: { x: 0, y: 0 },
+      end: { x: 100, y: 0 },
+      color: { r: 0.95, g: 0, b: 0.1, a: 1 },
+      presetIndex: 1,
+      lineWidth: 2.5,
+      isFilled: false,
+      rotation: 0,
+    };
+    const label: TextLabel = {
+      id: generateId(),
+      text: 'Hello\nTissue Box',
+      position: { x: 150, y: 50 },
+      fontSize: 24,
+      color: black,
+      presetIndex: 0,
+      isBold: true,
+      rotation: Math.PI / 6,
+    };
+
+    expect(shapeContainsPoint(rect, { x: 20, y: 60 })).toBe(true);
+    expect(shapeContainsPoint(rect, { x: 70, y: 60 })).toBe(false);
+    expect(shapeContainsPoint(arrow, { x: 50, y: 1 })).toBe(true);
+    expect(textLabelContainsPoint(label, textLabelCenter(label))).toBe(true);
+
+    const sq = constrainShapeEnd({ x: 10, y: 10 }, { x: 90, y: 40 }, 'rectangle');
+    expect(sq).toEqual({ x: 90, y: 90 });
+
+    const contours = computeFillContours({ x: 70, y: 60 }, [], 2.0, [rect]);
+    expect(contours).not.toBeNull();
+    expect(contours!.length).toBeGreaterThanOrEqual(1);
+
+    const encoded = encodeWBJson({
+      strokes: [],
+      placedImages: [],
+      fills: [],
+      scenes: [],
+      shapes: [rect, arrow],
+      textLabels: [label],
+    });
+    const decoded = decodeWBJson(encoded);
+    expect(decoded.shapes?.length).toBe(2);
+    expect(decoded.shapes?.[0].kind).toBe('rectangle');
+    expect(decoded.shapes?.[1].kind).toBe('arrow');
+    expect(decoded.textLabels?.length).toBe(1);
+    expect(decoded.textLabels?.[0].text).toBe('Hello\nTissue Box');
+    expect(decoded.textLabels?.[0].isBold).toBe(true);
   });
 });

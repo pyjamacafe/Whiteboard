@@ -1,12 +1,16 @@
-import type { FillShape, PlacedImage, Point, Stroke } from '../types/model';
+import type { CanvasShape, FillShape, PlacedImage, Point, Stroke, TextLabel } from '../types/model';
 
 export interface CanvasSnapshot {
   strokes: Stroke[];
   placedImages: PlacedImage[];
   fills: FillShape[];
+  shapes?: CanvasShape[];
+  textLabels?: TextLabel[];
   selectedStrokeIds: string[];
   selectedImageIds: string[];
   selectedFillIds: string[];
+  selectedShapeIds?: string[];
+  selectedTextIds?: string[];
   selectionBoundary: Point[];
 }
 
@@ -86,9 +90,22 @@ function cloneSnapshot(s: CanvasSnapshot): CanvasSnapshot {
       color: { ...f.color },
       contours: f.contours.map((loop) => loop.map((p) => ({ x: p.x, y: p.y }))),
     })),
+    shapes: (s.shapes ?? []).map((sh) => ({
+      ...sh,
+      start: { ...sh.start },
+      end: { ...sh.end },
+      color: { ...sh.color },
+    })),
+    textLabels: (s.textLabels ?? []).map((t) => ({
+      ...t,
+      position: { ...t.position },
+      color: { ...t.color },
+    })),
     selectedStrokeIds: [...s.selectedStrokeIds],
     selectedImageIds: [...s.selectedImageIds],
     selectedFillIds: [...s.selectedFillIds],
+    selectedShapeIds: [...(s.selectedShapeIds ?? [])],
+    selectedTextIds: [...(s.selectedTextIds ?? [])],
     selectionBoundary: s.selectionBoundary.map((p) => ({ x: p.x, y: p.y })),
   };
 }
