@@ -112,7 +112,7 @@ nonisolated struct CodablePoint: Codable, Equatable, Sendable {
 }
 
 enum Tool: String, CaseIterable {
-    case pen, sharpie, fill, eraser, select, laser
+    case pen, sharpie, fill, eraser, select
 }
 
 enum ToolbarDockEdge: String, CaseIterable, Codable {
@@ -132,7 +132,6 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     case fill
     case eraser
     case select
-    case laser
     case scenes
     case home
     case undo
@@ -177,7 +176,6 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .fill: return "Fill"
         case .eraser: return "Eraser"
         case .select: return "Select"
-        case .laser: return "Laser"
         case .scenes: return "Scenes"
         case .home: return "Home"
         case .undo: return "Undo"
@@ -210,7 +208,6 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .fill: return "drop.fill"
         case .eraser: return "eraser"
         case .select: return "cursorarrow.click"
-        case .laser: return "wand.and.rays"
         case .scenes: return "rectangle.stack"
         case .home: return "house"
         case .undo: return "arrow.uturn.backward"
@@ -243,7 +240,6 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .fill: return .fill
         case .eraser: return .eraser
         case .select: return .select
-        case .laser: return .laser
         default: return nil
         }
     }
@@ -255,7 +251,7 @@ enum CanvasBackground: String, CaseIterable {
 
 struct AppSettings {
     var canvasBackground: CanvasBackground = .grid
-    var revealSettingsOnSingleTap: Bool = true
+    var revealSettingsOnSingleTap: Bool = false
     #if os(macOS)
     var pencilOnly: Bool = false
     #else
@@ -459,7 +455,6 @@ final class DrawingModel {
     private(set) var sceneThumbnailRevision: Int = 0
 
     @ObservationIgnored var currentStroke: Stroke?
-    @ObservationIgnored var laserPoints: [(point: CGPoint, time: CFTimeInterval)] = []
     @ObservationIgnored var previousTool: Tool = .pen
     @ObservationIgnored var lastCanvasTapLocation: CGPoint = .zero
     @ObservationIgnored var currentViewportCenter: CGPoint = .zero
@@ -689,7 +684,7 @@ final class DrawingModel {
             eraseTarget = try c.decodeIfPresent(String.self, forKey: .eraseTarget)
             canvasBg = try c.decode(String.self, forKey: .canvasBg)
             isDarkMode = try c.decode(Bool.self, forKey: .isDarkMode)
-            revealSettingsOnSingleTap = try c.decodeIfPresent(Bool.self, forKey: .revealSettingsOnSingleTap) ?? true
+            revealSettingsOnSingleTap = try c.decodeIfPresent(Bool.self, forKey: .revealSettingsOnSingleTap) ?? false
             pencilOnly = try c.decodeIfPresent(Bool.self, forKey: .pencilOnly)
             penPresetIndex = try c.decodeIfPresent(Int.self, forKey: .penPresetIndex)
             sharpiePresetIndex = try c.decodeIfPresent(Int.self, forKey: .sharpiePresetIndex)

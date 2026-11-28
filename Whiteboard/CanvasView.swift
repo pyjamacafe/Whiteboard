@@ -307,35 +307,6 @@ class LiveOverlayView: UIView {
             )
         }
 
-        // Ephemeral Laser Pointer trail (fades out over 1.4s)
-        if model.laserPoints.count >= 2 {
-            let now = CACurrentMediaTime()
-            let lifetime: CFTimeInterval = 1.4
-            ctx.saveGState()
-            ctx.setLineCap(.round)
-            ctx.setLineJoin(.round)
-            for i in 1..<model.laserPoints.count {
-                let p0 = model.laserPoints[i - 1]
-                let p1 = model.laserPoints[i]
-                let age = now - p1.time
-                guard age < lifetime else { continue }
-                let alpha = CGFloat(max(0, 1.0 - age / lifetime))
-                // Outer red glow
-                ctx.setStrokeColor(UIColor.systemRed.withAlphaComponent(alpha * 0.35).cgColor)
-                ctx.setLineWidth((10 * alpha + 2) / scale)
-                ctx.move(to: p0.point)
-                ctx.addLine(to: p1.point)
-                ctx.strokePath()
-                // Bright inner core
-                ctx.setStrokeColor(UIColor(red: 1.0, green: 0.25, blue: 0.25, alpha: alpha).cgColor)
-                ctx.setLineWidth((4 * alpha + 1) / scale)
-                ctx.move(to: p0.point)
-                ctx.addLine(to: p1.point)
-                ctx.strokePath()
-            }
-            ctx.restoreGState()
-        }
-
         if !model.selectionLasso.isEmpty {
             drawDashedPolygon(model.selectionLasso, close: false, color: UIColor.systemBlue.withAlphaComponent(0.6), in: ctx)
         }
@@ -471,7 +442,6 @@ class DrawingCanvasView: UIView {
     private var fingerPanMovedPastDeadzone: Bool = false
     private var shapeHoldWorkItem: DispatchWorkItem?
     private var shapeHoldAnchor: CGPoint = .zero
-    private var laserLink: CADisplayLink?
 
     private lazy var twoFingerTapGesture: UITapGestureRecognizer = {
         let g = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerTap))
@@ -524,7 +494,6 @@ class DrawingCanvasView: UIView {
     deinit {
         stopDashAnimation()
         stopSceneAnimation()
-        stopLaserLoop()
         shapeHoldWorkItem?.cancel()
     }
 
@@ -533,7 +502,6 @@ class DrawingCanvasView: UIView {
         if newWindow == nil {
             stopDashAnimation()
             stopSceneAnimation()
-            stopLaserLoop()
             shapeHoldWorkItem?.cancel()
         } else {
             syncDashAnimationState()
@@ -725,28 +693,6 @@ class DrawingCanvasView: UIView {
         refresh()
     }
 
-    private func startLaserLoop() {
-        guard laserLink == nil, window != nil else { return }
-        let link = CADisplayLink(target: self, selector: #selector(stepLaser(_:)))
-        link.add(to: .main, forMode: .common)
-        laserLink = link
-    }
-
-    private func stopLaserLoop() {
-        laserLink?.invalidate()
-        laserLink = nil
-    }
-
-    @objc private func stepLaser(_ link: CADisplayLink) {
-        guard let model else { stopLaserLoop(); return }
-        let cutoff = CACurrentMediaTime() - 1.4
-        model.laserPoints.removeAll { $0.time < cutoff }
-        liveOverlay.setNeedsDisplay()
-        if model.laserPoints.isEmpty {
-            stopLaserLoop()
-        }
-    }
-
     private func scheduleShapeHoldCheck(at point: CGPoint) {
         shapeHoldWorkItem?.cancel()
         shapeHoldAnchor = point
@@ -918,13 +864,6 @@ class DrawingCanvasView: UIView {
             return
         }
 
-        if model.currentTool == .laser {
-            model.laserPoints.append((point: toCanvas(touch.location(in: self)), time: CACurrentMediaTime()))
-            startLaserLoop()
-            liveOverlay.setNeedsDisplay()
-            return
-        }
-
         if model.currentTool == .fill {
             if model.floodFill(at: toCanvas(touch.location(in: self))) {
                 committedLayer.setNeedsDisplay()
@@ -961,17 +900,6 @@ class DrawingCanvasView: UIView {
         let pencilModeActive = model.appSettings.pencilOnly || hasUsedPencil
         guard !pencilModeActive || touch.type == .pencil || model.currentTool == .select else { return }
         #endif
-
-        if model.currentTool == .laser {
-            let now = CACurrentMediaTime()
-            let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
-            for ct in coalesced {
-                model.laserPoints.append((point: toCanvas(ct.location(in: self)), time: now))
-            }
-            startLaserLoop()
-            liveOverlay.setNeedsDisplay()
-            return
-        }
 
         if model.currentTool == .fill { return }
 
@@ -1024,7 +952,6 @@ class DrawingCanvasView: UIView {
             lastPencilEndTime = CACurrentMediaTime()
         }
         isTouchActive = false
-        if model?.currentTool == .laser { return }
         if model?.currentTool == .select {
             if model?.showDeleteMenu == true { return }
             if model?.isMoving == true || model?.isResizing == true {
@@ -1056,7 +983,6 @@ class DrawingCanvasView: UIView {
             lastPencilEndTime = CACurrentMediaTime()
         }
         isTouchActive = false
-        if model?.currentTool == .laser { return }
         if model?.currentTool == .select {
             if model?.isMoving == true || model?.isResizing == true {
                 model?.commitMove()
@@ -1470,23 +1396,6 @@ private struct LiveInteractionCanvas: View {
                         context.fill(Path(ellipseIn: handle), with: .color(.blue))
                     }
                 }
-                if !model.laserPoints.isEmpty {
-                    let now = CACurrentMediaTime()
-                    let lifetime: CFTimeInterval = 1.4
-                    let pts = model.laserPoints
-                    if pts.count >= 2 {
-                        for i in 1..<pts.count {
-                            let age = now - pts[i].time
-                            guard age < lifetime else { continue }
-                            let alpha = max(0, 1.0 - age / lifetime)
-                            var seg = Path()
-                            seg.move(to: pts[i - 1].point.applying(tf))
-                            seg.addLine(to: pts[i].point.applying(tf))
-                            context.stroke(seg, with: .color(Color.red.opacity(alpha * 0.35)), style: StrokeStyle(lineWidth: CGFloat(10 * alpha + 2), lineCap: .round))
-                            context.stroke(seg, with: .color(Color(red: 1.0, green: 0.25, blue: 0.25).opacity(alpha)), style: StrokeStyle(lineWidth: CGFloat(4 * alpha + 1), lineCap: .round))
-                        }
-                    }
-                }
             }
         }
     }
@@ -1514,7 +1423,6 @@ struct CanvasView: View {
     @State private var offset: CGSize = .zero
     @State private var scale: CGFloat = 1.0
     @State private var pointCount: Int = 0
-    @State private var laserTick: Int = 0
 
     static var lastSelectTap: Date = .distantPast
     static var lastEmptyTap: Date = .distantPast
@@ -1523,7 +1431,6 @@ struct CanvasView: View {
     @State private var scrollMonitor: Any?
     @State private var changeModeMonitor: Any?
     @State private var sceneAnimTimer: Timer?
-    @State private var laserTimer: Timer?
     @State private var shapeHoldWorkItem: DispatchWorkItem?
     @State private var shapeHoldAnchor: CGPoint = .zero
     @State private var viewSize: CGSize?
@@ -1551,10 +1458,6 @@ struct CanvasView: View {
             onPan: { delta in
                 offset.width += delta.width
                 offset.height += delta.height
-            },
-            onLaserPoint: {
-                laserTick &+= 1
-                startMacLaserTimer()
             }
         )
     }
@@ -1588,7 +1491,7 @@ struct CanvasView: View {
             LiveInteractionCanvas(
                 model: model,
                 incrementalPath: incrementalPath,
-                activePointCount: pointCount ^ laserTick,
+                activePointCount: pointCount,
                 offset: offset,
                 scale: scale
             )
@@ -1634,8 +1537,6 @@ struct CanvasView: View {
         .onDisappear {
             sceneAnimTimer?.invalidate()
             sceneAnimTimer = nil
-            laserTimer?.invalidate()
-            laserTimer = nil
             shapeHoldWorkItem?.cancel()
             shapeHoldWorkItem = nil
             removeMonitors()
@@ -1701,9 +1602,6 @@ struct CanvasView: View {
                     return nil
                 case "f":
                     model.selectTool(.fill)
-                    return nil
-                case "l":
-                    model.selectTool(.laser)
                     return nil
                 case "s":
                     model.selectTool(hasShift ? .select : .sharpie)
@@ -1845,21 +1743,6 @@ struct CanvasView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.42, execute: item)
     }
 
-    private func startMacLaserTimer() {
-        guard laserTimer == nil else { return }
-        laserTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { timer in
-            MainActor.assumeIsolated {
-                let cutoff = CACurrentMediaTime() - 1.4
-                model.laserPoints.removeAll { $0.time < cutoff }
-                laserTick &+= 1
-                if model.laserPoints.isEmpty {
-                    timer.invalidate()
-                    laserTimer = nil
-                }
-            }
-        }
-    }
-
     private func animateMacToScene(_ scene: CanvasScene) {
         sceneAnimTimer?.invalidate()
         sceneAnimTimer = nil
@@ -1984,9 +1867,6 @@ struct DrawingInputOverlay: NSViewRepresentable {
             case .select:
                 size = 4
                 color = (model.appSettings.isDarkMode ? NSColor.white : NSColor.black).withAlphaComponent(0.4).cgColor
-            case .laser:
-                size = 10
-                color = NSColor.systemRed.withAlphaComponent(0.7).cgColor
             }
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -2110,7 +1990,6 @@ struct CanvasPointerHandler {
     let onPoint: (Int) -> Void
     let onBeginDraw: (() -> Void)?
     let onPan: (CGSize) -> Void
-    let onLaserPoint: () -> Void
 
     func onChange(_ canvas: CGPoint, drawing: Bool) {
         if drawing {
@@ -2167,12 +2046,6 @@ struct CanvasPointerHandler {
             return
         }
 
-        if model.currentTool == .laser {
-            model.laserPoints.append((point: canvas, time: CACurrentMediaTime()))
-            onLaserPoint()
-            return
-        }
-
         if model.currentTool == .fill {
             if drawing {
                 model.floodFill(at: canvas)
@@ -2189,7 +2062,6 @@ struct CanvasPointerHandler {
     }
 
     func onEnd() {
-        if model.currentTool == .laser { return }
         if model.currentTool == .fill { return }
         if model.currentTool == .select {
             if model.isMoving || model.isResizing { model.commitMove() }

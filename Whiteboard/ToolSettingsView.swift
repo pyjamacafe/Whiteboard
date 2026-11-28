@@ -11,7 +11,7 @@ struct ToolSettingsView: View {
             case .sharpie: sharpieSettings
             case .fill: fillSettings
             case .eraser: eraserSettings
-            case .select, .laser: EmptyView()
+            case .select: EmptyView()
             }
         }
         .padding(.horizontal, 14)

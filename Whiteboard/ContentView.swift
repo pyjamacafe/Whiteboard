@@ -10,7 +10,6 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var hoveredTool: String?
     @State private var settingsTool: Tool?
-    @State private var lastTapTime: Date = .distantPast
     @State private var showSettings: Bool = false
     @State private var showScenes: Bool = false
     @State private var isCustomizingToolbar: Bool = false
@@ -424,30 +423,13 @@ struct ContentView: View {
         .pointingHand()
         .highPriorityGesture(
             TapGesture().onEnded {
-                let now = Date()
-                if model.appSettings.revealSettingsOnSingleTap {
-                    if now.timeIntervalSince(lastTapTime) < 0.3 {
-                        settingsTool = settingsTool == tool ? nil : tool
-                        showSettings = false
-                        lastTapTime = .distantPast
-                        model.selectTool(tool)
-                    } else {
-                        lastTapTime = now
-                        model.selectTool(tool)
-                        settingsTool = tool
-                        showSettings = false
-                    }
+                let wasSelected = (model.currentTool == tool)
+                showSettings = false
+                if wasSelected {
+                    settingsTool = (settingsTool == tool || tool == .select) ? nil : tool
                 } else {
-                    if now.timeIntervalSince(lastTapTime) < 0.3 {
-                        settingsTool = settingsTool == tool ? nil : tool
-                        showSettings = false
-                        lastTapTime = .distantPast
-                    } else {
-                        lastTapTime = now
-                        model.selectTool(tool)
-                        settingsTool = nil
-                        showSettings = false
-                    }
+                    model.selectTool(tool)
+                    settingsTool = (model.appSettings.revealSettingsOnSingleTap && tool != .select) ? tool : nil
                 }
             }
         )
@@ -467,7 +449,7 @@ struct ContentView: View {
             } else if model.isToolbarVisible && model.currentTool == .select && hasActiveSelection {
                 selectionActionPill
                     .transition(.opacity.combined(with: .scale(scale: 0.96)))
-            } else if model.isToolbarVisible, let tool = settingsTool, tool != .select && tool != .laser {
+            } else if model.isToolbarVisible, let tool = settingsTool, tool != .select {
                 ToolSettingsView(model: model, tool: tool)
                     .onTapGesture { }
             }
@@ -960,7 +942,6 @@ struct ContentView: View {
         case .warmPaper: return model.appSettings.isWarmPaper ? "Switch to Crisp White Paper" : "Switch to Warm Café Napkin Paper"
         case .renameTissue: return "Rename Tissue"
         case .fitContent: return "Fit All Content"
-        case .laser: return "Laser Pointer (L)"
         case .singleTapOptions: return "Show Options on Single Tap"
         case .pencilOnly: return "Draw with Apple Pencil Only"
         case .importPhoto: return "Import from Photos"
@@ -1000,10 +981,15 @@ struct ContentView: View {
     private func performToolbarAction(for item: ToolbarItemID, closePopover: Bool = false) {
         let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
         switch item {
-        case .pen, .sharpie, .fill, .eraser, .select, .laser:
+        case .pen, .sharpie, .fill, .eraser, .select:
             if let tool = item.associatedTool {
-                model.selectTool(tool)
-                settingsTool = (model.appSettings.revealSettingsOnSingleTap && tool != .laser && tool != .select) ? tool : nil
+                let wasSelected = (model.currentTool == tool)
+                if wasSelected {
+                    settingsTool = (settingsTool == tool || tool == .select) ? nil : tool
+                } else {
+                    model.selectTool(tool)
+                    settingsTool = (model.appSettings.revealSettingsOnSingleTap && tool != .select) ? tool : nil
+                }
             }
             if closePopover { showSettings = false }
         case .scenes:
