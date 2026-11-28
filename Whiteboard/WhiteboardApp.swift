@@ -47,6 +47,10 @@ struct WhiteboardApp: App {
                     .keyboardShortcut("s", modifiers: [])
                 Button("Fill") { model.selectTool(.fill) }
                     .keyboardShortcut("f", modifiers: [])
+                Button("Shapes") { model.selectTool(.shape) }
+                    .keyboardShortcut("r", modifiers: [])
+                Button("Text") { model.selectTool(.text) }
+                    .keyboardShortcut("t", modifiers: [])
                 Button("Eraser") { model.selectTool(.eraser) }
                     .keyboardShortcut("e", modifiers: [])
                 Button("Selection") { model.selectTool(.select) }

@@ -297,6 +297,11 @@ nonisolated struct CanvasShape: Identifiable, Codable, Equatable, Sendable {
     var cgEnd: CGPoint { end.cgPoint }
     var cgRotation: CGFloat { CGFloat(rotation) }
 
+    @MainActor
+    func displayColor(for model: DrawingModel) -> Color {
+        StrokeRenderer.resolveShapeColor(for: self, shapePresets: model.shapePresets)
+    }
+
     var rect: CGRect {
         let minX = min(start.x, end.x)
         let minY = min(start.y, end.y)
@@ -535,6 +540,11 @@ nonisolated struct TextLabel: Identifiable, Codable, Equatable, Sendable {
     var cgPosition: CGPoint { position.cgPoint }
     var cgRotation: CGFloat { CGFloat(rotation) }
 
+    @MainActor
+    func displayColor(for model: DrawingModel) -> Color {
+        StrokeRenderer.resolveTextColor(for: self, textPresets: model.textPresets)
+    }
+
     /// Measures the unrotated multi-line bounding size in canvas points.
     func measuredSize() -> CGSize {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -603,7 +613,7 @@ nonisolated struct TextLabel: Identifiable, Codable, Equatable, Sendable {
 }
 
 enum Tool: String, CaseIterable {
-    case pen, sharpie, fill, eraser, select
+    case pen, sharpie, fill, shape, text, eraser, select
 }
 
 enum ToolbarDockEdge: String, CaseIterable, Codable {
@@ -621,6 +631,8 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     case pen
     case sharpie
     case fill
+    case shape
+    case text
     case eraser
     case select
     case scenes
@@ -649,7 +661,7 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     var id: String { rawValue }
 
     static let defaultPinned: [ToolbarItemID] = [
-        .pen, .sharpie, .fill, .eraser, .select, .scenes, .home
+        .pen, .sharpie, .fill, .shape, .text, .eraser, .select, .scenes, .home
     ]
 
     static var platformCases: [ToolbarItemID] {
@@ -665,6 +677,8 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .pen: return "Pen"
         case .sharpie: return "Sharpie"
         case .fill: return "Fill"
+        case .shape: return "Shapes"
+        case .text: return "Text"
         case .eraser: return "Eraser"
         case .select: return "Select"
         case .scenes: return "Scenes"
@@ -697,6 +711,8 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .pen: return "pencil.tip"
         case .sharpie: return "highlighter"
         case .fill: return "paint.bucket.classic"
+        case .shape: return "square.on.circle"
+        case .text: return "character.textbox"
         case .eraser: return "eraser"
         case .select: return "lasso"
         case .scenes: return "rectangle.stack"
@@ -729,6 +745,8 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
         case .pen: return .pen
         case .sharpie: return .sharpie
         case .fill: return .fill
+        case .shape: return .shape
+        case .text: return .text
         case .eraser: return .eraser
         case .select: return .select
         default: return nil
@@ -865,6 +883,63 @@ struct EraserSettings {
     var eraseTarget: EraseTarget = .all
 }
 
+struct ShapeSettings {
+    var kind: ShapeKind = .rectangle
+    var lightColor: Color = .black
+    var darkColor: Color = .white
+    var lineWidth: CGFloat = 2.5
+    let widthOptions: [CGFloat] = [2, 2.5, 3, 3.5, 4]
+    var isFilled: Bool = false
+    var lightPresets: [Color] = [
+        Color(red: 0.05, green: 0.05, blue: 0.05),
+        Color(red: 0.95, green: 0.0, blue: 0.1),
+        Color(red: 1.0, green: 0.45, blue: 0.0),
+        Color(red: 1.0, green: 0.8, blue: 0.0),
+        Color(red: 0.0, green: 0.7, blue: 0.15),
+        Color(red: 0.0, green: 0.35, blue: 1.0),
+        Color(red: 0.55, green: 0.15, blue: 1.0),
+        Color(red: 0.6, green: 0.35, blue: 0.1),
+    ]
+    var darkPresets: [Color] = [
+        Color(red: 1.0, green: 1.0, blue: 1.0),
+        Color(red: 1.0, green: 0.3, blue: 0.3),
+        Color(red: 1.0, green: 0.6, blue: 0.15),
+        Color(red: 1.0, green: 0.9, blue: 0.25),
+        Color(red: 0.3, green: 1.0, blue: 0.45),
+        Color(red: 0.3, green: 0.6, blue: 1.0),
+        Color(red: 0.7, green: 0.4, blue: 1.0),
+        Color(red: 1.0, green: 0.4, blue: 0.7),
+    ]
+}
+
+struct TextSettings {
+    var lightColor: Color = .black
+    var darkColor: Color = .white
+    var fontSize: CGFloat = 22
+    let sizeOptions: [CGFloat] = [16, 22, 30, 42]
+    var isBold: Bool = false
+    var lightPresets: [Color] = [
+        Color(red: 0.05, green: 0.05, blue: 0.05),
+        Color(red: 0.95, green: 0.0, blue: 0.1),
+        Color(red: 1.0, green: 0.45, blue: 0.0),
+        Color(red: 1.0, green: 0.8, blue: 0.0),
+        Color(red: 0.0, green: 0.7, blue: 0.15),
+        Color(red: 0.0, green: 0.35, blue: 1.0),
+        Color(red: 0.55, green: 0.15, blue: 1.0),
+        Color(red: 0.6, green: 0.35, blue: 0.1),
+    ]
+    var darkPresets: [Color] = [
+        Color(red: 1.0, green: 1.0, blue: 1.0),
+        Color(red: 1.0, green: 0.3, blue: 0.3),
+        Color(red: 1.0, green: 0.6, blue: 0.15),
+        Color(red: 1.0, green: 0.9, blue: 0.25),
+        Color(red: 0.3, green: 1.0, blue: 0.45),
+        Color(red: 0.3, green: 0.6, blue: 1.0),
+        Color(red: 0.7, green: 0.4, blue: 1.0),
+        Color(red: 1.0, green: 0.4, blue: 0.7),
+    ]
+}
+
 @Observable
 final class DrawingModel {
     var strokes: [Stroke] = [] {
@@ -874,6 +949,12 @@ final class DrawingModel {
         didSet { committedRevision &+= 1 }
     }
     var fills: [FillShape] = [] {
+        didSet { committedRevision &+= 1 }
+    }
+    var shapes: [CanvasShape] = [] {
+        didSet { committedRevision &+= 1 }
+    }
+    var textLabels: [TextLabel] = [] {
         didSet { committedRevision &+= 1 }
     }
     var currentTool: Tool = .pen {
@@ -891,6 +972,18 @@ final class DrawingModel {
     var fillPresetIndex: Int = 5 {
         didSet { scheduleSettingsSave() }
     }
+    var shapePresetIndex: Int = 0 {
+        didSet { scheduleSettingsSave() }
+    }
+    var textPresetIndex: Int = 0 {
+        didSet {
+            if isEditingText {
+                editingTextPresetIndex = textPresetIndex
+                editingTextColor = CodableColor(textColor)
+            }
+            scheduleSettingsSave()
+        }
+    }
     var penSettings = PenSettings() {
         didSet { scheduleSettingsSave() }
     }
@@ -898,6 +991,12 @@ final class DrawingModel {
         didSet { scheduleSettingsSave() }
     }
     var fillSettings = FillSettings() {
+        didSet { scheduleSettingsSave() }
+    }
+    var shapeSettings = ShapeSettings() {
+        didSet { scheduleSettingsSave() }
+    }
+    var textSettings = TextSettings() {
         didSet { scheduleSettingsSave() }
     }
     var eraserSettings = EraserSettings() {
@@ -921,9 +1020,24 @@ final class DrawingModel {
     var selectedStrokeIds: Set<UUID> = []
     var selectedImageIds: Set<UUID> = []
     var selectedFillIds: Set<UUID> = []
+    var selectedShapeIds: Set<UUID> = []
+    var selectedTextIds: Set<UUID> = []
     var isRotating: Bool = false
     var selectionRotationAngle: CGFloat = 0
     var isRotationSnapped: Bool = false
+
+    // Inline text editing state
+    var isEditingText: Bool = false
+    var editingTextId: UUID?
+    var editingTextPosition: CGPoint = .zero
+    var editingTextDraft: String = ""
+    var editingTextFontSize: CGFloat = 22
+    var editingTextIsBold: Bool = false
+    var editingTextPresetIndex: Int = 0
+    var editingTextColor: CodableColor = CodableColor(.black)
+    var editingTextRotation: Double = 0
+
+    var currentShape: CanvasShape?
 
     var pendingAction: PendingAction?
     var showDeleteMenu: Bool = false
@@ -988,8 +1102,9 @@ final class DrawingModel {
     // Move / Resize / Rotate state
     @ObservationIgnored var isMoving: Bool = false
     @ObservationIgnored var isResizing: Bool = false
-    @ObservationIgnored var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft
+    @ObservationIgnored var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft (or 0=start, 1=end for lines)
     @ObservationIgnored var resizeImageId: UUID?
+    @ObservationIgnored var resizeShapeId: UUID?
     @ObservationIgnored var resizeStartRect: CGRect = .zero
     @ObservationIgnored var lastMovePoint: CGPoint = .zero
     @ObservationIgnored var pendingDeselectPoint: CGPoint?
@@ -1001,6 +1116,8 @@ final class DrawingModel {
     @ObservationIgnored private var rotateSnapshotStrokes: [UUID: [CGPoint]] = [:]
     @ObservationIgnored private var rotateSnapshotFills: [UUID: [[CGPoint]]] = [:]
     @ObservationIgnored private var rotateSnapshotImages: [UUID: (center: CGPoint, size: CGSize, rotation: Double)] = [:]
+    @ObservationIgnored private var rotateSnapshotShapes: [UUID: CanvasShape] = [:]
+    @ObservationIgnored private var rotateSnapshotTexts: [UUID: (center: CGPoint, size: CGSize, rotation: Double)] = [:]
     @ObservationIgnored private var rotateSnapshotBoundary: [CGPoint] = []
     @ObservationIgnored private var rotateSnapshotTaken: Bool = false
 
@@ -1266,6 +1383,8 @@ final class DrawingModel {
         penSettings = PenSettings()
         sharpieSettings = SharpieSettings()
         fillSettings = FillSettings()
+        shapeSettings = ShapeSettings()
+        textSettings = TextSettings()
         eraserSettings = EraserSettings()
         appSettings = AppSettings()
         currentTool = .pen
@@ -1273,6 +1392,8 @@ final class DrawingModel {
         penPresetIndex = 0
         sharpiePresetIndex = 0
         fillPresetIndex = 5
+        shapePresetIndex = 0
+        textPresetIndex = 0
     }
 
     var hasDefaults: Bool {
@@ -1437,6 +1558,7 @@ final class DrawingModel {
     }
 
     func loadBoard(id: String) {
+        if isEditingText { commitTextEditing() }
         flushAutoSave()
         do {
             let save = try store.loadBoard(id: id)
@@ -1444,6 +1566,8 @@ final class DrawingModel {
             strokes = save.strokes
             placedImages = save.placedImages
             fills = save.fills
+            shapes = save.shapes
+            textLabels = save.textLabels
             scenes = save.scenes
             currentBoardId = id
             openFileURL = store.boardURL(for: id)
@@ -1483,7 +1607,7 @@ final class DrawingModel {
         saveWorkItem = nil
         pendingAutoSaveBoardId = nil
 
-        let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes)
+        let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes, shapes: shapes, textLabels: textLabels)
         invalidateThumbnail(for: boardId)
         if let idx = boards.firstIndex(where: { $0.id == boardId }) {
             boards[idx].modified = Date()
@@ -1498,13 +1622,14 @@ final class DrawingModel {
     }
 
     func flushAutoSave(drainBackgroundQueue: Bool = false) {
+        if isEditingText { commitTextEditing() }
         let boardId = pendingAutoSaveBoardId ?? (saveWorkItem != nil ? currentBoardId : nil)
         saveWorkItem?.cancel()
         saveWorkItem = nil
         pendingAutoSaveBoardId = nil
 
         if let boardId, currentBoardId == boardId {
-            let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes)
+            let snapshot = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes, shapes: shapes, textLabels: textLabels)
             invalidateThumbnail(for: boardId)
             if let idx = boards.firstIndex(where: { $0.id == boardId }) {
                 boards[idx].modified = Date()
@@ -1526,6 +1651,8 @@ final class DrawingModel {
     var penPresets: [Color] { appSettings.isDarkMode ? penSettings.darkPresets : penSettings.lightPresets }
     var sharpiePresets: [Color] { appSettings.isDarkMode ? sharpieSettings.darkPresets : sharpieSettings.lightPresets }
     var fillPresets: [Color] { appSettings.isDarkMode ? fillSettings.darkPresets : fillSettings.lightPresets }
+    var shapePresets: [Color] { appSettings.isDarkMode ? shapeSettings.darkPresets : shapeSettings.lightPresets }
+    var textPresets: [Color] { appSettings.isDarkMode ? textSettings.darkPresets : textSettings.lightPresets }
 
     var penColor: Color {
         if penPresets.indices.contains(penPresetIndex) {
@@ -1546,6 +1673,27 @@ final class DrawingModel {
             return fillPresets[fillPresetIndex]
         }
         return appSettings.isDarkMode ? fillSettings.darkColor : fillSettings.lightColor
+    }
+
+    var shapeColor: Color {
+        if shapePresets.indices.contains(shapePresetIndex) {
+            return shapePresets[shapePresetIndex]
+        }
+        return appSettings.isDarkMode ? shapeSettings.darkColor : shapeSettings.lightColor
+    }
+
+    var textColor: Color {
+        if textPresets.indices.contains(textPresetIndex) {
+            return textPresets[textPresetIndex]
+        }
+        return appSettings.isDarkMode ? textSettings.darkColor : textSettings.lightColor
+    }
+
+    var editingTextDisplayColor: Color {
+        if editingTextPresetIndex >= 0, textPresets.indices.contains(editingTextPresetIndex) {
+            return textPresets[editingTextPresetIndex]
+        }
+        return editingTextColor.color
     }
 
     func selectPenPreset(_ index: Int) {
@@ -1572,15 +1720,50 @@ final class DrawingModel {
         fillSettings.darkColor = fillSettings.darkPresets[index]
     }
 
+    func selectShapePreset(_ index: Int) {
+        guard shapeSettings.lightPresets.indices.contains(index),
+              shapeSettings.darkPresets.indices.contains(index) else { return }
+        shapePresetIndex = index
+        shapeSettings.lightColor = shapeSettings.lightPresets[index]
+        shapeSettings.darkColor = shapeSettings.darkPresets[index]
+    }
+
+    func selectTextPreset(_ index: Int) {
+        guard textSettings.lightPresets.indices.contains(index),
+              textSettings.darkPresets.indices.contains(index) else { return }
+        textPresetIndex = index
+        textSettings.lightColor = textSettings.lightPresets[index]
+        textSettings.darkColor = textSettings.darkPresets[index]
+        if isEditingText {
+            editingTextPresetIndex = index
+            editingTextColor = CodableColor(textColor)
+        }
+    }
+
+    func setTextFontSize(_ size: CGFloat) {
+        textSettings.fontSize = size
+        if isEditingText {
+            editingTextFontSize = size
+        }
+    }
+
+    func toggleTextBold() {
+        textSettings.isBold.toggle()
+        if isEditingText {
+            editingTextIsBold = textSettings.isBold
+        }
+    }
+
     // MARK: - Flood Fill
 
-    /// Flood-fills the nearest enclosed region bounded by pen/sharpie strokes around `point`.
+    /// Flood-fills the nearest enclosed region bounded by pen/sharpie strokes or shapes around `point`.
     /// Returns `true` if a closed region was found and filled, `false` if open/unbounded.
     @discardableResult
     func floodFill(at point: CGPoint) -> Bool {
         guard let contours = FloodFillEngine.computeContours(
             at: point,
             strokes: strokes,
+            shapes: shapes,
             gapTolerance: fillSettings.gapTolerance
         ) else {
             return false
@@ -1619,9 +1802,13 @@ final class DrawingModel {
             strokes: strokes,
             placedImages: placedImages,
             fills: fills,
+            shapes: shapes,
+            textLabels: textLabels,
             selectedStrokeIds: selectedStrokeIds,
             selectedImageIds: selectedImageIds,
             selectedFillIds: selectedFillIds,
+            selectedShapeIds: selectedShapeIds,
+            selectedTextIds: selectedTextIds,
             selectionBoundary: selectionBoundary
         )
     }
@@ -1641,6 +1828,8 @@ final class DrawingModel {
         strokes.removeAll()
         placedImages.removeAll()
         fills.removeAll()
+        shapes.removeAll()
+        textLabels.removeAll()
         scenes.removeAll()
         activeSceneId = nil
         pendingSceneNavigation = nil
@@ -1648,17 +1837,177 @@ final class DrawingModel {
         imageCache.removeAll()
         spatialGrid.invalidate()
         currentStroke = nil
+        currentShape = nil
+        cancelTextEditing()
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
         selectedFillIds.removeAll()
+        selectedShapeIds.removeAll()
+        selectedTextIds.removeAll()
         selectionLasso.removeAll()
         selectionBoundary.removeAll()
         isMoving = false
         isResizing = false
         resizeImageId = nil
+        resizeShapeId = nil
         moveSnapshotTaken = false
         history.clear()
         updateUndoRedo()
+    }
+
+    // MARK: - Shapes
+
+    func beginShape(at point: CGPoint) {
+        currentShape = CanvasShape(
+            kind: shapeSettings.kind,
+            start: point,
+            end: point,
+            color: shapeColor,
+            presetIndex: shapePresetIndex,
+            lineWidth: shapeSettings.lineWidth,
+            isFilled: shapeSettings.kind.isLineLike ? false : shapeSettings.isFilled,
+            rotation: 0
+        )
+    }
+
+    func updateShape(to point: CGPoint, constrain: Bool = false) {
+        guard var shape = currentShape else { return }
+        let targetEnd = constrain ? GeometryEngine.constrainShapeEnd(start: shape.cgStart, end: point, kind: shape.kind) : point
+        shape.end = CodablePoint(targetEnd)
+        currentShape = shape
+    }
+
+    func endShape() {
+        guard let shape = currentShape else { return }
+        currentShape = nil
+        let dx = shape.cgEnd.x - shape.cgStart.x
+        let dy = shape.cgEnd.y - shape.cgStart.y
+        guard hypot(dx, dy) >= 4 else { return }
+        let finalShape: CanvasShape
+        if shape.kind.isLineLike {
+            finalShape = shape
+        } else {
+            let r = shape.rect
+            guard r.width >= 4 || r.height >= 4 else { return }
+            finalShape = CanvasShape(
+                id: shape.id,
+                kind: shape.kind,
+                start: CGPoint(x: r.minX, y: r.minY),
+                end: CGPoint(x: r.maxX, y: r.maxY),
+                codableColor: shape.color,
+                presetIndex: shape.presetIndex,
+                lineWidth: shape.lineWidth,
+                isFilled: shape.isFilled,
+                rotation: 0
+            )
+        }
+        saveState()
+        shapes.append(finalShape)
+        updateUndoRedo()
+        scheduleAutoSave()
+    }
+
+    // MARK: - Text Labels (Inline Editing)
+
+    func beginTextEditing(at point: CGPoint, existingId: UUID? = nil) {
+        if isEditingText {
+            if let existingId, editingTextId == existingId { return }
+            commitTextEditing()
+        }
+        if let existingId, let existing = textLabels.first(where: { $0.id == existingId }) {
+            editingTextId = existing.id
+            editingTextPosition = existing.cgPosition
+            editingTextDraft = existing.text
+            editingTextFontSize = existing.fontSize
+            editingTextIsBold = existing.isBold
+            editingTextPresetIndex = existing.presetIndex
+            editingTextColor = existing.color
+            editingTextRotation = existing.rotation
+            // Sync toolbar settings to match the label being edited
+            textSettings.fontSize = existing.fontSize
+            textSettings.isBold = existing.isBold
+            if existing.presetIndex >= 0, textSettings.lightPresets.indices.contains(existing.presetIndex) {
+                textPresetIndex = existing.presetIndex
+            }
+            isEditingText = true
+        } else {
+            editingTextId = nil
+            editingTextPosition = point
+            editingTextDraft = ""
+            editingTextFontSize = textSettings.fontSize
+            editingTextIsBold = textSettings.isBold
+            editingTextPresetIndex = textPresetIndex
+            editingTextColor = CodableColor(textColor)
+            editingTextRotation = 0
+            isEditingText = true
+        }
+    }
+
+    func commitTextEditing() {
+        guard isEditingText else { return }
+        let draft = editingTextDraft
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetId = editingTextId
+        let pos = editingTextPosition
+        let fontSize = editingTextFontSize
+        let isBold = editingTextIsBold
+        let presetIdx = editingTextPresetIndex
+        let color = editingTextColor
+        let rotation = editingTextRotation
+
+        isEditingText = false
+        editingTextId = nil
+        editingTextDraft = ""
+
+        if let targetId {
+            if trimmed.isEmpty {
+                if textLabels.contains(where: { $0.id == targetId }) {
+                    saveState()
+                    textLabels.removeAll { $0.id == targetId }
+                    selectedTextIds.remove(targetId)
+                    updateUndoRedo()
+                    scheduleAutoSave()
+                }
+            } else if let idx = textLabels.firstIndex(where: { $0.id == targetId }) {
+                let existing = textLabels[idx]
+                let updated = TextLabel(
+                    id: existing.id,
+                    text: draft,
+                    position: pos,
+                    fontSize: fontSize,
+                    codableColor: color,
+                    presetIndex: presetIdx,
+                    isBold: isBold,
+                    rotation: rotation
+                )
+                if updated != existing {
+                    saveState()
+                    textLabels[idx] = updated
+                    updateUndoRedo()
+                    scheduleAutoSave()
+                }
+            }
+        } else if !trimmed.isEmpty {
+            saveState()
+            let newLabel = TextLabel(
+                text: draft,
+                position: pos,
+                fontSize: fontSize,
+                codableColor: color,
+                presetIndex: presetIdx,
+                isBold: isBold,
+                rotation: rotation
+            )
+            textLabels.append(newLabel)
+            updateUndoRedo()
+            scheduleAutoSave()
+        }
+    }
+
+    func cancelTextEditing() {
+        isEditingText = false
+        editingTextId = nil
+        editingTextDraft = ""
     }
 
     // MARK: - Strokes
@@ -1738,14 +2087,32 @@ final class DrawingModel {
             } else {
                 updatedFills = fills
             }
+            let eraserRadius = max(stroke.lineWidth / 2, 6)
+            let updatedShapes: [CanvasShape]
+            let updatedTexts: [TextLabel]
+            if eraserSettings.eraseTarget == .all {
+                updatedShapes = shapes.filter { shape in
+                    !stroke.points.contains { shape.containsPoint($0, tolerance: eraserRadius) }
+                }
+                updatedTexts = textLabels.filter { label in
+                    !stroke.points.contains { label.containsPoint($0, padding: eraserRadius) }
+                }
+            } else {
+                updatedShapes = shapes
+                updatedTexts = textLabels
+            }
 
             let strokesChanged = updatedStrokes.count != strokes.count
                 || !zip(updatedStrokes, strokes).allSatisfy({ $0.id == $1.id && $0.points.count == $1.points.count })
             let fillsChanged = updatedFills.count != fills.count
-            if strokesChanged || fillsChanged {
+            let shapesChanged = updatedShapes.count != shapes.count
+            let textsChanged = updatedTexts.count != textLabels.count
+            if strokesChanged || fillsChanged || shapesChanged || textsChanged {
                 saveState()
                 strokes = updatedStrokes
                 fills = updatedFills
+                shapes = updatedShapes
+                textLabels = updatedTexts
                 spatialGrid.rebuild(with: strokes)
                 updateUndoRedo()
                 scheduleAutoSave()
@@ -1792,6 +2159,8 @@ final class DrawingModel {
         var hitStrokes = Set<UUID>()
         var hitFills = Set<UUID>()
         var hitImages = Set<UUID>()
+        var hitShapes = Set<UUID>()
+        var hitTexts = Set<UUID>()
 
         spatialGrid.sync(with: strokes)
         let candidateIndices = spatialGrid.queryIndices(in: path.boundingBoxOfPath)
@@ -1820,8 +2189,22 @@ final class DrawingModel {
             }
         }
 
+        for sh in shapes {
+            let center = sh.cgCenter
+            if path.contains(center) || sh.rotatedCorners().contains(where: { path.contains($0) }) {
+                hitShapes.insert(sh.id)
+            }
+        }
+
+        for lbl in textLabels {
+            let center = lbl.cgCenter
+            if path.contains(center) || lbl.rotatedCorners().contains(where: { path.contains($0) }) {
+                hitTexts.insert(lbl.id)
+            }
+        }
+
         // Lassoing empty space shouldn't leave a stale marching-ants loop behind.
-        guard !hitStrokes.isEmpty || !hitFills.isEmpty || !hitImages.isEmpty else {
+        guard !hitStrokes.isEmpty || !hitFills.isEmpty || !hitImages.isEmpty || !hitShapes.isEmpty || !hitTexts.isEmpty else {
             selectionLasso = []
             clearSelection()
             return
@@ -1831,19 +2214,42 @@ final class DrawingModel {
         selectedStrokeIds = hitStrokes
         selectedFillIds = hitFills
         selectedImageIds = hitImages
+        selectedShapeIds = hitShapes
+        selectedTextIds = hitTexts
         selectionBoundary = selectionLasso
         selectionLasso = []
         resetSelectionRotationTracking()
         updateUndoRedo()
     }
 
-    /// Hit-tests top-to-bottom (strokes → fills → placed images) to check whether any
+    /// Hit-tests top-to-bottom (text labels → strokes → shapes → fills → placed images) to check whether any
     /// selectable canvas element lies under `point`.
     func hasElement(at point: CGPoint, scale: CGFloat = 1.0) -> Bool {
+        if hitTestTextLabel(at: point) != nil { return true }
         if hitTestStroke(at: point, scale: scale) != nil { return true }
+        if hitTestShape(at: point, scale: scale) != nil { return true }
         if hitTestFill(at: point) != nil { return true }
         if hitTestImage(point) != nil { return true }
         return false
+    }
+
+    func hitTestTextLabel(at point: CGPoint) -> TextLabel? {
+        for lbl in textLabels.reversed() {
+            if lbl.containsPoint(point, padding: 6) {
+                return lbl
+            }
+        }
+        return nil
+    }
+
+    func hitTestShape(at point: CGPoint, scale: CGFloat = 1.0) -> CanvasShape? {
+        let tol = max(10, 12 / max(scale, 0.1))
+        for sh in shapes.reversed() {
+            if sh.containsPoint(point, tolerance: tol) {
+                return sh
+            }
+        }
+        return nil
     }
 
     private func hitTestStroke(at point: CGPoint, scale: CGFloat) -> Stroke? {
@@ -1905,10 +2311,17 @@ final class DrawingModel {
         ]
     }
 
-    /// Selects the single topmost element (Pen/Sharpie stroke, Fill shape, or Placed Image)
+    /// Selects the single topmost element (Text Label, Pen/Sharpie stroke, Shape, Fill, or Placed Image)
     /// under `point`. Returns `true` if an element was found and selected.
     @discardableResult
     func selectElement(at point: CGPoint, scale: CGFloat = 1.0) -> Bool {
+        if let lbl = hitTestTextLabel(at: point) {
+            saveState()
+            clearSelection()
+            selectedTextIds = [lbl.id]
+            updateUndoRedo()
+            return true
+        }
         if let stroke = hitTestStroke(at: point, scale: scale) {
             saveState()
             clearSelection()
@@ -1916,6 +2329,13 @@ final class DrawingModel {
             if let box = GeometryEngine.boundingBox(of: [stroke], images: [], fills: [], padding: 8) {
                 selectionBoundary = paddedBoundingPolygon(for: box)
             }
+            updateUndoRedo()
+            return true
+        }
+        if let shape = hitTestShape(at: point, scale: scale) {
+            saveState()
+            clearSelection()
+            selectedShapeIds = [shape.id]
             updateUndoRedo()
             return true
         }
@@ -1942,8 +2362,18 @@ final class DrawingModel {
         !selectedStrokeIds.isEmpty
             || !selectedImageIds.isEmpty
             || !selectedFillIds.isEmpty
+            || !selectedShapeIds.isEmpty
+            || !selectedTextIds.isEmpty
             || !selectionBoundary.isEmpty
             || !selectionLasso.isEmpty
+    }
+
+    var hasSelectedItems: Bool {
+        !selectedStrokeIds.isEmpty
+            || !selectedImageIds.isEmpty
+            || !selectedFillIds.isEmpty
+            || !selectedShapeIds.isEmpty
+            || !selectedTextIds.isEmpty
     }
 
     /// Clears the active lasso selection and any in-progress lasso/transform while
@@ -1977,20 +2407,34 @@ final class DrawingModel {
         selectedStrokeIds.removeAll()
         selectedImageIds.removeAll()
         selectedFillIds.removeAll()
+        selectedShapeIds.removeAll()
+        selectedTextIds.removeAll()
         selectionBoundary.removeAll()
         resetSelectionRotationTracking()
     }
 
     /// Effective rotation angle (in radians) for the current selection.
-    /// For a single selected image, reflects its persistent `rotation`; otherwise the
-    /// cumulative rotation applied during the active selection session.
+    /// For a single selected image, 2D shape, or text label, reflects its persistent `rotation`;
+    /// otherwise the cumulative rotation applied during the active selection session.
     var effectiveSelectionRotation: CGFloat {
-        if selectedStrokeIds.isEmpty,
-           selectedFillIds.isEmpty,
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty && selectedShapeIds.isEmpty && selectedTextIds.isEmpty,
            selectedImageIds.count == 1,
            let id = selectedImageIds.first,
            let img = placedImages.first(where: { $0.id == id }) {
             return GeometryEngine.normalizeAngle(img.cgRotation)
+        }
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty && selectedImageIds.isEmpty && selectedTextIds.isEmpty,
+           selectedShapeIds.count == 1,
+           let id = selectedShapeIds.first,
+           let sh = shapes.first(where: { $0.id == id }),
+           !sh.kind.isLineLike {
+            return GeometryEngine.normalizeAngle(sh.cgRotation)
+        }
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty && selectedImageIds.isEmpty && selectedShapeIds.isEmpty,
+           selectedTextIds.count == 1,
+           let id = selectedTextIds.first,
+           let lbl = textLabels.first(where: { $0.id == id }) {
+            return GeometryEngine.normalizeAngle(lbl.cgRotation)
         }
         return GeometryEngine.normalizeAngle(selectionRotationAngle)
     }
@@ -1999,9 +2443,13 @@ final class DrawingModel {
     var canResetSelectionRotation: Bool {
         if abs(effectiveSelectionRotation) > 0.001 { return true }
         for img in placedImages where selectedImageIds.contains(img.id) {
-            if abs(GeometryEngine.normalizeAngle(img.cgRotation)) > 0.001 {
-                return true
-            }
+            if abs(GeometryEngine.normalizeAngle(img.cgRotation)) > 0.001 { return true }
+        }
+        for sh in shapes where selectedShapeIds.contains(sh.id) && !sh.kind.isLineLike {
+            if abs(GeometryEngine.normalizeAngle(sh.cgRotation)) > 0.001 { return true }
+        }
+        for lbl in textLabels where selectedTextIds.contains(lbl.id) {
+            if abs(GeometryEngine.normalizeAngle(lbl.cgRotation)) > 0.001 { return true }
         }
         return false
     }
@@ -2015,14 +2463,11 @@ final class DrawingModel {
     }
 
     func rotationHandleGeometry(scale: CGFloat) -> RotationHandleGeometry? {
-        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty || !selectedImageIds.isEmpty else {
-            return nil
-        }
+        guard hasSelectedItems else { return nil }
         let stemLength: CGFloat = 28 / max(scale, 0.1)
 
         // Single PlacedImage selected: attach handle to the rotated image's top edge.
-        if selectedStrokeIds.isEmpty,
-           selectedFillIds.isEmpty,
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty && selectedShapeIds.isEmpty && selectedTextIds.isEmpty,
            selectedImageIds.count == 1,
            let imgId = selectedImageIds.first,
            let img = placedImages.first(where: { $0.id == imgId }) {
@@ -2032,18 +2477,44 @@ final class DrawingModel {
             let halfH = img.cgSize.height / 2
             let stemStart = CGPoint(x: pivot.x + up.x * halfH, y: pivot.y + up.y * halfH)
             let handleCenter = CGPoint(x: pivot.x + up.x * (halfH + stemLength), y: pivot.y + up.y * (halfH + stemLength))
-            return RotationHandleGeometry(
-                pivot: pivot,
-                stemStart: stemStart,
-                handleCenter: handleCenter,
-                displayAngleRadians: angle
-            )
+            return RotationHandleGeometry(pivot: pivot, stemStart: stemStart, handleCenter: handleCenter, displayAngleRadians: angle)
+        }
+
+        // Single 2D CanvasShape selected: attach handle to the rotated shape's top edge.
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty && selectedImageIds.isEmpty && selectedTextIds.isEmpty,
+           selectedShapeIds.count == 1,
+           let shId = selectedShapeIds.first,
+           let sh = shapes.first(where: { $0.id == shId }),
+           !sh.kind.isLineLike {
+            let pivot = sh.cgCenter
+            let angle = GeometryEngine.normalizeAngle(sh.cgRotation)
+            let up = CGPoint(x: sin(angle), y: -cos(angle))
+            let halfH = sh.rect.height / 2
+            let stemStart = CGPoint(x: pivot.x + up.x * halfH, y: pivot.y + up.y * halfH)
+            let handleCenter = CGPoint(x: pivot.x + up.x * (halfH + stemLength), y: pivot.y + up.y * (halfH + stemLength))
+            return RotationHandleGeometry(pivot: pivot, stemStart: stemStart, handleCenter: handleCenter, displayAngleRadians: angle)
+        }
+
+        // Single TextLabel selected: attach handle to the rotated label's top edge.
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty && selectedImageIds.isEmpty && selectedShapeIds.isEmpty,
+           selectedTextIds.count == 1,
+           let lblId = selectedTextIds.first,
+           let lbl = textLabels.first(where: { $0.id == lblId }) {
+            let pivot = lbl.cgCenter
+            let angle = GeometryEngine.normalizeAngle(lbl.cgRotation)
+            let up = CGPoint(x: sin(angle), y: -cos(angle))
+            let halfH = lbl.measuredSize().height / 2
+            let stemStart = CGPoint(x: pivot.x + up.x * halfH, y: pivot.y + up.y * halfH)
+            let handleCenter = CGPoint(x: pivot.x + up.x * (halfH + stemLength), y: pivot.y + up.y * (halfH + stemLength))
+            return RotationHandleGeometry(pivot: pivot, stemStart: stemStart, handleCenter: handleCenter, displayAngleRadians: angle)
         }
 
         let selStrokes = strokes.filter { selectedStrokeIds.contains($0.id) }
         let selImages = placedImages.filter { selectedImageIds.contains($0.id) }
         let selFills = fills.filter { selectedFillIds.contains($0.id) }
-        guard let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, padding: 0) else {
+        let selShapes = shapes.filter { selectedShapeIds.contains($0.id) }
+        let selTexts = textLabels.filter { selectedTextIds.contains($0.id) }
+        guard let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, shapes: selShapes, textLabels: selTexts, padding: 0) else {
             return nil
         }
 
@@ -2064,17 +2535,11 @@ final class DrawingModel {
             let proj = (p.x - pivot.x) * up.x + (p.y - pivot.y) * up.y
             if proj > maxExtent { maxExtent = proj }
         }
-        for s in selStrokes {
-            for p in s.points { consider(p) }
-        }
-        for f in selFills {
-            for loop in f.contours {
-                for p in loop { consider(p) }
-            }
-        }
-        for img in selImages {
-            for c in img.rotatedCorners() { consider(c) }
-        }
+        for s in selStrokes { for p in s.points { consider(p) } }
+        for f in selFills { for loop in f.contours { for p in loop { consider(p) } } }
+        for img in selImages { for c in img.rotatedCorners() { consider(c) } }
+        for sh in selShapes { for c in sh.rotatedCorners() { consider(c) } }
+        for lbl in selTexts { for c in lbl.rotatedCorners() { consider(c) } }
         for p in selectionBoundary { consider(p) }
 
         let stemStart = CGPoint(x: pivot.x + up.x * maxExtent, y: pivot.y + up.y * maxExtent)
@@ -2116,6 +2581,14 @@ final class DrawingModel {
         rotateSnapshotImages = [:]
         for img in placedImages where selectedImageIds.contains(img.id) {
             rotateSnapshotImages[img.id] = (center: img.cgCenter, size: img.cgSize, rotation: img.rotation)
+        }
+        rotateSnapshotShapes = [:]
+        for sh in shapes where selectedShapeIds.contains(sh.id) {
+            rotateSnapshotShapes[sh.id] = sh
+        }
+        rotateSnapshotTexts = [:]
+        for lbl in textLabels where selectedTextIds.contains(lbl.id) {
+            rotateSnapshotTexts[lbl.id] = (center: lbl.cgCenter, size: lbl.measuredSize(), rotation: lbl.rotation)
         }
         rotateSnapshotBoundary = selectionBoundary
     }
@@ -2186,6 +2659,59 @@ final class DrawingModel {
                 )
             }
         }
+        if !rotateSnapshotShapes.isEmpty {
+            shapes = shapes.map { sh in
+                guard let orig = rotateSnapshotShapes[sh.id] else { return sh }
+                if orig.kind.isLineLike {
+                    return CanvasShape(
+                        id: sh.id,
+                        kind: orig.kind,
+                        start: rotatePt(orig.cgStart),
+                        end: rotatePt(orig.cgEnd),
+                        codableColor: orig.color,
+                        presetIndex: orig.presetIndex,
+                        lineWidth: orig.lineWidth,
+                        isFilled: orig.isFilled,
+                        rotation: 0
+                    )
+                } else {
+                    let origCenter = orig.cgCenter
+                    let newCenter = rotatePt(origCenter)
+                    let dx = newCenter.x - origCenter.x
+                    let dy = newCenter.y - origCenter.y
+                    let newRot = Double(GeometryEngine.normalizeAngle(orig.cgRotation + appliedDelta))
+                    return CanvasShape(
+                        id: sh.id,
+                        kind: orig.kind,
+                        start: CGPoint(x: orig.cgStart.x + dx, y: orig.cgStart.y + dy),
+                        end: CGPoint(x: orig.cgEnd.x + dx, y: orig.cgEnd.y + dy),
+                        codableColor: orig.color,
+                        presetIndex: orig.presetIndex,
+                        lineWidth: orig.lineWidth,
+                        isFilled: orig.isFilled,
+                        rotation: newRot
+                    )
+                }
+            }
+        }
+        if !rotateSnapshotTexts.isEmpty {
+            textLabels = textLabels.map { lbl in
+                guard let orig = rotateSnapshotTexts[lbl.id] else { return lbl }
+                let newCenter = rotatePt(orig.center)
+                let newOrigin = CGPoint(x: newCenter.x - orig.size.width / 2, y: newCenter.y - orig.size.height / 2)
+                let newRot = Double(GeometryEngine.normalizeAngle(CGFloat(orig.rotation) + appliedDelta))
+                return TextLabel(
+                    id: lbl.id,
+                    text: lbl.text,
+                    position: newOrigin,
+                    fontSize: lbl.fontSize,
+                    codableColor: lbl.color,
+                    presetIndex: lbl.presetIndex,
+                    isBold: lbl.isBold,
+                    rotation: newRot
+                )
+            }
+        }
         if !rotateSnapshotBoundary.isEmpty {
             selectionBoundary = rotateSnapshotBoundary.map(rotatePt)
         }
@@ -2201,6 +2727,8 @@ final class DrawingModel {
         rotateSnapshotStrokes.removeAll()
         rotateSnapshotFills.removeAll()
         rotateSnapshotImages.removeAll()
+        rotateSnapshotShapes.removeAll()
+        rotateSnapshotTexts.removeAll()
         rotateSnapshotBoundary.removeAll()
         rotateSnapshotTaken = false
         if didMutate {
@@ -2215,10 +2743,25 @@ final class DrawingModel {
         guard canResetSelectionRotation else { return }
         saveState()
 
-        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty {
-            placedImages = placedImages.map { img in
-                guard selectedImageIds.contains(img.id) else { return img }
-                return PlacedImage(id: img.id, position: img.cgPosition, size: img.cgSize, imageData: img.imageData, rotation: 0)
+        let hasLineShapes = shapes.contains { selectedShapeIds.contains($0.id) && $0.kind.isLineLike }
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty && !hasLineShapes {
+            if !selectedImageIds.isEmpty {
+                placedImages = placedImages.map { img in
+                    guard selectedImageIds.contains(img.id) else { return img }
+                    return PlacedImage(id: img.id, position: img.cgPosition, size: img.cgSize, imageData: img.imageData, rotation: 0)
+                }
+            }
+            if !selectedShapeIds.isEmpty {
+                shapes = shapes.map { sh in
+                    guard selectedShapeIds.contains(sh.id) else { return sh }
+                    return CanvasShape(id: sh.id, kind: sh.kind, start: sh.cgStart, end: sh.cgEnd, codableColor: sh.color, presetIndex: sh.presetIndex, lineWidth: sh.lineWidth, isFilled: sh.isFilled, rotation: 0)
+                }
+            }
+            if !selectedTextIds.isEmpty {
+                textLabels = textLabels.map { lbl in
+                    guard selectedTextIds.contains(lbl.id) else { return lbl }
+                    return TextLabel(id: lbl.id, text: lbl.text, position: lbl.cgPosition, fontSize: lbl.fontSize, codableColor: lbl.color, presetIndex: lbl.presetIndex, isBold: lbl.isBold, rotation: 0)
+                }
             }
             resetSelectionRotationTracking()
             updateUndoRedo()
@@ -2232,8 +2775,10 @@ final class DrawingModel {
             let selStrokes = strokes.filter { selectedStrokeIds.contains($0.id) }
             let selImages = placedImages.filter { selectedImageIds.contains($0.id) }
             let selFills = fills.filter { selectedFillIds.contains($0.id) }
+            let selShapes = shapes.filter { selectedShapeIds.contains($0.id) }
+            let selTexts = textLabels.filter { selectedTextIds.contains($0.id) }
             let fallbackCenter: CGPoint = {
-                if let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, padding: 0) {
+                if let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, shapes: selShapes, textLabels: selTexts, padding: 0) {
                     return CGPoint(x: box.midX, y: box.midY)
                 }
                 return .zero
@@ -2283,13 +2828,51 @@ final class DrawingModel {
                     return PlacedImage(id: img.id, position: newOrigin, size: img.cgSize, imageData: img.imageData, rotation: newRot)
                 }
             }
+            if !selectedShapeIds.isEmpty {
+                shapes = shapes.map { sh in
+                    guard selectedShapeIds.contains(sh.id) else { return sh }
+                    if sh.kind.isLineLike {
+                        return CanvasShape(id: sh.id, kind: sh.kind, start: rotatePt(sh.cgStart), end: rotatePt(sh.cgEnd), codableColor: sh.color, presetIndex: sh.presetIndex, lineWidth: sh.lineWidth, isFilled: sh.isFilled, rotation: 0)
+                    } else {
+                        let c = sh.cgCenter
+                        let nc = rotatePt(c)
+                        let dx = nc.x - c.x, dy = nc.y - c.y
+                        let newRot = Double(GeometryEngine.normalizeAngle(sh.cgRotation + delta))
+                        return CanvasShape(id: sh.id, kind: sh.kind, start: CGPoint(x: sh.cgStart.x + dx, y: sh.cgStart.y + dy), end: CGPoint(x: sh.cgEnd.x + dx, y: sh.cgEnd.y + dy), codableColor: sh.color, presetIndex: sh.presetIndex, lineWidth: sh.lineWidth, isFilled: sh.isFilled, rotation: newRot)
+                    }
+                }
+            }
+            if !selectedTextIds.isEmpty {
+                textLabels = textLabels.map { lbl in
+                    guard selectedTextIds.contains(lbl.id) else { return lbl }
+                    let s = lbl.measuredSize()
+                    let nc = rotatePt(lbl.cgCenter)
+                    let newOrigin = CGPoint(x: nc.x - s.width / 2, y: nc.y - s.height / 2)
+                    let newRot = Double(GeometryEngine.normalizeAngle(lbl.cgRotation + delta))
+                    return TextLabel(id: lbl.id, text: lbl.text, position: newOrigin, fontSize: lbl.fontSize, codableColor: lbl.color, presetIndex: lbl.presetIndex, isBold: lbl.isBold, rotation: newRot)
+                }
+            }
             if !selectionBoundary.isEmpty {
                 selectionBoundary = selectionBoundary.map(rotatePt)
             }
-        } else if !selectedImageIds.isEmpty {
-            placedImages = placedImages.map { img in
-                guard selectedImageIds.contains(img.id) else { return img }
-                return PlacedImage(id: img.id, position: img.cgPosition, size: img.cgSize, imageData: img.imageData, rotation: 0)
+        } else {
+            if !selectedImageIds.isEmpty {
+                placedImages = placedImages.map { img in
+                    guard selectedImageIds.contains(img.id) else { return img }
+                    return PlacedImage(id: img.id, position: img.cgPosition, size: img.cgSize, imageData: img.imageData, rotation: 0)
+                }
+            }
+            if !selectedShapeIds.isEmpty {
+                shapes = shapes.map { sh in
+                    guard selectedShapeIds.contains(sh.id), !sh.kind.isLineLike else { return sh }
+                    return CanvasShape(id: sh.id, kind: sh.kind, start: sh.cgStart, end: sh.cgEnd, codableColor: sh.color, presetIndex: sh.presetIndex, lineWidth: sh.lineWidth, isFilled: sh.isFilled, rotation: 0)
+                }
+            }
+            if !selectedTextIds.isEmpty {
+                textLabels = textLabels.map { lbl in
+                    guard selectedTextIds.contains(lbl.id) else { return lbl }
+                    return TextLabel(id: lbl.id, text: lbl.text, position: lbl.cgPosition, fontSize: lbl.fontSize, codableColor: lbl.color, presetIndex: lbl.presetIndex, isBold: lbl.isBold, rotation: 0)
+                }
             }
         }
 
@@ -2310,14 +2893,21 @@ final class DrawingModel {
             }
         }
         for img in placedImages where selectedImageIds.contains(img.id) {
-            if img.containsPoint(point) {
-                return true
+            if img.containsPoint(point) { return true }
+        }
+        for sh in shapes where selectedShapeIds.contains(sh.id) {
+            if sh.containsPoint(point, tolerance: 14) { return true }
+            // Also allow dragging from inside a selected 2D shape's rotated rect so moving unfilled shapes is effortless!
+            if !sh.kind.isLineLike {
+                let local = sh.rotation != 0 ? GeometryEngine.rotatePoint(point, around: sh.cgCenter, by: -sh.cgRotation) : point
+                if sh.rect.contains(local) { return true }
             }
         }
+        for lbl in textLabels where selectedTextIds.contains(lbl.id) {
+            if lbl.containsPoint(point, padding: 8) { return true }
+        }
         for fill in fills where selectedFillIds.contains(fill.id) {
-            if fill.makeCGPath().contains(point, using: .evenOdd) {
-                return true
-            }
+            if fill.makeCGPath().contains(point, using: .evenOdd) { return true }
         }
         return false
     }
@@ -2349,15 +2939,42 @@ final class DrawingModel {
         return nil
     }
 
+    func hitTestShapeHandle(_ point: CGPoint, scale: CGFloat = 1.0) -> (shapeId: UUID, handleIndex: Int)? {
+        let hitRadius = max(10, 12 / max(scale, 0.1))
+        let hitRadiusSq = hitRadius * hitRadius
+        for sh in shapes where selectedShapeIds.contains(sh.id) {
+            let handles = sh.rotatedCorners()
+            for (idx, pos) in handles.enumerated() {
+                if GeometryEngine.distanceSquared(point, pos) <= hitRadiusSq {
+                    return (sh.id, idx)
+                }
+            }
+        }
+        return nil
+    }
+
     func beginMove(at point: CGPoint, scale: CGFloat = 1.0) {
         if let hit = hitTestResizeHandle(point, scale: scale) {
             isResizing = true
             resizeCorner = hit.corner
             resizeImageId = hit.imgId
+            resizeShapeId = nil
             lastMovePoint = point
             moveSnapshotTaken = false
             if let img = placedImages.first(where: { $0.id == hit.imgId }) {
                 resizeStartRect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            }
+            return
+        }
+        if let hit = hitTestShapeHandle(point, scale: scale) {
+            isResizing = true
+            resizeCorner = hit.handleIndex
+            resizeShapeId = hit.shapeId
+            resizeImageId = nil
+            lastMovePoint = point
+            moveSnapshotTaken = false
+            if let sh = shapes.first(where: { $0.id == hit.shapeId }) {
+                resizeStartRect = sh.rect
             }
             return
         }
@@ -2382,6 +2999,7 @@ final class DrawingModel {
         isResizing = false
         isMoving = false
         resizeImageId = nil
+        resizeShapeId = nil
         moveSnapshotTaken = false
         if didMutate {
             spatialGrid.rebuild(with: strokes)
@@ -2390,10 +3008,88 @@ final class DrawingModel {
         }
     }
 
-    func moveSelected(by offset: CGSize) {
+    func moveSelected(by offset: CGSize, lockAspect: Bool = false) {
         guard offset != .zero else { return }
 
         if isResizing {
+            if let shapeId = resizeShapeId,
+               let existing = shapes.first(where: { $0.id == shapeId }) {
+                if existing.kind.isLineLike {
+                    var newStart = existing.cgStart
+                    var newEnd = existing.cgEnd
+                    if resizeCorner == 0 {
+                        let raw = CGPoint(x: newStart.x + offset.width, y: newStart.y + offset.height)
+                        newStart = lockAspect ? GeometryEngine.constrainShapeEnd(start: newEnd, end: raw, kind: existing.kind) : raw
+                    } else {
+                        let raw = CGPoint(x: newEnd.x + offset.width, y: newEnd.y + offset.height)
+                        newEnd = lockAspect ? GeometryEngine.constrainShapeEnd(start: newStart, end: raw, kind: existing.kind) : raw
+                    }
+                    if !moveSnapshotTaken {
+                        saveState()
+                        moveSnapshotTaken = true
+                    }
+                    shapes = shapes.map { sh in
+                        guard sh.id == shapeId else { return sh }
+                        return CanvasShape(id: sh.id, kind: sh.kind, start: newStart, end: newEnd, codableColor: sh.color, presetIndex: sh.presetIndex, lineWidth: sh.lineWidth, isFilled: sh.isFilled, rotation: 0)
+                    }
+                    return
+                }
+
+                let rot = existing.cgRotation
+                let localOffset: CGSize
+                if rot != 0 {
+                    let cosA = cos(-rot)
+                    let sinA = sin(-rot)
+                    localOffset = CGSize(
+                        width: offset.width * cosA - offset.height * sinA,
+                        height: offset.width * sinA + offset.height * cosA
+                    )
+                } else {
+                    localOffset = offset
+                }
+                guard let newLocalRect = GeometryEngine.resizedFreeRect(start: resizeStartRect, corner: resizeCorner, offset: localOffset, minSize: 12, lockAspect: lockAspect) else {
+                    return
+                }
+                let finalRect: CGRect
+                if rot != 0 {
+                    let localCenterDx = newLocalRect.midX - resizeStartRect.midX
+                    let localCenterDy = newLocalRect.midY - resizeStartRect.midY
+                    let cosA = cos(rot)
+                    let sinA = sin(rot)
+                    let worldCenterDx = localCenterDx * cosA - localCenterDy * sinA
+                    let worldCenterDy = localCenterDx * sinA + localCenterDy * cosA
+                    let newCenter = CGPoint(x: resizeStartRect.midX + worldCenterDx, y: resizeStartRect.midY + worldCenterDy)
+                    finalRect = CGRect(
+                        x: newCenter.x - newLocalRect.width / 2,
+                        y: newCenter.y - newLocalRect.height / 2,
+                        width: newLocalRect.width,
+                        height: newLocalRect.height
+                    )
+                } else {
+                    finalRect = newLocalRect
+                }
+                if !moveSnapshotTaken {
+                    saveState()
+                    moveSnapshotTaken = true
+                }
+                shapes = shapes.map { sh in
+                    guard sh.id == shapeId else { return sh }
+                    return CanvasShape(
+                        id: sh.id,
+                        kind: sh.kind,
+                        start: CGPoint(x: finalRect.minX, y: finalRect.minY),
+                        end: CGPoint(x: finalRect.maxX, y: finalRect.maxY),
+                        codableColor: sh.color,
+                        presetIndex: sh.presetIndex,
+                        lineWidth: sh.lineWidth,
+                        isFilled: sh.isFilled,
+                        rotation: sh.rotation
+                    )
+                }
+                resizeStartRect = finalRect
+                return
+            }
+
             guard let imgId = resizeImageId,
                   let existing = placedImages.first(where: { $0.id == imgId }) else {
                 return
@@ -2448,28 +3144,32 @@ final class DrawingModel {
             saveState()
             moveSnapshotTaken = true
         }
-        strokes = strokes.map { s in
-            guard selectedStrokeIds.contains(s.id) else { return s }
-            return Stroke(
-                id: s.id,
-                points: s.points.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) },
-                color: s.uiColor,
-                lineWidth: s.lineWidth,
-                isEraser: s.isEraser,
-                presetIndex: s.presetIndex,
-                isCatmullRom: s.isCatmullRom,
-                isSharpie: s.isSharpie
-            )
+        if !selectedStrokeIds.isEmpty {
+            strokes = strokes.map { s in
+                guard selectedStrokeIds.contains(s.id) else { return s }
+                return Stroke(
+                    id: s.id,
+                    points: s.points.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) },
+                    color: s.uiColor,
+                    lineWidth: s.lineWidth,
+                    isEraser: s.isEraser,
+                    presetIndex: s.presetIndex,
+                    isCatmullRom: s.isCatmullRom,
+                    isSharpie: s.isSharpie
+                )
+            }
         }
-        placedImages = placedImages.map { img in
-            guard selectedImageIds.contains(img.id) else { return img }
-            return PlacedImage(
-                id: img.id,
-                position: CGPoint(x: img.cgPosition.x + offset.width, y: img.cgPosition.y + offset.height),
-                size: img.cgSize,
-                imageData: img.imageData,
-                rotation: img.rotation
-            )
+        if !selectedImageIds.isEmpty {
+            placedImages = placedImages.map { img in
+                guard selectedImageIds.contains(img.id) else { return img }
+                return PlacedImage(
+                    id: img.id,
+                    position: CGPoint(x: img.cgPosition.x + offset.width, y: img.cgPosition.y + offset.height),
+                    size: img.cgSize,
+                    imageData: img.imageData,
+                    rotation: img.rotation
+                )
+            }
         }
         if !selectedFillIds.isEmpty {
             fills = fills.map { fill in
@@ -2478,6 +3178,37 @@ final class DrawingModel {
                     loop.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) }
                 }
                 return FillShape(id: fill.id, contours: shifted, color: fill.uiColor, opacity: fill.opacity, presetIndex: fill.presetIndex)
+            }
+        }
+        if !selectedShapeIds.isEmpty {
+            shapes = shapes.map { sh in
+                guard selectedShapeIds.contains(sh.id) else { return sh }
+                return CanvasShape(
+                    id: sh.id,
+                    kind: sh.kind,
+                    start: CGPoint(x: sh.cgStart.x + offset.width, y: sh.cgStart.y + offset.height),
+                    end: CGPoint(x: sh.cgEnd.x + offset.width, y: sh.cgEnd.y + offset.height),
+                    codableColor: sh.color,
+                    presetIndex: sh.presetIndex,
+                    lineWidth: sh.lineWidth,
+                    isFilled: sh.isFilled,
+                    rotation: sh.rotation
+                )
+            }
+        }
+        if !selectedTextIds.isEmpty {
+            textLabels = textLabels.map { lbl in
+                guard selectedTextIds.contains(lbl.id) else { return lbl }
+                return TextLabel(
+                    id: lbl.id,
+                    text: lbl.text,
+                    position: CGPoint(x: lbl.cgPosition.x + offset.width, y: lbl.cgPosition.y + offset.height),
+                    fontSize: lbl.fontSize,
+                    codableColor: lbl.color,
+                    presetIndex: lbl.presetIndex,
+                    isBold: lbl.isBold,
+                    rotation: lbl.rotation
+                )
             }
         }
         if !selectionBoundary.isEmpty {
@@ -2493,16 +3224,20 @@ final class DrawingModel {
     }
 
     func deleteSelected() {
-        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty || !selectionBoundary.isEmpty else { return }
+        guard hasSelectedItems || !selectionBoundary.isEmpty else { return }
         saveState()
-        if !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty {
+        if hasSelectedItems {
             strokes = strokes.filter { !selectedStrokeIds.contains($0.id) }
             for id in selectedImageIds { imageCache.removeValue(forKey: id) }
             placedImages = placedImages.filter { !selectedImageIds.contains($0.id) }
             fills = fills.filter { !selectedFillIds.contains($0.id) }
+            shapes = shapes.filter { !selectedShapeIds.contains($0.id) }
+            textLabels = textLabels.filter { !selectedTextIds.contains($0.id) }
             selectedStrokeIds.removeAll()
             selectedImageIds.removeAll()
             selectedFillIds.removeAll()
+            selectedShapeIds.removeAll()
+            selectedTextIds.removeAll()
         }
         selectionBoundary.removeAll()
         resetSelectionRotationTracking()
@@ -2515,12 +3250,14 @@ final class DrawingModel {
 
     /// Duplicates the current lasso selection in-place with a (+24, +24) offset without touching the system clipboard.
     func duplicateSelected() {
-        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty else { return }
+        guard hasSelectedItems else { return }
         saveState()
         let dx: CGFloat = 24, dy: CGFloat = 24
         var newStrokeIds = Set<UUID>()
         var newImageIds = Set<UUID>()
         var newFillIds = Set<UUID>()
+        var newShapeIds = Set<UUID>()
+        var newTextIds = Set<UUID>()
 
         for s in strokes where selectedStrokeIds.contains(s.id) {
             let copy = Stroke(
@@ -2551,10 +3288,39 @@ final class DrawingModel {
             newFillIds.insert(copy.id)
             fills.append(copy)
         }
+        for sh in shapes where selectedShapeIds.contains(sh.id) {
+            let copy = CanvasShape(
+                kind: sh.kind,
+                start: CGPoint(x: sh.cgStart.x + dx, y: sh.cgStart.y + dy),
+                end: CGPoint(x: sh.cgEnd.x + dx, y: sh.cgEnd.y + dy),
+                codableColor: sh.color,
+                presetIndex: sh.presetIndex,
+                lineWidth: sh.lineWidth,
+                isFilled: sh.isFilled,
+                rotation: sh.rotation
+            )
+            newShapeIds.insert(copy.id)
+            shapes.append(copy)
+        }
+        for lbl in textLabels where selectedTextIds.contains(lbl.id) {
+            let copy = TextLabel(
+                text: lbl.text,
+                position: CGPoint(x: lbl.cgPosition.x + dx, y: lbl.cgPosition.y + dy),
+                fontSize: lbl.fontSize,
+                codableColor: lbl.color,
+                presetIndex: lbl.presetIndex,
+                isBold: lbl.isBold,
+                rotation: lbl.rotation
+            )
+            newTextIds.insert(copy.id)
+            textLabels.append(copy)
+        }
 
         selectedStrokeIds = newStrokeIds
         selectedImageIds = newImageIds
         selectedFillIds = newFillIds
+        selectedShapeIds = newShapeIds
+        selectedTextIds = newTextIds
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
         }
@@ -2566,9 +3332,9 @@ final class DrawingModel {
         scheduleAutoSave()
     }
 
-    /// Recolors all currently selected strokes and fills in one undoable step.
+    /// Recolors all currently selected strokes, fills, shapes, and text labels in one undoable step.
     func recolorSelected(to color: Color, presetIndex: Int = -1) {
-        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty else { return }
+        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty || !selectedShapeIds.isEmpty || !selectedTextIds.isEmpty else { return }
         saveState()
         if !selectedStrokeIds.isEmpty {
             strokes = strokes.map { s in
@@ -2591,17 +3357,50 @@ final class DrawingModel {
                 return FillShape(id: f.id, contours: f.contours, color: color, opacity: f.opacity, presetIndex: presetIndex)
             }
         }
+        if !selectedShapeIds.isEmpty {
+            shapes = shapes.map { sh in
+                guard selectedShapeIds.contains(sh.id) else { return sh }
+                return CanvasShape(
+                    id: sh.id,
+                    kind: sh.kind,
+                    start: sh.cgStart,
+                    end: sh.cgEnd,
+                    color: color,
+                    presetIndex: presetIndex,
+                    lineWidth: sh.lineWidth,
+                    isFilled: sh.isFilled,
+                    rotation: sh.rotation
+                )
+            }
+        }
+        if !selectedTextIds.isEmpty {
+            textLabels = textLabels.map { lbl in
+                guard selectedTextIds.contains(lbl.id) else { return lbl }
+                return TextLabel(
+                    id: lbl.id,
+                    text: lbl.text,
+                    position: lbl.cgPosition,
+                    fontSize: lbl.fontSize,
+                    color: color,
+                    presetIndex: presetIndex,
+                    isBold: lbl.isBold,
+                    rotation: lbl.rotation
+                )
+            }
+        }
         updateUndoRedo()
         scheduleAutoSave()
     }
 
-    /// Scales and/or rotates all selected strokes, fills, and images around their shared centroid.
+    /// Scales and/or rotates all selected strokes, fills, shapes, text labels, and images around their shared centroid.
     func transformSelected(scale: CGFloat = 1.0, rotation: CGFloat = 0.0) {
-        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty || !selectedImageIds.isEmpty else { return }
+        guard hasSelectedItems else { return }
         let selStrokes = strokes.filter { selectedStrokeIds.contains($0.id) }
         let selImages = placedImages.filter { selectedImageIds.contains($0.id) }
         let selFills = fills.filter { selectedFillIds.contains($0.id) }
-        guard let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, padding: 0) else { return }
+        let selShapes = shapes.filter { selectedShapeIds.contains($0.id) }
+        let selTexts = textLabels.filter { selectedTextIds.contains($0.id) }
+        guard let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, shapes: selShapes, textLabels: selTexts, padding: 0) else { return }
         let cx = box.midX
         let cy = box.midY
         let cosA = cos(rotation)
@@ -2657,6 +3456,61 @@ final class DrawingModel {
                 )
             }
         }
+        if !selectedShapeIds.isEmpty && (scale != 1.0 || rotation != 0.0) {
+            shapes = shapes.map { sh in
+                guard selectedShapeIds.contains(sh.id) else { return sh }
+                let newLW = max(0.5, sh.lineWidth * scale)
+                if sh.kind.isLineLike {
+                    return CanvasShape(
+                        id: sh.id,
+                        kind: sh.kind,
+                        start: xform(sh.cgStart),
+                        end: xform(sh.cgEnd),
+                        codableColor: sh.color,
+                        presetIndex: sh.presetIndex,
+                        lineWidth: newLW,
+                        isFilled: sh.isFilled,
+                        rotation: 0
+                    )
+                } else {
+                    let newCenter = xform(sh.cgCenter)
+                    let newW = max(12, sh.rect.width * scale)
+                    let newH = max(12, sh.rect.height * scale)
+                    let newRot = Double(GeometryEngine.normalizeAngle(sh.cgRotation + rotation))
+                    return CanvasShape(
+                        id: sh.id,
+                        kind: sh.kind,
+                        start: CGPoint(x: newCenter.x - newW / 2, y: newCenter.y - newH / 2),
+                        end: CGPoint(x: newCenter.x + newW / 2, y: newCenter.y + newH / 2),
+                        codableColor: sh.color,
+                        presetIndex: sh.presetIndex,
+                        lineWidth: newLW,
+                        isFilled: sh.isFilled,
+                        rotation: newRot
+                    )
+                }
+            }
+        }
+        if !selectedTextIds.isEmpty && (scale != 1.0 || rotation != 0.0) {
+            textLabels = textLabels.map { lbl in
+                guard selectedTextIds.contains(lbl.id) else { return lbl }
+                let newCenter = xform(lbl.cgCenter)
+                let newFontSize = min(max(lbl.fontSize * scale, 10), 160)
+                let newRot = Double(GeometryEngine.normalizeAngle(lbl.cgRotation + rotation))
+                let probe = TextLabel(id: lbl.id, text: lbl.text, position: .zero, fontSize: newFontSize, codableColor: lbl.color, presetIndex: lbl.presetIndex, isBold: lbl.isBold, rotation: newRot)
+                let newSize = probe.measuredSize()
+                return TextLabel(
+                    id: lbl.id,
+                    text: lbl.text,
+                    position: CGPoint(x: newCenter.x - newSize.width / 2, y: newCenter.y - newSize.height / 2),
+                    fontSize: newFontSize,
+                    codableColor: lbl.color,
+                    presetIndex: lbl.presetIndex,
+                    isBold: lbl.isBold,
+                    rotation: newRot
+                )
+            }
+        }
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map(xform)
         }
@@ -2672,10 +3526,12 @@ final class DrawingModel {
     }
 
     func copySelected() {
-        guard !selectedStrokeIds.isEmpty || !selectedImageIds.isEmpty || !selectedFillIds.isEmpty else { return }
+        guard hasSelectedItems else { return }
         let copiedStrokes = try? JSONEncoder().encode(strokes.filter { selectedStrokeIds.contains($0.id) })
         let copiedImages = try? JSONEncoder().encode(placedImages.filter { selectedImageIds.contains($0.id) })
         let copiedFills = try? JSONEncoder().encode(fills.filter { selectedFillIds.contains($0.id) })
+        let copiedShapes = try? JSONEncoder().encode(shapes.filter { selectedShapeIds.contains($0.id) })
+        let copiedTexts = try? JSONEncoder().encode(textLabels.filter { selectedTextIds.contains($0.id) })
         let copiedBoundary = try? JSONEncoder().encode(selectionBoundary)
 
         #if os(iOS)
@@ -2683,6 +3539,8 @@ final class DrawingModel {
             "strokes": copiedStrokes ?? Data(),
             "images": copiedImages ?? Data(),
             "fills": copiedFills ?? Data(),
+            "shapes": copiedShapes ?? Data(),
+            "texts": copiedTexts ?? Data(),
             "boundary": copiedBoundary ?? Data(),
         ]
         UIPasteboard.general.items = [data]
@@ -2693,6 +3551,8 @@ final class DrawingModel {
             "strokes": (copiedStrokes ?? Data()).base64EncodedString(),
             "images": (copiedImages ?? Data()).base64EncodedString(),
             "fills": (copiedFills ?? Data()).base64EncodedString(),
+            "shapes": (copiedShapes ?? Data()).base64EncodedString(),
+            "texts": (copiedTexts ?? Data()).base64EncodedString(),
             "boundary": (copiedBoundary ?? Data()).base64EncodedString(),
         ]
         if let json = try? JSONSerialization.data(withJSONObject: stringData, options: .fragmentsAllowed) {
@@ -2707,17 +3567,23 @@ final class DrawingModel {
         let strokesData = item?["strokes"] as? Data ?? Data()
         let imagesData = item?["images"] as? Data ?? Data()
         let fillsData = item?["fills"] as? Data ?? Data()
+        let shapesData = item?["shapes"] as? Data ?? Data()
+        let textsData = item?["texts"] as? Data ?? Data()
         let boundaryData = item?["boundary"] as? Data ?? Data()
         #else
         var strokesData = Data()
         var imagesData = Data()
         var fillsData = Data()
+        var shapesData = Data()
+        var textsData = Data()
         var boundaryData = Data()
         if let json = NSPasteboard.general.data(forType: .string),
            let item = try? JSONSerialization.jsonObject(with: json) as? [String: String] {
             strokesData = Data(base64Encoded: item["strokes"] ?? "") ?? Data()
             imagesData = Data(base64Encoded: item["images"] ?? "") ?? Data()
             fillsData = Data(base64Encoded: item["fills"] ?? "") ?? Data()
+            shapesData = Data(base64Encoded: item["shapes"] ?? "") ?? Data()
+            textsData = Data(base64Encoded: item["texts"] ?? "") ?? Data()
             boundaryData = Data(base64Encoded: item["boundary"] ?? "") ?? Data()
         }
         #endif
@@ -2725,7 +3591,9 @@ final class DrawingModel {
         let decodedStrokes = (try? JSONDecoder().decode([Stroke].self, from: strokesData)) ?? []
         let decodedImages = (try? JSONDecoder().decode([PlacedImage].self, from: imagesData)) ?? []
         let decodedFills = (try? JSONDecoder().decode([FillShape].self, from: fillsData)) ?? []
-        guard !decodedStrokes.isEmpty || !decodedImages.isEmpty || !decodedFills.isEmpty else {
+        let decodedShapes = (try? JSONDecoder().decode([CanvasShape].self, from: shapesData)) ?? []
+        let decodedTexts = (try? JSONDecoder().decode([TextLabel].self, from: textsData)) ?? []
+        guard !decodedStrokes.isEmpty || !decodedImages.isEmpty || !decodedFills.isEmpty || !decodedShapes.isEmpty || !decodedTexts.isEmpty else {
             // Fall back to pasting a standard system clipboard image (screenshots, Safari, Photos, Preview)
             pasteSystemClipboardImage()
             return
@@ -2751,6 +3619,16 @@ final class DrawingModel {
                 minY = min(minY, box.minY)
             }
         }
+        for sh in decodedShapes {
+            let box = sh.rotatedBoundingBox()
+            minX = min(minX, box.minX)
+            minY = min(minY, box.minY)
+        }
+        for lbl in decodedTexts {
+            let box = lbl.rotatedBoundingBox()
+            minX = min(minX, box.minX)
+            minY = min(minY, box.minY)
+        }
 
         // If the user hasn't tapped elsewhere since copying, offset slightly (+24, +24)
         // so the pasted copy is clearly separated from the original selection.
@@ -2767,6 +3645,8 @@ final class DrawingModel {
         var pastedStrokeIds = Set<UUID>()
         var pastedImageIds = Set<UUID>()
         var pastedFillIds = Set<UUID>()
+        var pastedShapeIds = Set<UUID>()
+        var pastedTextIds = Set<UUID>()
 
         for s in decodedStrokes {
             let newPoints = s.points.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
@@ -2801,11 +3681,40 @@ final class DrawingModel {
             pastedFillIds.insert(newFill.id)
             fills.append(newFill)
         }
+        for sh in decodedShapes {
+            let newShape = CanvasShape(
+                kind: sh.kind,
+                start: CGPoint(x: sh.cgStart.x + dx, y: sh.cgStart.y + dy),
+                end: CGPoint(x: sh.cgEnd.x + dx, y: sh.cgEnd.y + dy),
+                codableColor: sh.color,
+                presetIndex: sh.presetIndex,
+                lineWidth: sh.lineWidth,
+                isFilled: sh.isFilled,
+                rotation: sh.rotation
+            )
+            pastedShapeIds.insert(newShape.id)
+            shapes.append(newShape)
+        }
+        for lbl in decodedTexts {
+            let newLbl = TextLabel(
+                text: lbl.text,
+                position: CGPoint(x: lbl.cgPosition.x + dx, y: lbl.cgPosition.y + dy),
+                fontSize: lbl.fontSize,
+                codableColor: lbl.color,
+                presetIndex: lbl.presetIndex,
+                isBold: lbl.isBold,
+                rotation: lbl.rotation
+            )
+            pastedTextIds.insert(newLbl.id)
+            textLabels.append(newLbl)
+        }
 
         // Replace selection exclusively with the newly pasted items so dragging moves ONLY the paste.
         selectedStrokeIds = pastedStrokeIds
         selectedImageIds = pastedImageIds
         selectedFillIds = pastedFillIds
+        selectedShapeIds = pastedShapeIds
+        selectedTextIds = pastedTextIds
         if let boundary = try? JSONDecoder().decode([CGPoint].self, from: boundaryData), !boundary.isEmpty {
             selectionBoundary = boundary.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
         } else {
@@ -2962,6 +3871,8 @@ final class DrawingModel {
         selectedImageIds = [img.id]
         selectedStrokeIds.removeAll()
         selectedFillIds.removeAll()
+        selectedShapeIds.removeAll()
+        selectedTextIds.removeAll()
         selectionBoundary.removeAll()
         resetSelectionRotationTracking()
         updateUndoRedo()
@@ -2985,6 +3896,7 @@ final class DrawingModel {
     // MARK: - Tool, Undo, Redo, Clear
 
     func selectTool(_ tool: Tool) {
+        if isEditingText { commitTextEditing() }
         if tool != currentTool {
             previousTool = currentTool
         }
@@ -3026,13 +3938,18 @@ final class DrawingModel {
     }
 
     func undo() {
+        if isEditingText { cancelTextEditing() }
         guard let prev = history.undo(current: makeSnapshot()) else { return }
         strokes = prev.strokes
         placedImages = prev.placedImages
         fills = prev.fills
+        shapes = prev.shapes
+        textLabels = prev.textLabels
         selectedStrokeIds = prev.selectedStrokeIds
         selectedImageIds = prev.selectedImageIds
         selectedFillIds = prev.selectedFillIds
+        selectedShapeIds = prev.selectedShapeIds
+        selectedTextIds = prev.selectedTextIds
         selectionBoundary = prev.selectionBoundary
         resetSelectionRotationTracking()
         spatialGrid.rebuild(with: strokes)
@@ -3042,13 +3959,18 @@ final class DrawingModel {
     }
 
     func redo() {
+        if isEditingText { cancelTextEditing() }
         guard let next = history.redo(current: makeSnapshot()) else { return }
         strokes = next.strokes
         placedImages = next.placedImages
         fills = next.fills
+        shapes = next.shapes
+        textLabels = next.textLabels
         selectedStrokeIds = next.selectedStrokeIds
         selectedImageIds = next.selectedImageIds
         selectedFillIds = next.selectedFillIds
+        selectedShapeIds = next.selectedShapeIds
+        selectedTextIds = next.selectedTextIds
         selectionBoundary = next.selectionBoundary
         resetSelectionRotationTracking()
         spatialGrid.rebuild(with: strokes)
@@ -3063,13 +3985,17 @@ final class DrawingModel {
     }
 
     func clear() {
+        if isEditingText { cancelTextEditing() }
         saveState()
         strokes.removeAll()
         placedImages.removeAll()
         fills.removeAll()
+        shapes.removeAll()
+        textLabels.removeAll()
         imageCache.removeAll()
         spatialGrid.invalidate()
         currentStroke = nil
+        currentShape = nil
         clearSelection()
         selectionLasso.removeAll()
         updateUndoRedo()
@@ -3173,17 +4099,21 @@ final class DrawingModel {
 
     /// Portable JSON `.wb` export payload (always embeds images for single-file sharing).
     func saveData() -> Data? {
-        let data = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes)
+        if isEditingText { commitTextEditing() }
+        let data = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, scenes: scenes, shapes: shapes, textLabels: textLabels)
         return try? JSONEncoder().encode(data)
     }
 
     func loadData(_ data: Data) {
+        if isEditingText { cancelTextEditing() }
         do {
             let save = try JSONDecoder().decode(SaveData.self, from: data)
             saveState()
             strokes = save.strokes
             placedImages = save.placedImages
             fills = save.fills
+            shapes = save.shapes
+            textLabels = save.textLabels
             scenes = save.scenes
             activeSceneId = nil
             imageCache.removeAll()
@@ -3252,7 +4182,7 @@ final class DrawingModel {
     func exportPDF() { pendingAction = .export(.pdf) }
 
     func canvasBoundingRect(padding: CGFloat = 40) -> (size: CGSize, offset: CGPoint) {
-        guard let box = GeometryEngine.boundingBox(of: strokes, images: placedImages, fills: fills, padding: padding) else {
+        guard let box = GeometryEngine.boundingBox(of: strokes, images: placedImages, fills: fills, shapes: shapes, textLabels: textLabels, padding: padding) else {
             return (CGSize(width: 1000, height: 1000), .zero)
         }
         return (box.size, box.origin)
@@ -3263,9 +4193,13 @@ final class DrawingModel {
             strokes: strokes,
             placedImages: placedImages,
             fills: fills,
+            shapes: shapes,
+            textLabels: textLabels,
             penPresets: penPresets,
             sharpiePresets: sharpiePresets,
             fillPresets: fillPresets,
+            shapePresets: shapePresets,
+            textPresets: textPresets,
             isDarkMode: appSettings.isDarkMode,
             size: size,
             offset: offset,
@@ -3276,22 +4210,26 @@ final class DrawingModel {
     func pngData(forBoardId id: String) -> Data? {
         let save: SaveData
         if id == currentBoardId {
-            save = SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
+            save = SaveData(strokes: strokes, placedImages: placedImages, fills: fills, shapes: shapes, textLabels: textLabels)
         } else if let loaded = store.loadBoardData(id: id) {
             save = loaded
         } else {
             return nil
         }
-        guard let box = GeometryEngine.boundingBox(of: save.strokes, images: save.placedImages, fills: save.fills, padding: 40) else {
+        guard let box = GeometryEngine.boundingBox(of: save.strokes, images: save.placedImages, fills: save.fills, shapes: save.shapes, textLabels: save.textLabels, padding: 40) else {
             return nil
         }
         return StrokeRenderer.pngData(
             strokes: save.strokes,
             placedImages: save.placedImages,
             fills: save.fills,
+            shapes: save.shapes,
+            textLabels: save.textLabels,
             penPresets: penPresets,
             sharpiePresets: sharpiePresets,
             fillPresets: fillPresets,
+            shapePresets: shapePresets,
+            textPresets: textPresets,
             isDarkMode: appSettings.isDarkMode,
             size: box.size,
             offset: box.origin,
@@ -3304,9 +4242,13 @@ final class DrawingModel {
             strokes: strokes,
             placedImages: placedImages,
             fills: fills,
+            shapes: shapes,
+            textLabels: textLabels,
             penPresets: penPresets,
             sharpiePresets: sharpiePresets,
             fillPresets: fillPresets,
+            shapePresets: shapePresets,
+            textPresets: textPresets,
             isDarkMode: appSettings.isDarkMode,
             isWarmPaper: appSettings.isWarmPaper,
             size: size,
@@ -3320,9 +4262,13 @@ final class DrawingModel {
             strokes: strokes,
             placedImages: placedImages,
             fills: fills,
+            shapes: shapes,
+            textLabels: textLabels,
             penPresets: penPresets,
             sharpiePresets: sharpiePresets,
             fillPresets: fillPresets,
+            shapePresets: shapePresets,
+            textPresets: textPresets,
             isDarkMode: appSettings.isDarkMode,
             isWarmPaper: appSettings.isWarmPaper
         )
@@ -3343,9 +4289,13 @@ final class DrawingModel {
         let strokesCopy = strokes
         let imagesCopy = placedImages
         let fillsCopy = fills
+        let shapesCopy = shapes
+        let textsCopy = textLabels
         let pen = penPresets
         let sharpie = sharpiePresets
         let fillP = fillPresets
+        let shapeP = shapePresets
+        let textP = textPresets
 
         thumbnailQueue.async { [weak self] in
             let rendered = StrokeRenderer.renderSceneThumbnail(
@@ -3353,9 +4303,13 @@ final class DrawingModel {
                 strokes: strokesCopy,
                 placedImages: imagesCopy,
                 fills: fillsCopy,
+                shapes: shapesCopy,
+                textLabels: textsCopy,
                 penPresets: pen,
                 sharpiePresets: sharpie,
                 fillPresets: fillP,
+                shapePresets: shapeP,
+                textPresets: textP,
                 isDarkMode: isDark,
                 isWarmPaper: isWarm
             )
@@ -3385,8 +4339,10 @@ final class DrawingModel {
         let penP = penPresets
         let sharpieP = sharpiePresets
         let fillP = fillPresets
+        let shapeP = shapePresets
+        let textP = textPresets
         let inMemorySave: SaveData? = (boardId == currentBoardId)
-            ? SaveData(strokes: strokes, placedImages: placedImages, fills: fills)
+            ? SaveData(strokes: strokes, placedImages: placedImages, fills: fills, shapes: shapes, textLabels: textLabels)
             : nil
         let boardStore = self.store
         let renderSize = CGSize(width: 320, height: 240)
@@ -3402,14 +4358,18 @@ final class DrawingModel {
             } else {
                 // 2. Render from board data and persist PNG thumbnail to disk
                 let save = inMemorySave ?? boardStore.loadBoardData(id: boardId)
-                if let save, (!save.strokes.isEmpty || !save.placedImages.isEmpty || !save.fills.isEmpty) {
+                if let save, (!save.strokes.isEmpty || !save.placedImages.isEmpty || !save.fills.isEmpty || !save.shapes.isEmpty || !save.textLabels.isEmpty) {
                     rendered = StrokeRenderer.renderThumbnail(
                         strokes: save.strokes,
                         placedImages: save.placedImages,
                         fills: save.fills,
+                        shapes: save.shapes,
+                        textLabels: save.textLabels,
                         penPresets: penP,
                         sharpiePresets: sharpieP,
                         fillPresets: fillP,
+                        shapePresets: shapeP,
+                        textPresets: textP,
                         isDarkMode: isDark,
                         size: renderSize
                     )

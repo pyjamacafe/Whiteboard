@@ -74,6 +74,14 @@ struct CanvasView: UIViewRepresentable {
         let _ = model.selectionBoundary.count
         let _ = model.selectionLasso.count
         let _ = model.selectedImageIds.count
+        let _ = model.selectedShapeIds.count
+        let _ = model.selectedTextIds.count
+        let _ = model.currentShape
+        let _ = model.isEditingText
+        let _ = model.editingTextDraft
+        let _ = model.editingTextFontSize
+        let _ = model.editingTextIsBold
+        let _ = model.editingTextPresetIndex
         let _ = model.isRotating
         let _ = model.selectionRotationAngle
         let _ = model.isRotationSnapped
@@ -244,6 +252,12 @@ class CommittedLayerView: UIView {
             StrokeRenderer.drawFill(fill, in: ctx, fillPresets: model.fillPresets)
         }
 
+        let shapePresets = model.shapePresets
+        for sh in model.shapes {
+            guard sh.rotatedBoundingBox().intersects(visibleCanvasRect) else { continue }
+            StrokeRenderer.drawShape(sh, in: ctx, shapePresets: shapePresets)
+        }
+
         model.spatialGrid.sync(with: model.strokes)
         let visibleIndices = model.spatialGrid.queryIndices(in: visibleCanvasRect)
         let penPresets = model.penPresets
@@ -265,6 +279,13 @@ class CommittedLayerView: UIView {
             )
         }
         pathCache.prune(activeIds: Set(model.strokes.map(\.id)))
+
+        let textPresets = model.textPresets
+        for lbl in model.textLabels {
+            if model.isEditingText && model.editingTextId == lbl.id { continue }
+            guard lbl.rotatedBoundingBox().intersects(visibleCanvasRect) else { continue }
+            StrokeRenderer.drawTextLabel(lbl, in: ctx, textPresets: textPresets)
+        }
 
         ctx.restoreGState()
     }
@@ -310,6 +331,10 @@ class LiveOverlayView: UIView {
             )
         }
 
+        if let currentShape = model.currentShape {
+            StrokeRenderer.drawShape(currentShape, in: ctx, shapePresets: model.shapePresets)
+        }
+
         if !model.selectionLasso.isEmpty {
             drawDashedPolygon(model.selectionLasso, close: false, color: UIColor.systemBlue.withAlphaComponent(0.6), in: ctx)
         }
@@ -343,6 +368,52 @@ class LiveOverlayView: UIView {
                 ctx.setLineWidth(1.5 / scale)
                 ctx.strokeEllipse(in: handle)
             }
+            ctx.restoreGState()
+        }
+
+        for sh in model.shapes where model.selectedShapeIds.contains(sh.id) {
+            let handles = sh.rotatedCorners()
+            ctx.saveGState()
+            if !sh.kind.isLineLike, handles.count == 4 {
+                ctx.setStrokeColor(UIColor.systemBlue.cgColor)
+                ctx.setLineWidth(2 / scale)
+                ctx.setLineDash(phase: dashPhase / scale, lengths: [8 / scale, 5 / scale])
+                ctx.beginPath()
+                ctx.move(to: handles[0])
+                ctx.addLine(to: handles[1])
+                ctx.addLine(to: handles[2])
+                ctx.addLine(to: handles[3])
+                ctx.closePath()
+                ctx.strokePath()
+            }
+            ctx.setLineDash(phase: 0, lengths: [])
+            let handleSize: CGFloat = 10 / scale
+            for pt in handles {
+                let handle = CGRect(x: pt.x - handleSize / 2, y: pt.y - handleSize / 2, width: handleSize, height: handleSize)
+                ctx.setFillColor(UIColor.systemBlue.cgColor)
+                ctx.fillEllipse(in: handle)
+                ctx.setStrokeColor(UIColor.white.cgColor)
+                ctx.setLineWidth(1.5 / scale)
+                ctx.strokeEllipse(in: handle)
+            }
+            ctx.restoreGState()
+        }
+
+        for lbl in model.textLabels where model.selectedTextIds.contains(lbl.id) {
+            if model.isEditingText && model.editingTextId == lbl.id { continue }
+            let corners = lbl.rotatedCorners()
+            guard corners.count == 4 else { continue }
+            ctx.saveGState()
+            ctx.setStrokeColor(UIColor.systemBlue.cgColor)
+            ctx.setLineWidth(2 / scale)
+            ctx.setLineDash(phase: dashPhase / scale, lengths: [8 / scale, 5 / scale])
+            ctx.beginPath()
+            ctx.move(to: corners[0])
+            ctx.addLine(to: corners[1])
+            ctx.addLine(to: corners[2])
+            ctx.addLine(to: corners[3])
+            ctx.closePath()
+            ctx.strokePath()
             ctx.restoreGState()
         }
 
@@ -488,6 +559,7 @@ class DrawingCanvasView: UIView {
             gridView.offset = offset
             committedLayer.offset = offset
             liveOverlay.offset = offset
+            positionInlineTextEditor()
             reportViewport()
         }
     }
@@ -499,6 +571,7 @@ class DrawingCanvasView: UIView {
             if abs((model?.zoomDisplayScale ?? 1.0) - scale) > 0.005 {
                 model?.zoomDisplayScale = scale
             }
+            positionInlineTextEditor()
             reportViewport()
         }
     }
@@ -529,6 +602,19 @@ class DrawingCanvasView: UIView {
     private let gridView = CanvasGridView()
     private let committedLayer = CommittedLayerView()
     private let liveOverlay = LiveOverlayView()
+    private lazy var inlineTextView: UITextView = {
+        let tv = UITextView()
+        tv.backgroundColor = .clear
+        tv.isScrollEnabled = false
+        tv.textContainerInset = UIEdgeInsets(top: 2, left: 4, bottom: 2, right: 4)
+        tv.textContainer.lineFragmentPadding = 0
+        tv.layer.cornerRadius = 4
+        tv.layer.borderWidth = 1.25
+        tv.layer.borderColor = UIColor.systemBlue.withAlphaComponent(0.7).cgColor
+        tv.isHidden = true
+        tv.delegate = self
+        return tv
+    }()
     private var dashPhase: CGFloat = 0
     private var displayLink: CADisplayLink?
 
@@ -615,7 +701,7 @@ class DrawingCanvasView: UIView {
 
     private func syncDashAnimationState() {
         guard let model = model else { stopDashAnimation(); return }
-        let needsAnimation = !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty || !model.selectedImageIds.isEmpty
+        let needsAnimation = !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedShapeIds.isEmpty || !model.selectedTextIds.isEmpty
         if needsAnimation {
             startDashAnimation()
         } else {
@@ -637,7 +723,7 @@ class DrawingCanvasView: UIView {
 
     @objc private func stepDash(_ link: CADisplayLink) {
         guard let model = model,
-              (!model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty || !model.selectedImageIds.isEmpty) else {
+              (!model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedShapeIds.isEmpty || !model.selectedTextIds.isEmpty) else {
             stopDashAnimation()
             return
         }
@@ -666,6 +752,8 @@ class DrawingCanvasView: UIView {
         liveOverlay.frame = bounds
         liveOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         addSubview(liveOverlay)
+
+        addSubview(inlineTextView)
 
         layer.addSublayer(hoverIndicatorLayer)
 
@@ -715,6 +803,14 @@ class DrawingCanvasView: UIView {
         case .fill:
             size = 10
             color = UIColor(model.fillColor).withAlphaComponent(0.6)
+            borderColor = inkBase.withAlphaComponent(0.35)
+        case .shape:
+            size = 8
+            color = UIColor(model.shapeColor).withAlphaComponent(0.6)
+            borderColor = inkBase.withAlphaComponent(0.35)
+        case .text:
+            size = 8
+            color = UIColor(model.textColor).withAlphaComponent(0.6)
             borderColor = inkBase.withAlphaComponent(0.35)
         default:
             size = 4
@@ -768,15 +864,66 @@ class DrawingCanvasView: UIView {
         committedLayer.model = model
         liveOverlay.model = model
         gridView.model = model
+        syncInlineTextEditor()
         syncDashAnimationState()
         gridView.setNeedsDisplay()
         committedLayer.setNeedsDisplay()
         liveOverlay.setNeedsDisplay()
     }
 
+    private func syncInlineTextEditor() {
+        guard let model else {
+            inlineTextView.isHidden = true
+            return
+        }
+        if model.isEditingText {
+            let wasHidden = inlineTextView.isHidden
+            inlineTextView.isHidden = false
+            if inlineTextView.text != model.editingTextDraft {
+                inlineTextView.text = model.editingTextDraft
+            }
+            inlineTextView.font = UIFont.systemFont(
+                ofSize: max(10, model.editingTextFontSize * scale),
+                weight: model.editingTextIsBold ? .bold : .regular
+            )
+            inlineTextView.textColor = UIColor(model.editingTextDisplayColor)
+            inlineTextView.tintColor = .systemBlue
+            positionInlineTextEditor()
+            if wasHidden && !inlineTextView.isFirstResponder {
+                inlineTextView.becomeFirstResponder()
+            }
+        } else if !inlineTextView.isHidden {
+            if inlineTextView.isFirstResponder {
+                inlineTextView.resignFirstResponder()
+            }
+            inlineTextView.isHidden = true
+        }
+    }
+
+    private func positionInlineTextEditor() {
+        guard let model, model.isEditingText, !inlineTextView.isHidden else { return }
+        let safeScale = max(scale, 0.1)
+        inlineTextView.font = UIFont.systemFont(
+            ofSize: max(10, model.editingTextFontSize * safeScale),
+            weight: model.editingTextIsBold ? .bold : .regular
+        )
+        let origin = CGPoint(
+            x: model.editingTextPosition.x * safeScale + offset.width,
+            y: model.editingTextPosition.y * safeScale + offset.height
+        )
+        let fitting = inlineTextView.sizeThatFits(CGSize(width: max(200, bounds.width - origin.x - 20), height: .greatestFiniteMagnitude))
+        let w = max(90 * safeScale, ceil(fitting.width) + 12)
+        let h = max(model.editingTextFontSize * 1.35 * safeScale, ceil(fitting.height) + 4)
+        inlineTextView.transform = .identity
+        inlineTextView.frame = CGRect(x: origin.x, y: origin.y, width: w, height: h)
+        if model.editingTextRotation != 0 {
+            inlineTextView.transform = CGAffineTransform(rotationAngle: CGFloat(model.editingTextRotation))
+        }
+    }
+
     private func fitContentToViewport() {
         guard let model, bounds.width > 0, bounds.height > 0 else { return }
-        guard let box = GeometryEngine.boundingBox(of: model.strokes, images: model.placedImages, fills: model.fills, padding: 60),
+        guard let box = GeometryEngine.boundingBox(of: model.strokes, images: model.placedImages, fills: model.fills, shapes: model.shapes, textLabels: model.textLabels, padding: 60),
               box.width > 0, box.height > 0 else {
             centerOnContent()
             return
@@ -898,21 +1045,35 @@ class DrawingCanvasView: UIView {
         model.lastCanvasTapLocation = toCanvas(touch.location(in: self))
         #if os(iOS) && !targetEnvironment(macCatalyst)
         let pencilModeActive = model.appSettings.pencilOnly || hasUsedPencil
-        guard !pencilModeActive || touch.type == .pencil || model.currentTool == .select else { return }
+        guard !pencilModeActive || touch.type == .pencil || model.currentTool == .select || model.currentTool == .text else { return }
         #endif
 
         onBeginDraw?()
 
+        if model.isEditingText {
+            let cp = toCanvas(touch.location(in: self))
+            model.commitTextEditing()
+            syncInlineTextEditor()
+            committedLayer.setNeedsDisplay()
+            liveOverlay.setNeedsDisplay()
+            if model.currentTool == .text, let existing = model.hitTestTextLabel(at: cp) {
+                model.beginTextEditing(at: existing.cgPosition, existingId: existing.id)
+                syncInlineTextEditor()
+                committedLayer.setNeedsDisplay()
+            }
+            return
+        }
+
         if model.currentTool == .select {
             let cp = toCanvas(touch.location(in: self))
-            let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty
+            let hasSelection = model.hasSelectedItems || !model.selectionBoundary.isEmpty
             if hasSelection {
                 if model.hitTestRotateHandle(cp, scale: scale) {
                     model.beginRotate(at: cp, scale: scale)
                     liveOverlay.setNeedsDisplay()
                     return
                 }
-                if model.hitTestResizeHandle(cp, scale: scale) != nil {
+                if model.hitTestResizeHandle(cp, scale: scale) != nil || model.hitTestShapeHandle(cp, scale: scale) != nil {
                     let now = Date()
                     if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
                         Self.lastSelectTap = .distantPast
@@ -932,6 +1093,13 @@ class DrawingCanvasView: UIView {
                     let now = Date()
                     if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
                         Self.lastSelectTap = .distantPast
+                        if let lbl = model.hitTestTextLabel(at: cp), model.selectedTextIds.contains(lbl.id) {
+                            model.beginTextEditing(at: lbl.cgPosition, existingId: lbl.id)
+                            syncInlineTextEditor()
+                            committedLayer.setNeedsDisplay()
+                            liveOverlay.setNeedsDisplay()
+                            return
+                        }
                         model.showDeleteMenu = true
                         let tapLoc = touch.location(in: self)
                         model.deleteMenuLocation = CGPoint(x: tapLoc.x + 60, y: tapLoc.y)
@@ -972,6 +1140,24 @@ class DrawingCanvasView: UIView {
             return
         }
 
+        if model.currentTool == .shape {
+            model.beginShape(at: toCanvas(touch.location(in: self)))
+            liveOverlay.setNeedsDisplay()
+            return
+        }
+
+        if model.currentTool == .text {
+            let cp = toCanvas(touch.location(in: self))
+            if let existing = model.hitTestTextLabel(at: cp) {
+                model.beginTextEditing(at: existing.cgPosition, existingId: existing.id)
+            } else {
+                model.beginTextEditing(at: cp)
+            }
+            syncInlineTextEditor()
+            committedLayer.setNeedsDisplay()
+            return
+        }
+
         if model.currentTool == .eraser {
             showHoverIndicator(at: lastTouchPoint)
         }
@@ -1002,7 +1188,13 @@ class DrawingCanvasView: UIView {
         guard !pencilModeActive || touch.type == .pencil || model.currentTool == .select else { return }
         #endif
 
-        if model.currentTool == .fill { return }
+        if model.currentTool == .fill || model.currentTool == .text { return }
+
+        if model.currentTool == .shape {
+            model.updateShape(to: toCanvas(touch.location(in: self)), constrain: false)
+            liveOverlay.setNeedsDisplay()
+            return
+        }
 
         if model.currentTool == .select {
             if model.showDeleteMenu { return }
@@ -1030,8 +1222,8 @@ class DrawingCanvasView: UIView {
                 model.lastMovePoint = cur
                 committedLayer.setNeedsDisplay()
                 liveOverlay.setNeedsDisplay()
-            } else if !model.selectedImageIds.isEmpty {
-                // Image selected — ignore touch moves unless dragging/resizing
+            } else if !model.selectedImageIds.isEmpty || !model.selectedShapeIds.isEmpty || !model.selectedTextIds.isEmpty {
+                // Selected object — ignore touch moves unless dragging/resizing
             } else {
                 let coalesced = event?.coalescedTouches(for: touch) ?? [touch]
                 for ct in coalesced {
@@ -1088,8 +1280,15 @@ class DrawingCanvasView: UIView {
             liveOverlay.setNeedsDisplay()
             return
         }
-        if model?.currentTool == .fill {
+        if model?.currentTool == .fill || model?.currentTool == .text {
             hideHoverIndicator()
+            return
+        }
+        if model?.currentTool == .shape {
+            model?.endShape()
+            hideHoverIndicator()
+            committedLayer.setNeedsDisplay()
+            liveOverlay.setNeedsDisplay()
             return
         }
         model?.endStroke()
@@ -1122,8 +1321,15 @@ class DrawingCanvasView: UIView {
             liveOverlay.setNeedsDisplay()
             return
         }
-        if model?.currentTool == .fill {
+        if model?.currentTool == .fill || model?.currentTool == .text {
             hideHoverIndicator()
+            return
+        }
+        if model?.currentTool == .shape {
+            model?.endShape()
+            hideHoverIndicator()
+            committedLayer.setNeedsDisplay()
+            liveOverlay.setNeedsDisplay()
             return
         }
         model?.endStroke()
@@ -1216,6 +1422,24 @@ extension DrawingCanvasView: UIGestureRecognizerDelegate {
     ) -> Bool {
         (gestureRecognizer === pinchGesture && otherGestureRecognizer === panGesture) ||
         (gestureRecognizer === panGesture && otherGestureRecognizer === pinchGesture)
+    }
+}
+
+// MARK: - Inline TextView Delegate (iOS)
+
+extension DrawingCanvasView: UITextViewDelegate {
+    func textViewDidChange(_ textView: UITextView) {
+        model?.editingTextDraft = textView.text ?? ""
+        positionInlineTextEditor()
+    }
+
+    func textViewDidEndEditing(_ textView: UITextView) {
+        guard let model, model.isEditingText else { return }
+        model.editingTextDraft = textView.text ?? ""
+        model.commitTextEditing()
+        syncInlineTextEditor()
+        committedLayer.setNeedsDisplay()
+        liveOverlay.setNeedsDisplay()
     }
 }
 
@@ -1323,6 +1547,8 @@ private struct CommittedStrokesCanvas: View {
     let pathCache: StrokePathCache
     let committedRevision: Int
     let isDarkMode: Bool
+    let editingTextId: UUID?
+    let isEditingText: Bool
     let offset: CGSize
     let scale: CGFloat
 
@@ -1375,7 +1601,7 @@ private struct CommittedStrokesCanvas: View {
                 }
             }
 
-            // Vectorized fills (rendered behind strokes with even-odd rule for holes)
+            // Vectorized fills (rendered behind shapes and strokes with even-odd rule for holes)
             for fill in model.fills {
                 let box = fill.boundingBox()
                 guard !box.isNull, box.intersects(visibleCanvasRect) else { continue }
@@ -1383,6 +1609,21 @@ private struct CommittedStrokesCanvas: View {
                     Path(fill.makeCGPath()),
                     with: .color(fill.displayColor(for: model)),
                     style: FillStyle(eoFill: true)
+                )
+            }
+
+            // Geometric shapes
+            for sh in model.shapes {
+                guard sh.rotatedBoundingBox().intersects(visibleCanvasRect) else { continue }
+                let path = Path(sh.makeCGPath())
+                let color = sh.displayColor(for: model)
+                if sh.isFilled && !sh.kind.isLineLike {
+                    context.fill(path, with: .color(color.opacity(0.20)))
+                }
+                context.stroke(
+                    path,
+                    with: .color(color),
+                    style: StrokeStyle(lineWidth: sh.lineWidth, lineCap: .round, lineJoin: .round)
                 )
             }
 
@@ -1404,6 +1645,36 @@ private struct CommittedStrokesCanvas: View {
                 )
             }
             pathCache.prune(activeIds: Set(model.strokes.map(\.id)))
+
+            // Text labels (rendered above strokes)
+            for lbl in model.textLabels {
+                if isEditingText && editingTextId == lbl.id { continue }
+                guard !lbl.text.isEmpty, lbl.rotatedBoundingBox().intersects(visibleCanvasRect) else { continue }
+                let color = lbl.displayColor(for: model)
+                let lines = lbl.text.split(separator: "\n", omittingEmptySubsequences: false)
+                let lineHeight = lbl.fontSize * 1.28
+                let weight: Font.Weight = lbl.isBold ? .bold : .regular
+
+                var txtCtx = context
+                if lbl.rotation != 0 {
+                    let c = lbl.cgCenter
+                    txtCtx.translateBy(x: c.x, y: c.y)
+                    txtCtx.rotate(by: Angle(radians: lbl.rotation))
+                    txtCtx.translateBy(x: -c.x, y: -c.y)
+                }
+                for (idx, line) in lines.enumerated() {
+                    let resolved = txtCtx.resolve(
+                        Text(String(line))
+                            .font(.system(size: lbl.fontSize, weight: weight))
+                            .foregroundStyle(color)
+                    )
+                    txtCtx.draw(
+                        resolved,
+                        at: CGPoint(x: lbl.cgPosition.x + 4, y: lbl.cgPosition.y + 2 + CGFloat(idx) * lineHeight),
+                        anchor: .topLeading
+                    )
+                }
+            }
         }
     }
 
@@ -1459,6 +1730,8 @@ private struct LiveInteractionCanvas: View {
             || !model.selectedImageIds.isEmpty
             || !model.selectedStrokeIds.isEmpty
             || !model.selectedFillIds.isEmpty
+            || !model.selectedShapeIds.isEmpty
+            || !model.selectedTextIds.isEmpty
     }
 
     var body: some View {
@@ -1506,6 +1779,24 @@ private struct LiveInteractionCanvas: View {
                     }
                 }
 
+                // Active shape preview
+                if let currentShape = model.currentShape {
+                    context.drawLayer { layerCtx in
+                        layerCtx.translateBy(x: offset.width, y: offset.height)
+                        layerCtx.scaleBy(x: safeScale, y: safeScale)
+                        let path = Path(currentShape.makeCGPath())
+                        let color = currentShape.displayColor(for: model)
+                        if currentShape.isFilled && !currentShape.kind.isLineLike {
+                            layerCtx.fill(path, with: .color(color.opacity(0.20)))
+                        }
+                        layerCtx.stroke(
+                            path,
+                            with: .color(color),
+                            style: StrokeStyle(lineWidth: currentShape.lineWidth, lineCap: .round, lineJoin: .round)
+                        )
+                    }
+                }
+
                 let tf = CGAffineTransform(translationX: offset.width, y: offset.height)
                     .scaledBy(x: safeScale, y: safeScale)
 
@@ -1547,6 +1838,46 @@ private struct LiveInteractionCanvas: View {
                         context.fill(Path(ellipseIn: handle), with: .color(.blue))
                         context.stroke(Path(ellipseIn: handle), with: .color(.white), lineWidth: 1.5)
                     }
+                }
+
+                for sh in model.shapes where model.selectedShapeIds.contains(sh.id) {
+                    let handles = sh.rotatedCorners().map { $0.applying(tf) }
+                    if !sh.kind.isLineLike, handles.count == 4 {
+                        var borderPath = Path()
+                        borderPath.move(to: handles[0])
+                        borderPath.addLine(to: handles[1])
+                        borderPath.addLine(to: handles[2])
+                        borderPath.addLine(to: handles[3])
+                        borderPath.closeSubpath()
+                        context.stroke(
+                            borderPath,
+                            with: .color(.blue),
+                            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
+                        )
+                    }
+                    let hs: CGFloat = 9
+                    for pt in handles {
+                        let handle = CGRect(x: pt.x - hs / 2, y: pt.y - hs / 2, width: hs, height: hs)
+                        context.fill(Path(ellipseIn: handle), with: .color(.blue))
+                        context.stroke(Path(ellipseIn: handle), with: .color(.white), lineWidth: 1.5)
+                    }
+                }
+
+                for lbl in model.textLabels where model.selectedTextIds.contains(lbl.id) {
+                    if model.isEditingText && model.editingTextId == lbl.id { continue }
+                    let corners = lbl.rotatedCorners().map { $0.applying(tf) }
+                    guard corners.count == 4 else { continue }
+                    var borderPath = Path()
+                    borderPath.move(to: corners[0])
+                    borderPath.addLine(to: corners[1])
+                    borderPath.addLine(to: corners[2])
+                    borderPath.addLine(to: corners[3])
+                    borderPath.closeSubpath()
+                    context.stroke(
+                        borderPath,
+                        with: .color(.blue),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
+                    )
                 }
 
                 // Read rotation state so @Observable tracks live drag frames
@@ -1699,6 +2030,8 @@ struct CanvasView: View {
                 pathCache: pathCache,
                 committedRevision: model.committedRevision,
                 isDarkMode: model.appSettings.isDarkMode,
+                editingTextId: model.editingTextId,
+                isEditingText: model.isEditingText,
                 offset: offset,
                 scale: scale
             )
@@ -1712,6 +2045,44 @@ struct CanvasView: View {
             )
         }
         .overlay(DrawingInputOverlay(handler: pointerHandler, currentTool: model.currentTool))
+        .overlay(alignment: .topLeading) {
+            if model.isEditingText {
+                let safeScale = max(scale, 0.1)
+                let originX = model.editingTextPosition.x * safeScale + offset.width
+                let originY = model.editingTextPosition.y * safeScale + offset.height
+                let draftLines = model.editingTextDraft.split(separator: "\n", omittingEmptySubsequences: false)
+                let scaledFont = max(10, model.editingTextFontSize * safeScale)
+                let nsFont = NSFont.systemFont(ofSize: scaledFont, weight: model.editingTextIsBold ? .bold : .regular)
+                let maxLineW = draftLines.reduce(CGFloat(0)) { acc, line in
+                    let str = line.isEmpty ? " " : String(line)
+                    return max(acc, (str as NSString).size(withAttributes: [.font: nsFont]).width)
+                }
+                let editorW = max(110 * safeScale, ceil(maxLineW) + 28)
+                let editorH = max(scaledFont * 1.4, CGFloat(max(draftLines.count, 1)) * scaledFont * 1.28 + 12)
+                MacInlineTextEditor(
+                    text: Binding(
+                        get: { model.editingTextDraft },
+                        set: { model.editingTextDraft = $0 }
+                    ),
+                    fontSize: scaledFont,
+                    isBold: model.editingTextIsBold,
+                    color: NSColor(model.editingTextDisplayColor),
+                    onCommit: { model.commitTextEditing() },
+                    onCancel: { model.cancelTextEditing() }
+                )
+                .frame(width: editorW, height: editorH)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(model.appSettings.isDarkMode ? Color.black.opacity(0.35) : Color.white.opacity(0.45))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(Color.blue.opacity(0.75), style: StrokeStyle(lineWidth: 1.25, dash: [5, 3]))
+                )
+                .rotationEffect(Angle(radians: model.editingTextRotation))
+                .offset(x: originX, y: originY)
+            }
+        }
         .onChange(of: offset) { _, _ in reportMacViewport() }
         .onChange(of: scale) { _, newScale in
             if abs(model.zoomDisplayScale - newScale) > 0.005 {
@@ -1830,6 +2201,12 @@ struct CanvasView: View {
                 case "f":
                     model.selectTool(.fill)
                     return nil
+                case "r":
+                    model.selectTool(.shape)
+                    return nil
+                case "t":
+                    model.selectTool(.text)
+                    return nil
                 case "s":
                     model.selectTool(hasShift ? .select : .sharpie)
                     return nil
@@ -1877,6 +2254,12 @@ struct CanvasView: View {
                             return nil
                         case .fill where idx < model.fillPresets.count:
                             model.selectFillPreset(idx)
+                            return nil
+                        case .shape where idx < model.shapePresets.count:
+                            model.selectShapePreset(idx)
+                            return nil
+                        case .text where idx < model.textPresets.count:
+                            model.selectTextPreset(idx)
                             return nil
                         default: break
                         }
@@ -1948,7 +2331,7 @@ struct CanvasView: View {
 
     private func fitMacContentToViewport() {
         let size = viewSize ?? CGSize(width: 1000, height: 700)
-        guard let box = GeometryEngine.boundingBox(of: model.strokes, images: model.placedImages, fills: model.fills, padding: 60),
+        guard let box = GeometryEngine.boundingBox(of: model.strokes, images: model.placedImages, fills: model.fills, shapes: model.shapes, textLabels: model.textLabels, padding: 60),
               box.width > 0, box.height > 0 else {
             centerOnContent(canvasSize: size)
             return
@@ -2098,12 +2481,12 @@ struct DrawingInputOverlay: NSViewRepresentable {
             )
         }
 
-        /// Updates the pointer cursor on macOS when hovering or dragging image resize handles
-        /// or the selection rotation handle. Returns true when a handle cursor is active.
+        /// Updates the pointer cursor on macOS when hovering or dragging resize handles,
+        /// the selection rotation handle, or using Shape / Text tools. Returns true when a custom cursor is active.
         @discardableResult
         private func updateSelectCursor(at point: CGPoint?) -> Bool {
             guard !isFingerPanning else { return false }
-            guard let point, let h = handler, h.model.currentTool == .select else {
+            guard let point, let h = handler else {
                 if isShowingCustomCursor {
                     NSCursor.arrow.set()
                     isShowingCustomCursor = false
@@ -2112,15 +2495,44 @@ struct DrawingInputOverlay: NSViewRepresentable {
             }
 
             let model = h.model
+            if model.currentTool == .shape {
+                NSCursor.crosshair.set()
+                isShowingCustomCursor = true
+                return true
+            }
+            if model.currentTool == .text {
+                NSCursor.iBeam.set()
+                isShowingCustomCursor = true
+                return true
+            }
+            guard model.currentTool == .select else {
+                if isShowingCustomCursor {
+                    NSCursor.arrow.set()
+                    isShowingCustomCursor = false
+                }
+                return false
+            }
+
             let cp = canvasPoint(forViewPoint: point)
             let safeScale = max(h.scale, 0.01)
 
-            if model.isResizing,
-               let imgId = model.resizeImageId,
-               let img = model.placedImages.first(where: { $0.id == imgId }) {
-                resizeCursor(forCorner: model.resizeCorner, rotation: img.cgRotation).set()
-                isShowingCustomCursor = true
-                return true
+            if model.isResizing {
+                if let imgId = model.resizeImageId,
+                   let img = model.placedImages.first(where: { $0.id == imgId }) {
+                    resizeCursor(forCorner: model.resizeCorner, rotation: img.cgRotation).set()
+                    isShowingCustomCursor = true
+                    return true
+                }
+                if let shapeId = model.resizeShapeId,
+                   let sh = model.shapes.first(where: { $0.id == shapeId }) {
+                    if sh.kind.isLineLike {
+                        NSCursor.crosshair.set()
+                    } else {
+                        resizeCursor(forCorner: model.resizeCorner, rotation: sh.cgRotation).set()
+                    }
+                    isShowingCustomCursor = true
+                    return true
+                }
             }
             if model.isRotating {
                 NSCursor.closedHand.set()
@@ -2130,6 +2542,16 @@ struct DrawingInputOverlay: NSViewRepresentable {
             if let hit = model.hitTestResizeHandle(cp, scale: safeScale),
                let img = model.placedImages.first(where: { $0.id == hit.imgId }) {
                 resizeCursor(forCorner: hit.corner, rotation: img.cgRotation).set()
+                isShowingCustomCursor = true
+                return true
+            }
+            if let hit = model.hitTestShapeHandle(cp, scale: safeScale),
+               let sh = model.shapes.first(where: { $0.id == hit.shapeId }) {
+                if sh.kind.isLineLike {
+                    NSCursor.crosshair.set()
+                } else {
+                    resizeCursor(forCorner: hit.handleIndex, rotation: sh.cgRotation).set()
+                }
                 isShowingCustomCursor = true
                 return true
             }
@@ -2171,6 +2593,12 @@ struct DrawingInputOverlay: NSViewRepresentable {
             case .fill:
                 size = 10
                 color = StrokeRenderer.cgColor(from: model.fillColor.opacity(0.6))
+            case .shape:
+                size = 6
+                color = StrokeRenderer.cgColor(from: model.shapeColor.opacity(0.6))
+            case .text:
+                size = 6
+                color = StrokeRenderer.cgColor(from: model.textColor.opacity(0.6))
             case .select:
                 size = 4
                 color = (model.appSettings.isDarkMode ? NSColor.white : NSColor.black).withAlphaComponent(0.4).cgColor
@@ -2303,6 +2731,13 @@ struct CanvasPointerHandler {
         if drawing {
             onBeginDraw?()
             model.lastCanvasTapLocation = canvas
+            if model.isEditingText {
+                model.commitTextEditing()
+                if model.currentTool == .text, let existing = model.hitTestTextLabel(at: canvas) {
+                    model.beginTextEditing(at: existing.cgPosition, existingId: existing.id)
+                }
+                return
+            }
         }
 
         if model.currentTool == .select {
@@ -2321,17 +2756,17 @@ struct CanvasPointerHandler {
             }
             if model.isMoving || model.isResizing {
                 let delta = CGSize(width: canvas.x - model.lastMovePoint.x, height: canvas.y - model.lastMovePoint.y)
-                model.moveSelected(by: delta)
+                model.moveSelected(by: delta, lockAspect: shiftPressed)
                 model.lastMovePoint = canvas
                 return
             }
-            let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty
+            let hasSelection = model.hasSelectedItems || !model.selectionBoundary.isEmpty
             if drawing && hasSelection {
                 if model.hitTestRotateHandle(canvas, scale: scale) {
                     model.beginRotate(at: canvas, scale: scale)
                     return
                 }
-                if model.hitTestResizeHandle(canvas, scale: scale) != nil {
+                if model.hitTestResizeHandle(canvas, scale: scale) != nil || model.hitTestShapeHandle(canvas, scale: scale) != nil {
                     model.beginMove(at: canvas, scale: scale)
                     return
                 }
@@ -2340,6 +2775,10 @@ struct CanvasPointerHandler {
                     let now = Date()
                     if now.timeIntervalSince(CanvasView.lastSelectTap) < 0.4 {
                         CanvasView.lastSelectTap = .distantPast
+                        if let lbl = model.hitTestTextLabel(at: canvas), model.selectedTextIds.contains(lbl.id) {
+                            model.beginTextEditing(at: lbl.cgPosition, existingId: lbl.id)
+                            return
+                        }
                         model.showDeleteMenu = true
                         model.deleteMenuLocation = CGPoint(x: canvas.x * scale + offset.width + 60, y: canvas.y * scale + offset.height)
                         return
@@ -2376,6 +2815,26 @@ struct CanvasPointerHandler {
             return
         }
 
+        if model.currentTool == .shape {
+            if drawing {
+                model.beginShape(at: canvas)
+            } else {
+                model.updateShape(to: canvas, constrain: shiftPressed)
+            }
+            return
+        }
+
+        if model.currentTool == .text {
+            if drawing {
+                if let existing = model.hitTestTextLabel(at: canvas) {
+                    model.beginTextEditing(at: existing.cgPosition, existingId: existing.id)
+                } else {
+                    model.beginTextEditing(at: canvas)
+                }
+            }
+            return
+        }
+
         if model.currentStroke == nil {
             model.beginStroke(at: canvas, isEraser: model.currentTool == .eraser)
         } else {
@@ -2385,7 +2844,11 @@ struct CanvasPointerHandler {
     }
 
     func onEnd() {
-        if model.currentTool == .fill { return }
+        if model.currentTool == .fill || model.currentTool == .text { return }
+        if model.currentTool == .shape {
+            model.endShape()
+            return
+        }
         if model.currentTool == .select {
             if let tapPt = model.pendingDeselectPoint {
                 model.pendingDeselectPoint = nil
@@ -2401,6 +2864,93 @@ struct CanvasPointerHandler {
         }
         model.endStroke()
         onPoint(0)
+    }
+}
+
+// MARK: - Inline Text Editor (macOS)
+
+private struct MacInlineTextEditor: NSViewRepresentable {
+    @Binding var text: String
+    let fontSize: CGFloat
+    let isBold: Bool
+    let color: NSColor
+    let onCommit: () -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> InlineCanvasTextView {
+        let tv = InlineCanvasTextView()
+        tv.delegate = context.coordinator
+        tv.drawsBackground = false
+        tv.isRichText = false
+        tv.allowsUndo = true
+        tv.isAutomaticQuoteSubstitutionEnabled = false
+        tv.isAutomaticDashSubstitutionEnabled = false
+        tv.textContainerInset = NSSize(width: 4, height: 2)
+        tv.textContainer?.lineFragmentPadding = 0
+        tv.textContainer?.widthTracksTextView = false
+        tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        tv.isHorizontallyResizable = true
+        tv.isVerticallyResizable = true
+        tv.font = NSFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
+        tv.textColor = color
+        tv.insertionPointColor = color
+        tv.string = text
+        tv.onCommit = onCommit
+        tv.onCancel = onCancel
+        DispatchQueue.main.async {
+            tv.window?.makeFirstResponder(tv)
+            tv.setSelectedRange(NSRange(location: (tv.string as NSString).length, length: 0))
+        }
+        return tv
+    }
+
+    func updateNSView(_ tv: InlineCanvasTextView, context: Context) {
+        context.coordinator.parent = self
+        tv.onCommit = onCommit
+        tv.onCancel = onCancel
+        if tv.string != text {
+            tv.string = text
+        }
+        let targetFont = NSFont.systemFont(ofSize: fontSize, weight: isBold ? .bold : .regular)
+        if tv.font != targetFont {
+            tv.font = targetFont
+        }
+        if tv.textColor != color {
+            tv.textColor = color
+            tv.insertionPointColor = color
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MacInlineTextEditor
+        init(_ parent: MacInlineTextEditor) { self.parent = parent }
+
+        func textDidChange(_ notification: Notification) {
+            guard let tv = notification.object as? NSTextView else { return }
+            parent.text = tv.string
+        }
+    }
+
+    final class InlineCanvasTextView: NSTextView {
+        var onCommit: (() -> Void)?
+        var onCancel: (() -> Void)?
+
+        override func keyDown(with event: NSEvent) {
+            if event.keyCode == 53 { // Escape
+                onCancel?()
+                return
+            }
+            if (event.keyCode == 36 || event.keyCode == 76),
+               !event.modifierFlags.contains(.shift) {
+                onCommit?()
+                return
+            }
+            super.keyDown(with: event)
+        }
     }
 }
 

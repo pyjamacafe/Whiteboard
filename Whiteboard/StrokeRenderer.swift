@@ -48,6 +48,86 @@ enum StrokeRenderer {
         return base.opacity(fill.opacity)
     }
 
+    static func resolveShapeColor(for shape: CanvasShape, shapePresets: [Color]) -> Color {
+        if shape.presetIndex >= 0, shape.presetIndex < shapePresets.count {
+            return shapePresets[shape.presetIndex]
+        }
+        return shape.color.color
+    }
+
+    static func resolveTextColor(for label: TextLabel, textPresets: [Color]) -> Color {
+        if label.presetIndex >= 0, label.presetIndex < textPresets.count {
+            return textPresets[label.presetIndex]
+        }
+        return label.color.color
+    }
+
+    static func drawShape(_ shape: CanvasShape, in ctx: CGContext, shapePresets: [Color]) {
+        let path = shape.makeCGPath()
+        guard !path.isEmpty else { return }
+        let color = resolveShapeColor(for: shape, shapePresets: shapePresets)
+        ctx.saveGState()
+        ctx.setBlendMode(.normal)
+        if shape.isFilled && !shape.kind.isLineLike {
+            ctx.setFillColor(cgColor(from: color.opacity(0.20)))
+            ctx.addPath(path)
+            ctx.fillPath()
+        }
+        ctx.setStrokeColor(cgColor(from: color))
+        ctx.setLineWidth(shape.lineWidth)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.restoreGState()
+    }
+
+    static func drawTextLabel(_ label: TextLabel, in ctx: CGContext, textPresets: [Color]) {
+        guard !label.text.isEmpty else { return }
+        let color = resolveTextColor(for: label, textPresets: textPresets)
+        let lines = label.text.split(separator: "\n", omittingEmptySubsequences: false)
+        let lineHeight = label.fontSize * 1.28
+        let center = label.cgCenter
+
+        ctx.saveGState()
+        ctx.setBlendMode(.normal)
+        if label.rotation != 0 {
+            ctx.translateBy(x: center.x, y: center.y)
+            ctx.rotate(by: label.cgRotation)
+            ctx.translateBy(x: -center.x, y: -center.y)
+        }
+
+        #if os(iOS)
+        let font = UIFont.systemFont(ofSize: label.fontSize, weight: label.isBold ? .bold : .regular)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor(color),
+        ]
+        UIGraphicsPushContext(ctx)
+        for (idx, line) in lines.enumerated() {
+            let str = String(line) as NSString
+            str.draw(at: CGPoint(x: label.cgPosition.x + 4, y: label.cgPosition.y + 2 + CGFloat(idx) * lineHeight), withAttributes: attrs)
+        }
+        UIGraphicsPopContext()
+        #else
+        let font = NSFont.systemFont(ofSize: label.fontSize, weight: label.isBold ? .bold : .regular)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor(color),
+        ]
+        NSGraphicsContext.saveGraphicsState()
+        let nsCtx = NSGraphicsContext(cgContext: ctx, flipped: true)
+        NSGraphicsContext.current = nsCtx
+        for (idx, line) in lines.enumerated() {
+            let str = String(line) as NSString
+            str.draw(at: CGPoint(x: label.cgPosition.x + 4, y: label.cgPosition.y + 2 + CGFloat(idx) * lineHeight), withAttributes: attrs)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        #endif
+
+        ctx.restoreGState()
+    }
+
     static func drawFill(_ fill: FillShape, in ctx: CGContext, fillPresets: [Color], cachedPath: CGPath? = nil) {
         let path = cachedPath ?? fill.makeCGPath()
         guard !path.isEmpty else { return }
@@ -136,9 +216,13 @@ enum StrokeRenderer {
         strokes: [Stroke],
         placedImages: [PlacedImage],
         fills: [FillShape] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
         fillPresets: [Color] = [],
+        shapePresets: [Color] = [],
+        textPresets: [Color] = [],
         isDarkMode: Bool,
         size: CGSize,
         offset: CGPoint = .zero,
@@ -165,11 +249,19 @@ enum StrokeRenderer {
             drawPlacedImage(img, in: ctx)
         }
         let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        let resolvedShapePresets = shapePresets.isEmpty ? penPresets : shapePresets
+        let resolvedTextPresets = textPresets.isEmpty ? penPresets : textPresets
         for f in fills {
             drawFill(f, in: ctx, fillPresets: resolvedFillPresets)
         }
+        for sh in shapes {
+            drawShape(sh, in: ctx, shapePresets: resolvedShapePresets)
+        }
         for s in strokes {
             drawStroke(s, in: ctx, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
+        }
+        for lbl in textLabels {
+            drawTextLabel(lbl, in: ctx, textPresets: resolvedTextPresets)
         }
 
         guard let image = ctx.makeImage(),
@@ -188,9 +280,13 @@ enum StrokeRenderer {
         strokes: [Stroke],
         placedImages: [PlacedImage],
         fills: [FillShape] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
         fillPresets: [Color] = [],
+        shapePresets: [Color] = [],
+        textPresets: [Color] = [],
         isDarkMode: Bool,
         isWarmPaper: Bool = false,
         size: CGSize,
@@ -220,11 +316,19 @@ enum StrokeRenderer {
             drawPlacedImage(img, in: pdf)
         }
         let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        let resolvedShapePresets = shapePresets.isEmpty ? penPresets : shapePresets
+        let resolvedTextPresets = textPresets.isEmpty ? penPresets : textPresets
         for f in fills {
             drawFill(f, in: pdf, fillPresets: resolvedFillPresets)
         }
+        for sh in shapes {
+            drawShape(sh, in: pdf, shapePresets: resolvedShapePresets)
+        }
         for s in strokes {
             drawStroke(s, in: pdf, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
+        }
+        for lbl in textLabels {
+            drawTextLabel(lbl, in: pdf, textPresets: resolvedTextPresets)
         }
         pdf.endPDFPage()
         pdf.closePDF()
@@ -237,9 +341,13 @@ enum StrokeRenderer {
         strokes: [Stroke],
         placedImages: [PlacedImage],
         fills: [FillShape] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
         fillPresets: [Color] = [],
+        shapePresets: [Color] = [],
+        textPresets: [Color] = [],
         isDarkMode: Bool,
         isWarmPaper: Bool = false
     ) -> Data? {
@@ -253,6 +361,8 @@ enum StrokeRenderer {
         }
 
         let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        let resolvedShapePresets = shapePresets.isEmpty ? penPresets : shapePresets
+        let resolvedTextPresets = textPresets.isEmpty ? penPresets : textPresets
         for scene in scenes {
             pdf.beginPDFPage(nil)
             pdf.saveGState()
@@ -276,9 +386,11 @@ enum StrokeRenderer {
 
             for img in placedImages { drawPlacedImage(img, in: pdf) }
             for f in fills { drawFill(f, in: pdf, fillPresets: resolvedFillPresets) }
+            for sh in shapes { drawShape(sh, in: pdf, shapePresets: resolvedShapePresets) }
             for st in strokes {
                 drawStroke(st, in: pdf, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
             }
+            for lbl in textLabels { drawTextLabel(lbl, in: pdf, textPresets: resolvedTextPresets) }
             pdf.restoreGState()
             pdf.endPDFPage()
         }
@@ -293,9 +405,13 @@ enum StrokeRenderer {
         strokes: [Stroke],
         placedImages: [PlacedImage],
         fills: [FillShape] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
         fillPresets: [Color] = [],
+        shapePresets: [Color] = [],
+        textPresets: [Color] = [],
         isDarkMode: Bool,
         isWarmPaper: Bool = false,
         size: CGSize = CGSize(width: 96, height: 72)
@@ -332,11 +448,15 @@ enum StrokeRenderer {
         ctx.scaleBy(x: refScale, y: refScale)
 
         let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        let resolvedShapePresets = shapePresets.isEmpty ? penPresets : shapePresets
+        let resolvedTextPresets = textPresets.isEmpty ? penPresets : textPresets
         for img in placedImages { drawPlacedImage(img, in: ctx) }
         for f in fills { drawFill(f, in: ctx, fillPresets: resolvedFillPresets) }
+        for sh in shapes { drawShape(sh, in: ctx, shapePresets: resolvedShapePresets) }
         for st in strokes {
             drawStroke(st, in: ctx, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
         }
+        for lbl in textLabels { drawTextLabel(lbl, in: ctx, textPresets: resolvedTextPresets) }
 
         guard let cgImg = ctx.makeImage() else { return nil }
         #if os(iOS)
@@ -352,15 +472,19 @@ enum StrokeRenderer {
         strokes: [Stroke],
         placedImages: [PlacedImage],
         fills: [FillShape] = [],
+        shapes: [CanvasShape] = [],
+        textLabels: [TextLabel] = [],
         penPresets: [Color],
         sharpiePresets: [Color],
         fillPresets: [Color] = [],
+        shapePresets: [Color] = [],
+        textPresets: [Color] = [],
         isDarkMode: Bool,
         size: CGSize
     ) -> PlatformImage? {
         let w = Int(size.width.rounded()), h = Int(size.height.rounded())
         guard w > 0, h > 0 else { return nil }
-        guard let bounds = GeometryEngine.boundingBox(of: strokes, images: placedImages, fills: fills, padding: 10) else {
+        guard let bounds = GeometryEngine.boundingBox(of: strokes, images: placedImages, fills: fills, shapes: shapes, textLabels: textLabels, padding: 10) else {
             return nil
         }
 
@@ -386,11 +510,19 @@ enum StrokeRenderer {
             drawPlacedImage(img, in: ctx)
         }
         let resolvedFillPresets = fillPresets.isEmpty ? penPresets : fillPresets
+        let resolvedShapePresets = shapePresets.isEmpty ? penPresets : shapePresets
+        let resolvedTextPresets = textPresets.isEmpty ? penPresets : textPresets
         for f in fills {
             drawFill(f, in: ctx, fillPresets: resolvedFillPresets)
         }
+        for sh in shapes {
+            drawShape(sh, in: ctx, shapePresets: resolvedShapePresets)
+        }
         for s in strokes where !s.isEraser {
             drawStroke(s, in: ctx, penPresets: penPresets, sharpiePresets: sharpiePresets, isDarkMode: isDarkMode)
+        }
+        for lbl in textLabels {
+            drawTextLabel(lbl, in: ctx, textPresets: resolvedTextPresets)
         }
 
         guard let cgImg = ctx.makeImage() else { return nil }

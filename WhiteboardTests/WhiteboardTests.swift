@@ -1049,4 +1049,107 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertEqual(decodedJson.shapes.count, 2)
         XCTAssertEqual(decodedJson.textLabels.count, 1)
     }
+
+    func testShapeAndTextWorkflowSelectResizeRotateRecolorUndoAndExport() throws {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.createBoard(name: "Shapes & Text Board")
+
+        // 1) Draw a rectangle with Shift-constrain -> square 100x100
+        model.selectTool(.shape)
+        model.shapeSettings.kind = .rectangle
+        model.shapeSettings.isFilled = true
+        model.selectShapePreset(5) // Blue
+        model.beginShape(at: CGPoint(x: 20, y: 20))
+        model.updateShape(to: CGPoint(x: 120, y: 70), constrain: true)
+        model.endShape()
+        XCTAssertEqual(model.shapes.count, 1)
+        let rectId = model.shapes[0].id
+        XCTAssertEqual(model.shapes[0].rect.width, 100, accuracy: 0.5)
+        XCTAssertEqual(model.shapes[0].rect.height, 100, accuracy: 0.5)
+        XCTAssertTrue(model.shapes[0].isFilled)
+
+        // 2) Draw an arrow
+        model.shapeSettings.kind = .arrow
+        model.beginShape(at: CGPoint(x: 200, y: 20))
+        model.updateShape(to: CGPoint(x: 320, y: 20), constrain: true)
+        model.endShape()
+        XCTAssertEqual(model.shapes.count, 2)
+        let arrowId = model.shapes[1].id
+
+        // 3) Create and re-edit a multi-line TextLabel
+        model.selectTool(.text)
+        model.setTextFontSize(30)
+        model.toggleTextBold()
+        model.selectTextPreset(1) // Red
+        model.beginTextEditing(at: CGPoint(x: 40, y: 160))
+        model.editingTextDraft = "Architecture\nDiagram"
+        model.commitTextEditing()
+        XCTAssertFalse(model.isEditingText)
+        XCTAssertEqual(model.textLabels.count, 1)
+        let labelId = model.textLabels[0].id
+        XCTAssertEqual(model.textLabels[0].fontSize, 30)
+        XCTAssertTrue(model.textLabels[0].isBold)
+
+        // Re-edit existing text label
+        model.beginTextEditing(at: model.textLabels[0].cgPosition, existingId: labelId)
+        XCTAssertEqual(model.editingTextDraft, "Architecture\nDiagram")
+        model.editingTextDraft = "Updated Title"
+        model.commitTextEditing()
+        XCTAssertEqual(model.textLabels[0].text, "Updated Title")
+
+        // 4) Select rectangle, resize via bottom-right corner handle, rotate 45°, recolor
+        model.selectTool(.select)
+        XCTAssertTrue(model.selectElement(at: CGPoint(x: 20, y: 60), scale: 1.0))
+        XCTAssertEqual(model.selectedShapeIds, [rectId])
+        let brCorner = model.shapes[0].rotatedCorners()[2]
+        let handleHit = model.hitTestShapeHandle(brCorner, scale: 1.0)
+        XCTAssertEqual(handleHit?.shapeId, rectId)
+        XCTAssertEqual(handleHit?.handleIndex, 2)
+        model.beginMove(at: brCorner, scale: 1.0)
+        model.moveSelected(by: CGSize(width: 40, height: 20))
+        model.commitMove()
+        XCTAssertEqual(model.shapes[0].rect.width, 140, accuracy: 0.5)
+        XCTAssertEqual(model.shapes[0].rect.height, 120, accuracy: 0.5)
+
+        // Rotate rectangle via handle
+        let rotGeom = try XCTUnwrap(model.rotationHandleGeometry(scale: 1.0))
+        model.beginRotate(at: rotGeom.handleCenter, scale: 1.0)
+        model.updateRotate(to: CGPoint(x: rotGeom.pivot.x + 50, y: rotGeom.pivot.y - 50), snapTo15Degrees: true)
+        model.commitRotate()
+        XCTAssertEqual(model.shapes[0].rotation, .pi / 4, accuracy: 1e-4)
+        XCTAssertTrue(model.canResetSelectionRotation)
+        model.resetSelectionRotation()
+        XCTAssertEqual(model.shapes[0].rotation, 0, accuracy: 1e-5)
+
+        // 5) Drag arrow endpoint handle
+        XCTAssertTrue(model.selectElement(at: CGPoint(x: 260, y: 20), scale: 1.0))
+        XCTAssertEqual(model.selectedShapeIds, [arrowId])
+        model.beginMove(at: CGPoint(x: 320, y: 20), scale: 1.0)
+        model.moveSelected(by: CGSize(width: 30, height: 40))
+        model.commitMove()
+        let movedArrow = try XCTUnwrap(model.shapes.first(where: { $0.id == arrowId }))
+        XCTAssertEqual(movedArrow.cgEnd.x, 350, accuracy: 0.5)
+        XCTAssertEqual(movedArrow.cgEnd.y, 60, accuracy: 0.5)
+
+        // 6) Select text label, scale it, recolor it, duplicate it, undo
+        XCTAssertTrue(model.selectElement(at: model.textLabels[0].cgCenter, scale: 1.0))
+        XCTAssertEqual(model.selectedTextIds, [labelId])
+        model.transformSelected(scale: 1.2, rotation: 0)
+        XCTAssertEqual(model.textLabels[0].fontSize, 36, accuracy: 0.5)
+        model.recolorSelected(to: .green, presetIndex: 4)
+        XCTAssertEqual(model.textLabels[0].presetIndex, 4)
+        model.duplicateSelected()
+        XCTAssertEqual(model.textLabels.count, 2)
+        model.undo()
+        XCTAssertEqual(model.textLabels.count, 1)
+
+        // 7) PNG and PDF exports include shapes and text cleanly
+        let (size, offset) = model.canvasBoundingRect()
+        let png = model.pngData(size: size, offset: offset, scale: 2)
+        XCTAssertNotNil(png)
+        XCTAssertGreaterThan(png?.count ?? 0, 500)
+        let pdf = model.pdfData(size: size, offset: offset)
+        XCTAssertNotNil(pdf)
+        XCTAssertGreaterThan(pdf?.count ?? 0, 500)
+    }
 }

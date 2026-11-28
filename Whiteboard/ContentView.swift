@@ -112,7 +112,7 @@ struct ContentView: View {
 
                     if model.showDeleteMenu {
                         HStack(spacing: 4) {
-                            if model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty {
+                            if !model.hasSelectedItems {
                                 // Nothing selected — offer Paste
                                 Button(action: { model.paste(); model.showDeleteMenu = false }) {
                                     Label("Paste", systemImage: "doc.on.clipboard")
@@ -304,11 +304,17 @@ struct ContentView: View {
             Button("") { model.deleteSelected() }
                 .keyboardShortcut(.delete, modifiers: [])
             Button("") {
-                if model.currentTool == .select {
+                if model.isEditingText {
+                    model.cancelTextEditing()
+                } else if model.currentTool == .select {
                     model.clearLassoSelection()
                 }
             }
             .keyboardShortcut(.escape, modifiers: [])
+            Button("") { model.selectTool(.shape) }
+                .keyboardShortcut("r", modifiers: [])
+            Button("") { model.selectTool(.text) }
+                .keyboardShortcut("t", modifiers: [])
             Button("") { model.copySelected() }
                 .keyboardShortcut("c", modifiers: .command)
             Button("") { model.paste() }
@@ -363,6 +369,8 @@ struct ContentView: View {
         case .pen: return model.penColor
         case .sharpie: return model.sharpieColor
         case .fill: return model.fillColor
+        case .shape: return model.shapeColor
+        case .text: return model.textColor
         default: return Color.accentColor
         }
     }
@@ -442,7 +450,7 @@ struct ContentView: View {
     }
 
     private var hasActiveSelection: Bool {
-        !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+        model.hasSelectedItems
     }
 
     @ViewBuilder
@@ -556,7 +564,7 @@ struct ContentView: View {
             .pointingHand()
             .pencilHoverEffect()
 
-            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty {
+            if !model.selectedStrokeIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectedShapeIds.isEmpty || !model.selectedTextIds.isEmpty {
                 Divider().frame(height: 18)
                 HStack(spacing: 4) {
                     ForEach(Array(model.penPresets.prefix(6).enumerated()), id: \.offset) { idx, color in
@@ -943,7 +951,7 @@ struct ContentView: View {
     }
 
     private func dynamicTooltip(for item: ToolbarItemID) -> String {
-        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+        let hasSelection = model.hasSelectedItems
         switch item {
         case .clear: return hasSelection ? "Delete Selected" : "Clear Tissue"
         case .darkMode: return model.appSettings.isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"
@@ -974,8 +982,8 @@ struct ContentView: View {
     }
 
     private func isToolbarItemDisabled(_ item: ToolbarItemID) -> Bool {
-        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
-        let isEmptyCanvas = model.strokes.isEmpty && model.placedImages.isEmpty && model.fills.isEmpty
+        let hasSelection = model.hasSelectedItems
+        let isEmptyCanvas = model.strokes.isEmpty && model.placedImages.isEmpty && model.fills.isEmpty && model.shapes.isEmpty && model.textLabels.isEmpty
         switch item {
         case .undo: return !model.canUndo
         case .redo: return !model.canRedo
@@ -987,9 +995,9 @@ struct ContentView: View {
     }
 
     private func performToolbarAction(for item: ToolbarItemID, closePopover: Bool = false) {
-        let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty
+        let hasSelection = model.hasSelectedItems
         switch item {
-        case .pen, .sharpie, .fill, .eraser, .select:
+        case .pen, .sharpie, .fill, .shape, .text, .eraser, .select:
             if let tool = item.associatedTool {
                 let wasSelected = (model.currentTool == tool)
                 if wasSelected {
@@ -1088,8 +1096,8 @@ struct ContentView: View {
                     settingsGroup(title: nil, items: [
                         ("arrow.uturn.backward", "Undo", { model.undo() }, !model.canUndo),
                         ("arrow.uturn.forward", "Redo", { model.redo() }, !model.canRedo),
-                        ("trash", model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? "Clear Canvas" : "Delete", { model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty ? (model.showClearConfirmation = true) : model.deleteSelected() }, model.strokes.isEmpty && model.placedImages.isEmpty),
-                        ("doc.on.doc", "Copy", { model.copySelected() }, model.selectedStrokeIds.isEmpty && model.selectedImageIds.isEmpty),
+                        ("trash", !model.hasSelectedItems ? "Clear Canvas" : "Delete", { !model.hasSelectedItems ? (model.showClearConfirmation = true) : model.deleteSelected() }, model.strokes.isEmpty && model.placedImages.isEmpty && model.fills.isEmpty && model.shapes.isEmpty && model.textLabels.isEmpty),
+                        ("doc.on.doc", "Copy", { model.copySelected() }, !model.hasSelectedItems),
                         ("doc.on.clipboard", "Paste", { model.paste() }, false),
                         ("photo", "Import Image", { showImporter = true }, false),
                         ("viewfinder", "Center", { model.needsRecenter = true }, false),

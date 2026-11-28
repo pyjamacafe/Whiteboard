@@ -10,6 +10,8 @@ struct ToolSettingsView: View {
             case .pen: penSettings
             case .sharpie: sharpieSettings
             case .fill: fillSettings
+            case .shape: shapeSettings
+            case .text: textSettings
             case .eraser: eraserSettings
             case .select: EmptyView()
             }
@@ -97,6 +99,8 @@ struct ToolSettingsView: View {
     @State private var lastPenTapIndex: Int?
     @State private var lastSharpieTapIndex: Int?
     @State private var lastFillTapIndex: Int?
+    @State private var lastShapeTapIndex: Int?
+    @State private var lastTextTapIndex: Int?
 
     // MARK: - Pen
 
@@ -276,6 +280,129 @@ struct ToolSettingsView: View {
             model.fillSettings.gapTolerance = 5.0
         } else {
             model.fillSettings.gapTolerance = 0
+        }
+    }
+
+    // MARK: - Shape
+
+    private var shapeSettings: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 3) {
+                ForEach(ShapeKind.allCases) { kind in
+                    Button(action: { model.shapeSettings.kind = kind }) {
+                        Image(systemName: kind.systemImage)
+                            .font(.system(size: 13, weight: .medium))
+                            .frame(width: 26, height: 26)
+                            .background(model.shapeSettings.kind == kind ? Color.accentColor : Color.clear)
+                            .foregroundColor(model.shapeSettings.kind == kind ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .contentShape(RoundedRectangle(cornerRadius: 6))
+                            .pencilHoverEffect()
+                    }
+                    .buttonStyle(.plain)
+                    .help(kind.title)
+                    .pointingHand()
+                }
+            }
+
+            Divider().frame(height: 24)
+
+            squarePresetRow(
+                presets: model.appSettings.isDarkMode ? $model.shapeSettings.darkPresets : $model.shapeSettings.lightPresets,
+                selected: model.appSettings.isDarkMode ? $model.shapeSettings.darkColor : $model.shapeSettings.lightColor,
+                selectedIndex: $model.shapePresetIndex,
+                lastTapIndex: $lastShapeTapIndex
+            )
+
+            Divider().frame(height: 24)
+
+            HStack(spacing: 4) {
+                ForEach(model.shapeSettings.widthOptions, id: \.self) { w in
+                    Button(action: { model.shapeSettings.lineWidth = w }) {
+                        Circle()
+                            .fill(model.shapeSettings.lineWidth == w ? Color.accentColor : Color.primary.opacity(0.4))
+                            .frame(width: 4 + w * 2, height: 4 + w * 2)
+                            .overlay(
+                                model.shapeSettings.lineWidth == w ?
+                                Circle().stroke(Color.primary, lineWidth: 1) : nil
+                            )
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                            .pencilHoverEffect()
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHand()
+                }
+            }
+
+            if !model.shapeSettings.kind.isLineLike {
+                Divider().frame(height: 24)
+
+                Button(action: { model.shapeSettings.isFilled.toggle() }) {
+                    Image(systemName: model.shapeSettings.isFilled ? "square.fill" : "square")
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 26, height: 26)
+                        .background(model.shapeSettings.isFilled ? Color.accentColor : Color.primary.opacity(0.08))
+                        .foregroundColor(model.shapeSettings.isFilled ? .white : .primary)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .contentShape(RoundedRectangle(cornerRadius: 6))
+                        .pencilHoverEffect()
+                }
+                .buttonStyle(.plain)
+                .help(model.shapeSettings.isFilled ? "Filled Shape (tap for Outline Only)" : "Outline Only (tap for Translucent Fill)")
+                .pointingHand()
+            }
+        }
+    }
+
+    // MARK: - Text
+
+    private var textSettings: some View {
+        let labels = ["S", "M", "L", "XL"]
+        return HStack(spacing: 12) {
+            squarePresetRow(
+                presets: model.appSettings.isDarkMode ? $model.textSettings.darkPresets : $model.textSettings.lightPresets,
+                selected: model.appSettings.isDarkMode ? $model.textSettings.darkColor : $model.textSettings.lightColor,
+                selectedIndex: $model.textPresetIndex,
+                lastTapIndex: $lastTextTapIndex
+            )
+
+            Divider().frame(height: 24)
+
+            HStack(spacing: 4) {
+                ForEach(Array(model.textSettings.sizeOptions.enumerated()), id: \.offset) { idx, sz in
+                    let isSelected = abs(model.textSettings.fontSize - sz) < 0.5
+                    Button(action: { model.setTextFontSize(sz) }) {
+                        Text(idx < labels.count ? labels[idx] : "\(Int(sz))")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 26, height: 24)
+                            .background(isSelected ? Color.accentColor : Color.primary.opacity(0.08))
+                            .foregroundColor(isSelected ? .white : .primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .contentShape(RoundedRectangle(cornerRadius: 6))
+                            .pencilHoverEffect()
+                    }
+                    .buttonStyle(.plain)
+                    .help("Font Size: \(Int(sz))pt")
+                    .pointingHand()
+                }
+            }
+
+            Divider().frame(height: 24)
+
+            Button(action: { model.toggleTextBold() }) {
+                Image(systemName: "bold")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(width: 26, height: 24)
+                    .background(model.textSettings.isBold ? Color.accentColor : Color.primary.opacity(0.08))
+                    .foregroundColor(model.textSettings.isBold ? .white : .primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .contentShape(RoundedRectangle(cornerRadius: 6))
+                    .pencilHoverEffect()
+            }
+            .buttonStyle(.plain)
+            .help("Toggle Bold")
+            .pointingHand()
         }
     }
 
