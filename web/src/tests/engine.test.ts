@@ -15,6 +15,7 @@ import {
 import { computeFillContours } from '../engine/floodFill';
 import { CanvasHistory } from '../engine/history';
 import { decodeWBJson, encodeWBJson } from '../engine/wbCodec';
+import { DrawingStore } from '../store/drawingStore';
 import { generateId, type FillShape, type PlacedImage, type Point, type Stroke } from '../types/model';
 
 const black = { r: 0, g: 0, b: 0, a: 1 };
@@ -289,5 +290,135 @@ describe('CanvasHistory & Swift-compatible .wb codec', () => {
     const reencoded = JSON.parse(encodeWBJson(decoded));
     expect(reencoded.strokes[0].points[0]).toEqual([10, 20]);
     expect(reencoded.placedImages[0].size).toEqual({ x: 120, y: 80 });
+  });
+});
+
+describe('DrawingStore Phase 2 (Lasso, Rotation Handle, Images, Scenes)', () => {
+  it('supports tap-to-select for Pen, Sharpie, Fill, and clearLassoSelection', () => {
+    const store = new DrawingStore(false);
+    const pen = makeStroke(
+      [
+        { x: 0, y: 0 },
+        { x: 80, y: 0 },
+      ],
+      { isSharpie: false }
+    );
+    const sharpie = makeStroke(
+      [
+        { x: 0, y: 100 },
+        { x: 80, y: 100 },
+      ],
+      { isSharpie: true }
+    );
+    const fill: FillShape = {
+      id: generateId(),
+      contours: [
+        [
+          { x: 200, y: 0 },
+          { x: 280, y: 0 },
+          { x: 280, y: 80 },
+          { x: 200, y: 80 },
+        ],
+      ],
+      color: { r: 0, g: 0.35, b: 1, a: 1 },
+      opacity: 0.5,
+      presetIndex: 5,
+    };
+    store.loadSaveData({ strokes: [pen, sharpie], fills: [fill], placedImages: [], scenes: [] });
+    store.selectTool('select');
+
+    // Tap pen via beginLasso + endLasso
+    store.beginLasso({ x: 40, y: 2 });
+    store.endLasso(1);
+    expect(store.getSnapshot().selectedStrokeIds).toEqual([pen.id]);
+    expect(store.getSnapshot().selectionBoundary.length).toBeGreaterThan(0);
+
+    // Tap sharpie
+    expect(store.selectElement({ x: 40, y: 100 }, 1)).toBe(true);
+    expect(store.getSnapshot().selectedStrokeIds).toEqual([sharpie.id]);
+
+    // Tap fill
+    expect(store.selectElement({ x: 240, y: 40 }, 1)).toBe(true);
+    expect(store.getSnapshot().selectedFillIds).toEqual([fill.id]);
+
+    // Esc / clearLassoSelection stays in select tool
+    store.clearLassoSelection();
+    expect(store.getSnapshot().currentTool).toBe('select');
+    expect(store.hasAnySelectionOrLasso).toBe(false);
+
+    // Empty lasso leaves no stale boundary
+    store.beginLasso({ x: 450, y: 450 });
+    store.addLassoPoint({ x: 550, y: 450 });
+    store.addLassoPoint({ x: 550, y: 550 });
+    store.addLassoPoint({ x: 450, y: 550 });
+    store.endLasso(1);
+    expect(store.getSnapshot().selectionBoundary).toEqual([]);
+  });
+
+  it('rotates strokes and placed images via handle, supports single undo and reset', () => {
+    const store = new DrawingStore(false);
+    const s = makeStroke([
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+    ]);
+    store.loadSaveData({ strokes: [s], fills: [], placedImages: [], scenes: [] });
+    store.selectTool('select');
+    store.selectElement({ x: 50, y: 0 }, 1);
+    expect(store.canResetSelectionRotation).toBe(false);
+
+    const geom = store.rotationHandleGeometry(1)!;
+    expect(geom).not.toBeNull();
+    expect(store.hitTestRotateHandle(geom.handleCenter, 1)).toBe(true);
+
+    // Drag 90° clockwise
+    store.beginRotate(geom.handleCenter, 1);
+    store.updateRotate({ x: geom.pivot.x + 15, y: geom.pivot.y - 25 }, false);
+    store.updateRotate({ x: geom.pivot.x + 28, y: geom.pivot.y }, false);
+    store.commitRotate();
+
+    expect(store.canResetSelectionRotation).toBe(true);
+    expect(store.activeRotationLabel).toBe('90°');
+    const rotated = store.getSnapshot().strokes[0].points;
+    expect(rotated[0].x).toBeCloseTo(50, 0);
+    expect(rotated[0].y).toBeCloseTo(-50, 0);
+
+    // Reset Rotation
+    store.resetSelectionRotation();
+    expect(store.canResetSelectionRotation).toBe(false);
+    expect(store.getSnapshot().strokes[0].points[0].x).toBeCloseTo(0, 0);
+
+    // PlacedImage rotation persists across re-select
+    store.addImageFromDataUrl('data:image/png;base64,AQID', 80, 40, 0, { x: 300, y: 300 });
+    const imgGeom = store.rotationHandleGeometry(1)!;
+    store.beginRotate(imgGeom.handleCenter, 1);
+    store.updateRotate({ x: imgGeom.pivot.x + 40, y: imgGeom.pivot.y - 40 }, true);
+    store.commitRotate();
+    expect(store.getSnapshot().placedImages[0].rotation).toBeCloseTo(Math.PI / 4, 4);
+
+    store.clearSelection();
+    store.selectElement({ x: 300, y: 300 }, 1);
+    expect(store.canResetSelectionRotation).toBe(true);
+    expect(store.activeRotationLabel).toBe('45°');
+    store.resetSelectionRotation();
+    expect(store.getSnapshot().placedImages[0].rotation).toBeCloseTo(0, 5);
+  });
+
+  it('supports Scenes CRUD, reorder, and navigation', () => {
+    const store = new DrawingStore(false);
+    store.reportViewport({ x: 10, y: 20 }, 1.2);
+    const s1 = store.addScene('Intro');
+    store.reportViewport({ x: 300, y: 400 }, 2.0);
+    const s2 = store.addScene('Diagram');
+
+    expect(store.getSnapshot().scenes.length).toBe(2);
+    store.renameScene(s1.id, 'Overview');
+    expect(store.getSnapshot().scenes[0].name).toBe('Overview');
+    store.moveScene(0, 1);
+    expect(store.getSnapshot().scenes[0].id).toBe(s2.id);
+
+    store.goToNextScene();
+    expect(store.getSnapshot().activeSceneId).toBe(s1.id);
+    store.deleteScene(s1.id);
+    expect(store.getSnapshot().scenes.length).toBe(1);
   });
 });

@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { CanvasStage } from './components/CanvasStage';
 import { Icon } from './components/Icons';
+import { ScenesPopover } from './components/ScenesPopover';
+import { QuickSelectionMenu, SelectionPill } from './components/SelectionPill';
 import { ToolSettingsPill } from './components/ToolSettingsPill';
 import { drawingStore, useDrawingState } from './store/drawingStore';
 import { colorToCss, type CanvasBackground, type Tool } from './types/model';
@@ -13,7 +15,44 @@ function contrastOnColor(c: { r: number; g: number; b: number }): string {
 export const App: React.FC = () => {
   const state = useDrawingState();
   const [settingsTool, setSettingsTool] = useState<Tool | null>(null);
+  const [showScenes, setShowScenes] = useState(false);
+  const [showZoomPill, setShowZoomPill] = useState(false);
+  const zoomHideTimer = useRef<number | null>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
+  // Transient Zoom Indicator Pill
+  useEffect(() => {
+    setShowZoomPill(true);
+    if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
+    zoomHideTimer.current = window.setTimeout(() => setShowZoomPill(false), 2000);
+    return () => {
+      if (zoomHideTimer.current !== null) window.clearTimeout(zoomHideTimer.current);
+    };
+  }, [state.zoomDisplayScale]);
+
+  // System clipboard image paste
+  useEffect(() => {
+    const onPaste = async (e: ClipboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const items = Array.from(e.clipboardData?.items ?? []);
+      const imgItem = items.find((it) => it.type.startsWith('image/'));
+      if (imgItem) {
+        const blob = imgItem.getAsFile();
+        if (blob) {
+          e.preventDefault();
+          await drawingStore.addImageFromBlob(blob);
+          return;
+        }
+      }
+      if (drawingStore.pasteInternal()) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, []);
+
+  // Keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -27,13 +66,61 @@ export const App: React.FC = () => {
           else drawingStore.undo();
           return;
         }
+        if (key === 'c') {
+          if (drawingStore.hasSelection) {
+            e.preventDefault();
+            drawingStore.copySelected();
+          }
+          return;
+        }
+        if (key === 'i') {
+          e.preventDefault();
+          imageInputRef.current?.click();
+          return;
+        }
+        if (key === '=' || key === '+') {
+          if (state.selectedImageIds.length > 0) {
+            e.preventDefault();
+            drawingStore.resizeSelectedImages(1.25);
+          }
+          return;
+        }
+        if (key === '-') {
+          if (state.selectedImageIds.length > 0) {
+            e.preventDefault();
+            drawingStore.resizeSelectedImages(0.8);
+          }
+          return;
+        }
         return;
       }
 
       if (!mod && !e.altKey) {
+        if (e.key === 'Escape') {
+          if (showScenes) {
+            setShowScenes(false);
+            return;
+          }
+          if (state.currentTool === 'select' && (drawingStore.hasAnySelectionOrLasso || state.showQuickMenu)) {
+            e.preventDefault();
+            drawingStore.clearLassoSelection();
+            return;
+          }
+          if (state.showQuickMenu) {
+            drawingStore.setQuickMenu(false);
+            return;
+          }
+        }
         if (e.key === 'Tab') {
           e.preventDefault();
           drawingStore.toggleToolbarVisible();
+          return;
+        }
+        if (e.key === 'Backspace' || e.key === 'Delete') {
+          if (drawingStore.hasSelection) {
+            e.preventDefault();
+            drawingStore.deleteSelected();
+          }
           return;
         }
         if (key === 'p') {
@@ -61,6 +148,18 @@ export const App: React.FC = () => {
           setSettingsTool(null);
           return;
         }
+        if (key === 'x' && e.shiftKey) {
+          drawingStore.addScene();
+          return;
+        }
+        if (e.key === ',' && !e.shiftKey) {
+          drawingStore.goToPreviousScene();
+          return;
+        }
+        if (e.key === '.' && !e.shiftKey) {
+          drawingStore.goToNextScene();
+          return;
+        }
         if (key === '0' && state.currentTool === 'eraser') {
           drawingStore.setEraserSettings({ eraseTarget: 'all' });
           return;
@@ -82,9 +181,10 @@ export const App: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [state.currentTool]);
+  }, [state.currentTool, state.selectedImageIds, state.showQuickMenu, showScenes]);
 
   const handleToolClick = (tool: Tool) => {
+    setShowScenes(false);
     if (state.currentTool === tool) {
       setSettingsTool(settingsTool === tool || tool === 'select' ? null : tool);
     } else {
@@ -118,12 +218,34 @@ export const App: React.FC = () => {
 
   return (
     <div className={`app-root ${state.appSettings.isDarkMode ? 'theme-dark' : ''}`}>
-      <CanvasStage onBeginDraw={() => setSettingsTool(null)} />
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="sr-only"
+        onChange={async (e) => {
+          const files = Array.from(e.target.files ?? []);
+          for (let i = 0; i < files.length; i++) {
+            await drawingStore.addImageFromBlob(files[i], i);
+          }
+          e.target.value = '';
+        }}
+      />
+
+      <CanvasStage
+        onBeginDraw={() => {
+          setSettingsTool(null);
+          setShowScenes(false);
+        }}
+      />
+
+      <QuickSelectionMenu />
 
       {state.isToolbarVisible && (
         <div className={`toolbar-overlay dock-${state.appSettings.toolbarDockEdge}`}>
           <div className="glass-capsule toolbar-bar" onPointerDown={(e) => e.stopPropagation()}>
-            {(['pen', 'sharpie', 'fill', 'eraser'] as Tool[]).map((t) => (
+            {(['pen', 'sharpie', 'fill', 'eraser', 'select'] as Tool[]).map((t) => (
               <button
                 key={t}
                 type="button"
@@ -136,8 +258,49 @@ export const App: React.FC = () => {
               </button>
             ))}
 
+            <div className="scenes-group">
+              <button
+                type="button"
+                className="toolbar-btn compact"
+                disabled={state.scenes.length === 0}
+                title="Previous Scene (,)"
+                onClick={() => drawingStore.goToPreviousScene()}
+              >
+                <Icon name="chevronLeft" size={15} />
+              </button>
+              <button
+                type="button"
+                className={`toolbar-btn ${showScenes ? 'subtle-active' : ''}`}
+                title="Scenes"
+                onClick={() => {
+                  setSettingsTool(null);
+                  setShowScenes((v) => !v);
+                }}
+              >
+                <Icon name="scenes" size={17} />
+                {state.scenes.length > 0 && <span className="count-badge">{state.scenes.length}</span>}
+              </button>
+              <button
+                type="button"
+                className="toolbar-btn compact"
+                disabled={state.scenes.length === 0}
+                title="Next Scene (.)"
+                onClick={() => drawingStore.goToNextScene()}
+              >
+                <Icon name="chevronRight" size={15} />
+              </button>
+            </div>
+
             <div className="toolbar-divider" />
 
+            <button
+              type="button"
+              className="toolbar-btn"
+              title="Import Image (Ctrl/⌘I)"
+              onClick={() => imageInputRef.current?.click()}
+            >
+              <Icon name="image" size={17} />
+            </button>
             <button
               type="button"
               className="toolbar-btn"
@@ -190,15 +353,48 @@ export const App: React.FC = () => {
             <button
               type="button"
               className="toolbar-btn destructive"
-              title="Clear Canvas"
-              disabled={state.strokes.length === 0 && state.fills.length === 0}
-              onClick={() => drawingStore.clearCanvas()}
+              title={drawingStore.hasSelection ? 'Delete Selected' : 'Clear Canvas'}
+              disabled={
+                state.strokes.length === 0 &&
+                state.fills.length === 0 &&
+                state.placedImages.length === 0
+              }
+              onClick={() =>
+                drawingStore.hasSelection ? drawingStore.deleteSelected() : drawingStore.clearCanvas()
+              }
             >
               <Icon name="trash" size={17} />
             </button>
           </div>
 
           {settingsTool && <ToolSettingsPill tool={settingsTool} />}
+          <SelectionPill />
+          {showScenes && <ScenesPopover onClose={() => setShowScenes(false)} />}
+        </div>
+      )}
+
+      {showZoomPill && state.isToolbarVisible && (
+        <div
+          className={`glass-capsule zoom-pill ${state.appSettings.toolbarDockEdge === 'bottom' ? 'raised' : ''}`}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="zoom-label-btn"
+            title="Reset Zoom to 100%"
+            onClick={() => drawingStore.requestResetZoom()}
+          >
+            {Math.round(state.zoomDisplayScale * 100)}%
+          </button>
+          <div className="pill-divider short" />
+          <button
+            type="button"
+            className="zoom-icon-btn"
+            title="Fit All Content"
+            onClick={() => drawingStore.requestFitToContent()}
+          >
+            <Icon name="fit" size={13} />
+          </button>
         </div>
       )}
     </div>
