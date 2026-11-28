@@ -3,6 +3,7 @@ import type {
   AppSettings,
   CanvasBackground,
   CanvasScene,
+  CanvasShape,
   CodableColor,
   EraserMode,
   EraserSettings,
@@ -15,7 +16,11 @@ import type {
   Point,
   Rect,
   SaveData,
+  ShapeKind,
+  ShapeSettings,
   Stroke,
+  TextLabel,
+  TextSettings,
   Tool,
   ToolbarDockEdge,
   ToolbarItemID,
@@ -27,10 +32,13 @@ import {
   defaultEraserSettings,
   defaultFillSettings,
   defaultPenSettings,
+  defaultShapeSettings,
+  defaultTextSettings,
   generateId,
 } from '../types/model';
 import {
   boundingBox,
+  constrainShapeEnd,
   distanceSquared,
   eraseFills,
   eraseStrokes,
@@ -39,14 +47,25 @@ import {
   imageCenter,
   imageContainsPoint,
   imageRotatedCorners,
+  isLineLikeShape,
   normalizeAngle,
   paddedBoundingPolygon,
   pointInPolygon,
   pointSegmentDistanceSquared,
   recognizeShape,
+  resizedFreeRect,
   resizedRect,
+  rotatePoint,
+  shapeCenter,
+  shapeContainsPoint,
+  shapeRect,
+  shapeRotatedCorners,
   snapRotationAngle,
   SpatialHashGrid,
+  textLabelCenter,
+  textLabelContainsPoint,
+  textLabelRotatedCorners,
+  textLabelSize,
 } from '../engine/geometry';
 import { computeFillContours } from '../engine/floodFill';
 import { CanvasHistory, type CanvasSnapshot } from '../engine/history';
@@ -67,6 +86,8 @@ interface ClipboardPayload {
   strokes: Stroke[];
   fills: FillShape[];
   placedImages: PlacedImage[];
+  shapes: CanvasShape[];
+  textLabels: TextLabel[];
   boundary: Point[];
 }
 
@@ -74,6 +95,8 @@ export interface DrawingState {
   strokes: Stroke[];
   fills: FillShape[];
   placedImages: PlacedImage[];
+  shapes: CanvasShape[];
+  textLabels: TextLabel[];
   scenes: CanvasScene[];
   activeSceneId: string | null;
   pendingSceneNavigation: CanvasScene | null;
@@ -82,14 +105,27 @@ export interface DrawingState {
   needsResetZoom: boolean;
 
   currentStroke: Stroke | null;
+  currentShape: CanvasShape | null;
   currentTool: Tool;
   previousTool: Tool;
+
+  isEditingText: boolean;
+  editingTextId: string | null;
+  editingTextPosition: Point;
+  editingTextDraft: string;
+  editingTextFontSize: number;
+  editingTextIsBold: boolean;
+  editingTextPresetIndex: number;
+  editingTextColor: CodableColor;
+  editingTextRotation: number;
 
   selectionLasso: Point[];
   selectionBoundary: Point[];
   selectedStrokeIds: string[];
   selectedImageIds: string[];
   selectedFillIds: string[];
+  selectedShapeIds: string[];
+  selectedTextIds: string[];
   isRotating: boolean;
   selectionRotationAngle: number;
   isRotationSnapped: boolean;
@@ -99,9 +135,13 @@ export interface DrawingState {
   penPresetIndex: number;
   sharpiePresetIndex: number;
   fillPresetIndex: number;
+  shapePresetIndex: number;
+  textPresetIndex: number;
   penSettings: PenSettings;
   sharpieSettings: PenSettings;
   fillSettings: FillSettings;
+  shapeSettings: ShapeSettings;
+  textSettings: TextSettings;
   eraserSettings: EraserSettings;
   appSettings: AppSettings;
   pinnedToolbarItems: ToolbarItemID[];
@@ -129,6 +169,7 @@ export class DrawingStore {
   isResizing = false;
   resizeCorner = 0;
   resizeImageId: string | null = null;
+  resizeShapeId: string | null = null;
   resizeStartRect: Rect = { x: 0, y: 0, width: 0, height: 0 };
   lastMovePoint: Point = { x: 0, y: 0 };
   lastCanvasTapLocation: Point = { x: 0, y: 0 };
@@ -145,6 +186,11 @@ export class DrawingStore {
     string,
     { center: Point; size: { width: number; height: number }; rotation: number }
   >();
+  private rotateSnapshotShapes = new Map<string, CanvasShape>();
+  private rotateSnapshotTexts = new Map<
+    string,
+    { center: Point; size: { width: number; height: number }; rotation: number }
+  >();
   private rotateSnapshotBoundary: Point[] = [];
   private rotateSnapshotTaken = false;
   private internalClipboard: ClipboardPayload | null = null;
@@ -154,6 +200,8 @@ export class DrawingStore {
       strokes: [],
       fills: [],
       placedImages: [],
+      shapes: [],
+      textLabels: [],
       scenes: [],
       activeSceneId: null,
       pendingSceneNavigation: null,
@@ -161,13 +209,25 @@ export class DrawingStore {
       needsFitToContent: false,
       needsResetZoom: false,
       currentStroke: null,
+      currentShape: null,
       currentTool: 'pen',
       previousTool: 'pen',
+      isEditingText: false,
+      editingTextId: null,
+      editingTextPosition: { x: 0, y: 0 },
+      editingTextDraft: '',
+      editingTextFontSize: 22,
+      editingTextIsBold: false,
+      editingTextPresetIndex: 0,
+      editingTextColor: { r: 0.05, g: 0.05, b: 0.05, a: 1 },
+      editingTextRotation: 0,
       selectionLasso: [],
       selectionBoundary: [],
       selectedStrokeIds: [],
       selectedImageIds: [],
       selectedFillIds: [],
+      selectedShapeIds: [],
+      selectedTextIds: [],
       isRotating: false,
       selectionRotationAngle: 0,
       isRotationSnapped: false,
@@ -176,9 +236,13 @@ export class DrawingStore {
       penPresetIndex: 0,
       sharpiePresetIndex: 0,
       fillPresetIndex: 5,
+      shapePresetIndex: 0,
+      textPresetIndex: 0,
       penSettings: defaultPenSettings(),
       sharpieSettings: defaultPenSettings(),
       fillSettings: defaultFillSettings(),
+      shapeSettings: defaultShapeSettings(),
+      textSettings: defaultTextSettings(),
       eraserSettings: defaultEraserSettings(),
       appSettings: defaultAppSettings(),
       pinnedToolbarItems: [...DEFAULT_PINNED_TOOLBAR_ITEMS],
@@ -216,6 +280,7 @@ export class DrawingStore {
   }
 
   flushAutoSave(): void {
+    if (this.state.isEditingText) this.commitTextEditing();
     if (this.autoSaveTimer !== null && typeof window !== 'undefined') {
       window.clearTimeout(this.autoSaveTimer);
       this.autoSaveTimer = null;
@@ -229,6 +294,8 @@ export class DrawingStore {
       placedImages: this.state.placedImages,
       fills: this.state.fills,
       scenes: this.state.scenes,
+      shapes: this.state.shapes,
+      textLabels: this.state.textLabels,
     };
   }
 
@@ -242,14 +309,22 @@ export class DrawingStore {
         strokes: data.strokes,
         fills: data.fills,
         placedImages: data.placedImages,
+        shapes: data.shapes ?? [],
+        textLabels: data.textLabels ?? [],
         scenes: data.scenes,
         activeSceneId: data.scenes[0]?.id ?? null,
         currentStroke: null,
+        currentShape: null,
+        isEditingText: false,
+        editingTextId: null,
+        editingTextDraft: '',
         selectionLasso: [],
         selectionBoundary: [],
         selectedStrokeIds: [],
         selectedImageIds: [],
         selectedFillIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         showQuickMenu: false,
         canUndo: false,
         canRedo: false,
@@ -286,11 +361,15 @@ export class DrawingStore {
           penSettings: s.penSettings,
           sharpieSettings: s.sharpieSettings,
           fillSettings: s.fillSettings,
+          shapeSettings: s.shapeSettings,
+          textSettings: s.textSettings,
           eraserSettings: s.eraserSettings,
           appSettings: s.appSettings,
           penPresetIndex: s.penPresetIndex,
           sharpiePresetIndex: s.sharpiePresetIndex,
           fillPresetIndex: s.fillPresetIndex,
+          shapePresetIndex: s.shapePresetIndex,
+          textPresetIndex: s.textPresetIndex,
           currentTool: s.currentTool,
         })
       );
@@ -309,11 +388,15 @@ export class DrawingStore {
         if (parsed.penSettings) this.state.penSettings = { ...this.state.penSettings, ...parsed.penSettings };
         if (parsed.sharpieSettings) this.state.sharpieSettings = { ...this.state.sharpieSettings, ...parsed.sharpieSettings };
         if (parsed.fillSettings) this.state.fillSettings = { ...this.state.fillSettings, ...parsed.fillSettings };
+        if (parsed.shapeSettings) this.state.shapeSettings = { ...this.state.shapeSettings, ...parsed.shapeSettings };
+        if (parsed.textSettings) this.state.textSettings = { ...this.state.textSettings, ...parsed.textSettings };
         if (parsed.eraserSettings) this.state.eraserSettings = { ...this.state.eraserSettings, ...parsed.eraserSettings };
         if (parsed.appSettings) this.state.appSettings = { ...this.state.appSettings, ...parsed.appSettings };
         if (typeof parsed.penPresetIndex === 'number') this.state.penPresetIndex = parsed.penPresetIndex;
         if (typeof parsed.sharpiePresetIndex === 'number') this.state.sharpiePresetIndex = parsed.sharpiePresetIndex;
         if (typeof parsed.fillPresetIndex === 'number') this.state.fillPresetIndex = parsed.fillPresetIndex;
+        if (typeof parsed.shapePresetIndex === 'number') this.state.shapePresetIndex = parsed.shapePresetIndex;
+        if (typeof parsed.textPresetIndex === 'number') this.state.textPresetIndex = parsed.textPresetIndex;
         if (parsed.currentTool) this.state.currentTool = parsed.currentTool;
       }
       const rawTb = localStorage.getItem(TOOLBAR_KEY);
@@ -333,9 +416,13 @@ export class DrawingStore {
       strokes: this.state.strokes,
       placedImages: this.state.placedImages,
       fills: this.state.fills,
+      shapes: this.state.shapes,
+      textLabels: this.state.textLabels,
       selectedStrokeIds: this.state.selectedStrokeIds,
       selectedImageIds: this.state.selectedImageIds,
       selectedFillIds: this.state.selectedFillIds,
+      selectedShapeIds: this.state.selectedShapeIds,
+      selectedTextIds: this.state.selectedTextIds,
       selectionBoundary: this.state.selectionBoundary,
     };
   }
@@ -368,6 +455,18 @@ export class DrawingStore {
       : this.state.fillSettings.lightPresets;
   }
 
+  get shapePresets(): CodableColor[] {
+    return this.state.appSettings.isDarkMode
+      ? this.state.shapeSettings.darkPresets
+      : this.state.shapeSettings.lightPresets;
+  }
+
+  get textPresets(): CodableColor[] {
+    return this.state.appSettings.isDarkMode
+      ? this.state.textSettings.darkPresets
+      : this.state.textSettings.lightPresets;
+  }
+
   get activePenColor(): CodableColor {
     return this.penPresets[this.state.penPresetIndex] ?? this.penPresets[0];
   }
@@ -380,11 +479,27 @@ export class DrawingStore {
     return this.fillPresets[this.state.fillPresetIndex] ?? this.fillPresets[0];
   }
 
+  get activeShapeColor(): CodableColor {
+    return this.shapePresets[this.state.shapePresetIndex] ?? this.shapePresets[0];
+  }
+
+  get activeTextColor(): CodableColor {
+    return this.textPresets[this.state.textPresetIndex] ?? this.textPresets[0];
+  }
+
+  get editingTextDisplayColor(): CodableColor {
+    const idx = this.state.editingTextPresetIndex;
+    if (idx >= 0 && idx < this.textPresets.length) return this.textPresets[idx];
+    return this.state.editingTextColor;
+  }
+
   get hasSelection(): boolean {
     return (
       this.state.selectedStrokeIds.length > 0 ||
       this.state.selectedImageIds.length > 0 ||
-      this.state.selectedFillIds.length > 0
+      this.state.selectedFillIds.length > 0 ||
+      this.state.selectedShapeIds.length > 0 ||
+      this.state.selectedTextIds.length > 0
     );
   }
 
@@ -397,24 +512,55 @@ export class DrawingStore {
   }
 
   get effectiveSelectionRotation(): number {
+    const s = this.state;
     if (
-      this.state.selectedStrokeIds.length === 0 &&
-      this.state.selectedFillIds.length === 0 &&
-      this.state.selectedImageIds.length === 1
+      s.selectedStrokeIds.length === 0 &&
+      s.selectedFillIds.length === 0 &&
+      s.selectedShapeIds.length === 0 &&
+      s.selectedTextIds.length === 0 &&
+      s.selectedImageIds.length === 1
     ) {
-      const img = this.state.placedImages.find((im) => im.id === this.state.selectedImageIds[0]);
+      const img = s.placedImages.find((im) => im.id === s.selectedImageIds[0]);
       if (img) return normalizeAngle(img.rotation);
     }
-    return normalizeAngle(this.state.selectionRotationAngle);
+    if (
+      s.selectedStrokeIds.length === 0 &&
+      s.selectedFillIds.length === 0 &&
+      s.selectedImageIds.length === 0 &&
+      s.selectedTextIds.length === 0 &&
+      s.selectedShapeIds.length === 1
+    ) {
+      const sh = s.shapes.find((x) => x.id === s.selectedShapeIds[0]);
+      if (sh && !isLineLikeShape(sh.kind)) return normalizeAngle(sh.rotation);
+    }
+    if (
+      s.selectedStrokeIds.length === 0 &&
+      s.selectedFillIds.length === 0 &&
+      s.selectedImageIds.length === 0 &&
+      s.selectedShapeIds.length === 0 &&
+      s.selectedTextIds.length === 1
+    ) {
+      const lbl = s.textLabels.find((x) => x.id === s.selectedTextIds[0]);
+      if (lbl) return normalizeAngle(lbl.rotation);
+    }
+    return normalizeAngle(s.selectionRotationAngle);
   }
 
   get canResetSelectionRotation(): boolean {
     if (Math.abs(this.effectiveSelectionRotation) > 0.001) return true;
     const selImgSet = new Set(this.state.selectedImageIds);
     for (const img of this.state.placedImages) {
-      if (selImgSet.has(img.id) && Math.abs(normalizeAngle(img.rotation)) > 0.001) {
+      if (selImgSet.has(img.id) && Math.abs(normalizeAngle(img.rotation)) > 0.001) return true;
+    }
+    const selShSet = new Set(this.state.selectedShapeIds);
+    for (const sh of this.state.shapes) {
+      if (selShSet.has(sh.id) && !isLineLikeShape(sh.kind) && Math.abs(normalizeAngle(sh.rotation)) > 0.001) {
         return true;
       }
+    }
+    const selTxtSet = new Set(this.state.selectedTextIds);
+    for (const lbl of this.state.textLabels) {
+      if (selTxtSet.has(lbl.id) && Math.abs(normalizeAngle(lbl.rotation)) > 0.001) return true;
     }
     return false;
   }
@@ -463,6 +609,7 @@ export class DrawingStore {
   // MARK: - Tools & Settings
 
   selectTool(tool: Tool): void {
+    if (this.state.isEditingText) this.commitTextEditing();
     const prev = this.state.currentTool !== tool ? this.state.currentTool : this.state.previousTool;
     if (tool !== 'select') {
       this.resetSelectionRotationTracking();
@@ -473,6 +620,8 @@ export class DrawingStore {
         selectedStrokeIds: [],
         selectedImageIds: [],
         selectedFillIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         selectionBoundary: [],
         selectionLasso: [],
         showQuickMenu: false,
@@ -649,6 +798,316 @@ export class DrawingStore {
     this.setEraserSettings({ mode });
   }
 
+  selectShapePreset(index: number): void {
+    if (index < 0 || index >= this.shapePresets.length) return;
+    const color = this.shapePresets[index];
+    this.emit({
+      shapePresetIndex: index,
+      shapeSettings: {
+        ...this.state.shapeSettings,
+        ...(this.state.appSettings.isDarkMode ? { darkColor: color } : { lightColor: color }),
+      },
+    });
+    this.persistSettings();
+  }
+
+  updateShapePresetColor(index: number, color: CodableColor): void {
+    const isDark = this.state.appSettings.isDarkMode;
+    const nextPresets = (
+      isDark ? this.state.shapeSettings.darkPresets : this.state.shapeSettings.lightPresets
+    ).map((c, i) => (i === index ? color : c));
+    this.emit(
+      {
+        shapeSettings: {
+          ...this.state.shapeSettings,
+          ...(isDark ? { darkPresets: nextPresets } : { lightPresets: nextPresets }),
+          ...(this.state.shapePresetIndex === index
+            ? isDark
+              ? { darkColor: color }
+              : { lightColor: color }
+            : {}),
+        },
+      },
+      true
+    );
+    this.persistSettings();
+  }
+
+  setShapeSettings(patch: Partial<ShapeSettings>): void {
+    this.emit({ shapeSettings: { ...this.state.shapeSettings, ...patch } });
+    this.persistSettings();
+  }
+
+  setShapeKind(kind: ShapeKind): void {
+    this.setShapeSettings({ kind });
+  }
+
+  selectTextPreset(index: number): void {
+    if (index < 0 || index >= this.textPresets.length) return;
+    const color = this.textPresets[index];
+    this.emit({
+      textPresetIndex: index,
+      textSettings: {
+        ...this.state.textSettings,
+        ...(this.state.appSettings.isDarkMode ? { darkColor: color } : { lightColor: color }),
+      },
+      ...(this.state.isEditingText
+        ? { editingTextPresetIndex: index, editingTextColor: { ...color } }
+        : {}),
+    });
+    this.persistSettings();
+  }
+
+  updateTextPresetColor(index: number, color: CodableColor): void {
+    const isDark = this.state.appSettings.isDarkMode;
+    const nextPresets = (
+      isDark ? this.state.textSettings.darkPresets : this.state.textSettings.lightPresets
+    ).map((c, i) => (i === index ? color : c));
+    this.emit(
+      {
+        textSettings: {
+          ...this.state.textSettings,
+          ...(isDark ? { darkPresets: nextPresets } : { lightPresets: nextPresets }),
+          ...(this.state.textPresetIndex === index
+            ? isDark
+              ? { darkColor: color }
+              : { lightColor: color }
+            : {}),
+        },
+        ...(this.state.isEditingText && this.state.editingTextPresetIndex === index
+          ? { editingTextColor: { ...color } }
+          : {}),
+      },
+      true
+    );
+    this.persistSettings();
+  }
+
+  setTextFontSize(fontSize: number): void {
+    this.emit({
+      textSettings: { ...this.state.textSettings, fontSize },
+      ...(this.state.isEditingText ? { editingTextFontSize: fontSize } : {}),
+    });
+    this.persistSettings();
+  }
+
+  toggleTextBold(): void {
+    const nextBold = !this.state.textSettings.isBold;
+    this.emit({
+      textSettings: { ...this.state.textSettings, isBold: nextBold },
+      ...(this.state.isEditingText ? { editingTextIsBold: nextBold } : {}),
+    });
+    this.persistSettings();
+  }
+
+  // MARK: - Shapes & Text Creation
+
+  beginShape(point: Point): void {
+    const ss = this.state.shapeSettings;
+    this.emit({
+      currentShape: {
+        id: generateId(),
+        kind: ss.kind,
+        start: { ...point },
+        end: { ...point },
+        color: { ...this.activeShapeColor },
+        presetIndex: this.state.shapePresetIndex,
+        lineWidth: ss.lineWidth,
+        isFilled: isLineLikeShape(ss.kind) ? false : ss.isFilled,
+        rotation: 0,
+      },
+      showQuickMenu: false,
+    });
+  }
+
+  updateShape(point: Point, constrain = false): void {
+    const cur = this.state.currentShape;
+    if (!cur) return;
+    const end = constrain ? constrainShapeEnd(cur.start, point, cur.kind) : { ...point };
+    this.emit({ currentShape: { ...cur, end } });
+  }
+
+  endShape(): void {
+    const cur = this.state.currentShape;
+    if (!cur) return;
+    const dx = cur.end.x - cur.start.x;
+    const dy = cur.end.y - cur.start.y;
+    if (Math.hypot(dx, dy) < 4) {
+      this.emit({ currentShape: null });
+      return;
+    }
+    let finalShape: CanvasShape;
+    if (isLineLikeShape(cur.kind)) {
+      finalShape = { ...cur, start: { ...cur.start }, end: { ...cur.end }, rotation: 0 };
+    } else {
+      const r = shapeRect(cur);
+      if (r.width < 4 && r.height < 4) {
+        this.emit({ currentShape: null });
+        return;
+      }
+      finalShape = {
+        ...cur,
+        start: { x: r.x, y: r.y },
+        end: { x: r.x + r.width, y: r.y + r.height },
+        rotation: 0,
+      };
+    }
+    this.recordUndo();
+    this.emit(
+      {
+        shapes: [...this.state.shapes, finalShape],
+        currentShape: null,
+        ...this.syncUndoFlags(),
+      },
+      true
+    );
+    this.scheduleAutoSave();
+  }
+
+  beginTextEditing(point: Point, existingId?: string): void {
+    if (this.state.isEditingText) {
+      if (existingId && this.state.editingTextId === existingId) return;
+      this.commitTextEditing();
+    }
+    if (existingId) {
+      const existing = this.state.textLabels.find((l) => l.id === existingId);
+      if (existing) {
+        const nextPresetIdx =
+          existing.presetIndex >= 0 && existing.presetIndex < this.textPresets.length
+            ? existing.presetIndex
+            : this.state.textPresetIndex;
+        this.emit({
+          isEditingText: true,
+          editingTextId: existing.id,
+          editingTextPosition: { ...existing.position },
+          editingTextDraft: existing.text,
+          editingTextFontSize: existing.fontSize,
+          editingTextIsBold: existing.isBold,
+          editingTextPresetIndex: existing.presetIndex,
+          editingTextColor: { ...existing.color },
+          editingTextRotation: existing.rotation,
+          textPresetIndex: nextPresetIdx,
+          textSettings: {
+            ...this.state.textSettings,
+            fontSize: existing.fontSize,
+            isBold: existing.isBold,
+          },
+          showQuickMenu: false,
+        });
+        return;
+      }
+    }
+    this.emit({
+      isEditingText: true,
+      editingTextId: null,
+      editingTextPosition: { ...point },
+      editingTextDraft: '',
+      editingTextFontSize: this.state.textSettings.fontSize,
+      editingTextIsBold: this.state.textSettings.isBold,
+      editingTextPresetIndex: this.state.textPresetIndex,
+      editingTextColor: { ...this.activeTextColor },
+      editingTextRotation: 0,
+      showQuickMenu: false,
+    });
+  }
+
+  setEditingTextDraft(draft: string): void {
+    if (!this.state.isEditingText) return;
+    this.emit({ editingTextDraft: draft });
+  }
+
+  commitTextEditing(): void {
+    if (!this.state.isEditingText) return;
+    const draft = this.state.editingTextDraft;
+    const trimmed = draft.trim();
+    const targetId = this.state.editingTextId;
+    const pos = { ...this.state.editingTextPosition };
+    const fontSize = this.state.editingTextFontSize;
+    const isBold = this.state.editingTextIsBold;
+    const presetIndex = this.state.editingTextPresetIndex;
+    const color = { ...this.state.editingTextColor };
+    const rotation = this.state.editingTextRotation;
+
+    const resetPatch: Partial<DrawingState> = {
+      isEditingText: false,
+      editingTextId: null,
+      editingTextDraft: '',
+    };
+
+    if (targetId) {
+      if (!trimmed) {
+        if (this.state.textLabels.some((l) => l.id === targetId)) {
+          this.recordUndo();
+          this.emit(
+            {
+              ...resetPatch,
+              textLabels: this.state.textLabels.filter((l) => l.id !== targetId),
+              selectedTextIds: this.state.selectedTextIds.filter((id) => id !== targetId),
+              ...this.syncUndoFlags(),
+            },
+            true
+          );
+          this.scheduleAutoSave();
+          return;
+        }
+      } else {
+        const existing = this.state.textLabels.find((l) => l.id === targetId);
+        if (
+          existing &&
+          (existing.text !== draft ||
+            existing.fontSize !== fontSize ||
+            existing.isBold !== isBold ||
+            existing.presetIndex !== presetIndex ||
+            existing.color.r !== color.r ||
+            existing.color.g !== color.g ||
+            existing.color.b !== color.b)
+        ) {
+          this.recordUndo();
+          const nextLabels = this.state.textLabels.map((l) =>
+            l.id === targetId
+              ? { ...l, text: draft, position: pos, fontSize, isBold, presetIndex, color, rotation }
+              : l
+          );
+          this.emit({ ...resetPatch, textLabels: nextLabels, ...this.syncUndoFlags() }, true);
+          this.scheduleAutoSave();
+          return;
+        }
+      }
+      this.emit(resetPatch, true);
+      return;
+    }
+
+    if (trimmed) {
+      this.recordUndo();
+      const newLabel: TextLabel = {
+        id: generateId(),
+        text: draft,
+        position: pos,
+        fontSize,
+        color,
+        presetIndex,
+        isBold,
+        rotation,
+      };
+      this.emit(
+        {
+          ...resetPatch,
+          textLabels: [...this.state.textLabels, newLabel],
+          ...this.syncUndoFlags(),
+        },
+        true
+      );
+      this.scheduleAutoSave();
+    } else {
+      this.emit(resetPatch);
+    }
+  }
+
+  cancelTextEditing(): void {
+    if (!this.state.isEditingText) return;
+    this.emit({ isEditingText: false, editingTextId: null, editingTextDraft: '' }, true);
+  }
+
   setAppSettings(patch: Partial<AppSettings>): void {
     this.emit({ appSettings: { ...this.state.appSettings, ...patch } }, true);
     this.persistSettings();
@@ -798,9 +1257,24 @@ export class DrawingStore {
         scaledEraser,
         this.state.eraserSettings.eraseTarget
       );
+      const eraserRadius = Math.max(scaledEraser.lineWidth / 2, 6);
+      const nextShapes =
+        this.state.eraserSettings.eraseTarget === 'all'
+          ? this.state.shapes.filter(
+              (sh) => !scaledEraser.points.some((pt) => shapeContainsPoint(sh, pt, eraserRadius))
+            )
+          : this.state.shapes;
+      const nextTexts =
+        this.state.eraserSettings.eraseTarget === 'all'
+          ? this.state.textLabels.filter(
+              (lbl) => !scaledEraser.points.some((pt) => textLabelContainsPoint(lbl, pt, eraserRadius))
+            )
+          : this.state.textLabels;
       const changed =
         nextStrokes.length !== this.state.strokes.length ||
         nextFills.length !== this.state.fills.length ||
+        nextShapes.length !== this.state.shapes.length ||
+        nextTexts.length !== this.state.textLabels.length ||
         nextStrokes.some((s, i) => s !== this.state.strokes[i]);
       if (changed) {
         this.recordUndo();
@@ -809,6 +1283,8 @@ export class DrawingStore {
           {
             strokes: nextStrokes,
             fills: nextFills,
+            shapes: nextShapes,
+            textLabels: nextTexts,
             currentStroke: null,
             ...this.syncUndoFlags(),
           },
@@ -850,7 +1326,8 @@ export class DrawingStore {
     const contours = computeFillContours(
       tapPoint,
       this.state.strokes,
-      this.state.fillSettings.gapTolerance
+      this.state.fillSettings.gapTolerance,
+      this.state.shapes
     );
     if (!contours || contours.length === 0) return false;
 
@@ -942,7 +1419,33 @@ export class DrawingStore {
       }
     }
 
-    if (hitStrokes.length === 0 && hitFills.length === 0 && hitImages.length === 0) {
+    const hitShapes: string[] = [];
+    for (const sh of this.state.shapes) {
+      if (
+        pointInPolygon(shapeCenter(sh), lasso) ||
+        shapeRotatedCorners(sh).some((c) => pointInPolygon(c, lasso))
+      ) {
+        hitShapes.push(sh.id);
+      }
+    }
+
+    const hitTexts: string[] = [];
+    for (const lbl of this.state.textLabels) {
+      if (
+        pointInPolygon(textLabelCenter(lbl), lasso) ||
+        textLabelRotatedCorners(lbl).some((c) => pointInPolygon(c, lasso))
+      ) {
+        hitTexts.push(lbl.id);
+      }
+    }
+
+    if (
+      hitStrokes.length === 0 &&
+      hitFills.length === 0 &&
+      hitImages.length === 0 &&
+      hitShapes.length === 0 &&
+      hitTexts.length === 0
+    ) {
       this.clearSelection();
       this.emit({ selectionLasso: [] });
       return;
@@ -954,6 +1457,8 @@ export class DrawingStore {
       selectedStrokeIds: hitStrokes,
       selectedFillIds: hitFills,
       selectedImageIds: hitImages,
+      selectedShapeIds: hitShapes,
+      selectedTextIds: hitTexts,
       selectionBoundary: lasso,
       selectionLasso: [],
       ...this.syncUndoFlags(),
@@ -1001,15 +1506,52 @@ export class DrawingStore {
     return null;
   }
 
+  hitTestShape(point: Point, scale = 1): CanvasShape | null {
+    const tol = Math.max(10, 12 / Math.max(scale, 0.1));
+    for (let i = this.state.shapes.length - 1; i >= 0; i--) {
+      const sh = this.state.shapes[i];
+      if (shapeContainsPoint(sh, point, tol)) return sh;
+    }
+    return null;
+  }
+
+  hitTestTextLabel(point: Point): TextLabel | null {
+    for (let i = this.state.textLabels.length - 1; i >= 0; i--) {
+      const lbl = this.state.textLabels[i];
+      if (textLabelContainsPoint(lbl, point, 6)) return lbl;
+    }
+    return null;
+  }
+
   hasElement(point: Point, scale = 1): boolean {
     return (
+      this.hitTestTextLabel(point) !== null ||
       this.hitTestStroke(point, scale) !== null ||
+      this.hitTestShape(point, scale) !== null ||
       this.hitTestFill(point) !== null ||
       this.hitTestImage(point) !== null
     );
   }
 
   selectElement(point: Point, scale = 1): boolean {
+    const lbl = this.hitTestTextLabel(point);
+    if (lbl) {
+      this.recordUndo();
+      this.resetSelectionRotationTracking();
+      this.emit({
+        selectedStrokeIds: [],
+        selectedFillIds: [],
+        selectedImageIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [lbl.id],
+        selectionBoundary: [],
+        selectionLasso: [],
+        showQuickMenu: false,
+        ...this.syncUndoFlags(),
+      });
+      return true;
+    }
+
     const stroke = this.hitTestStroke(point, scale);
     if (stroke) {
       this.recordUndo();
@@ -1019,7 +1561,27 @@ export class DrawingStore {
         selectedStrokeIds: [stroke.id],
         selectedFillIds: [],
         selectedImageIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         selectionBoundary: box ? paddedBoundingPolygon(box) : [],
+        selectionLasso: [],
+        showQuickMenu: false,
+        ...this.syncUndoFlags(),
+      });
+      return true;
+    }
+
+    const shape = this.hitTestShape(point, scale);
+    if (shape) {
+      this.recordUndo();
+      this.resetSelectionRotationTracking();
+      this.emit({
+        selectedStrokeIds: [],
+        selectedFillIds: [],
+        selectedImageIds: [],
+        selectedShapeIds: [shape.id],
+        selectedTextIds: [],
+        selectionBoundary: [],
         selectionLasso: [],
         showQuickMenu: false,
         ...this.syncUndoFlags(),
@@ -1039,6 +1601,8 @@ export class DrawingStore {
         selectedStrokeIds: [],
         selectedFillIds: [fill.id],
         selectedImageIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         selectionBoundary: box ? paddedBoundingPolygon(box) : [],
         selectionLasso: [],
         showQuickMenu: false,
@@ -1055,6 +1619,8 @@ export class DrawingStore {
         selectedStrokeIds: [],
         selectedFillIds: [],
         selectedImageIds: [imgId],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         selectionBoundary: [],
         selectionLasso: [],
         showQuickMenu: false,
@@ -1071,6 +1637,8 @@ export class DrawingStore {
     this.rotateSnapshotStrokes.clear();
     this.rotateSnapshotFills.clear();
     this.rotateSnapshotImages.clear();
+    this.rotateSnapshotShapes.clear();
+    this.rotateSnapshotTexts.clear();
     this.rotateSnapshotBoundary = [];
     this.rotateSnapshotTaken = false;
     if (
@@ -1092,6 +1660,8 @@ export class DrawingStore {
       selectedStrokeIds: [],
       selectedImageIds: [],
       selectedFillIds: [],
+      selectedShapeIds: [],
+      selectedTextIds: [],
       selectionBoundary: [],
       showQuickMenu: false,
     });
@@ -1106,6 +1676,8 @@ export class DrawingStore {
       selectedStrokeIds: [],
       selectedImageIds: [],
       selectedFillIds: [],
+      selectedShapeIds: [],
+      selectedTextIds: [],
       selectionBoundary: [],
       selectionLasso: [],
       showQuickMenu: false,
@@ -1131,6 +1703,22 @@ export class DrawingStore {
     for (const img of this.state.placedImages) {
       if (selI.has(img.id) && imageContainsPoint(img, point)) return true;
     }
+    const selSh = new Set(this.state.selectedShapeIds);
+    for (const sh of this.state.shapes) {
+      if (!selSh.has(sh.id)) continue;
+      if (shapeContainsPoint(sh, point, 14)) return true;
+      if (!isLineLikeShape(sh.kind)) {
+        const local = sh.rotation ? rotatePoint(point, shapeCenter(sh), -sh.rotation) : point;
+        const r = shapeRect(sh);
+        if (local.x >= r.x && local.x <= r.x + r.width && local.y >= r.y && local.y <= r.y + r.height) {
+          return true;
+        }
+      }
+    }
+    const selT = new Set(this.state.selectedTextIds);
+    for (const lbl of this.state.textLabels) {
+      if (selT.has(lbl.id) && textLabelContainsPoint(lbl, point, 8)) return true;
+    }
     const selF = new Set(this.state.selectedFillIds);
     for (const f of this.state.fills) {
       if (selF.has(f.id) && fillContainsPoint(f, point)) return true;
@@ -1143,13 +1731,16 @@ export class DrawingStore {
   rotationHandleGeometry(scale: number): RotationHandleGeometry | null {
     if (!this.hasSelection) return null;
     const stemLength = 28 / Math.max(scale, 0.1);
+    const st = this.state;
 
     if (
-      this.state.selectedStrokeIds.length === 0 &&
-      this.state.selectedFillIds.length === 0 &&
-      this.state.selectedImageIds.length === 1
+      st.selectedStrokeIds.length === 0 &&
+      st.selectedFillIds.length === 0 &&
+      st.selectedShapeIds.length === 0 &&
+      st.selectedTextIds.length === 0 &&
+      st.selectedImageIds.length === 1
     ) {
-      const img = this.state.placedImages.find((im) => im.id === this.state.selectedImageIds[0]);
+      const img = st.placedImages.find((im) => im.id === st.selectedImageIds[0]);
       if (!img) return null;
       const pivot = imageCenter(img);
       const angle = normalizeAngle(img.rotation);
@@ -1166,20 +1757,74 @@ export class DrawingStore {
       };
     }
 
-    const selS = new Set(this.state.selectedStrokeIds);
-    const selI = new Set(this.state.selectedImageIds);
-    const selF = new Set(this.state.selectedFillIds);
-    const selStrokes = this.state.strokes.filter((s) => selS.has(s.id));
-    const selImages = this.state.placedImages.filter((im) => selI.has(im.id));
-    const selFills = this.state.fills.filter((f) => selF.has(f.id));
-    const box = boundingBox(selStrokes, selImages, selFills, 0);
+    if (
+      st.selectedStrokeIds.length === 0 &&
+      st.selectedFillIds.length === 0 &&
+      st.selectedImageIds.length === 0 &&
+      st.selectedTextIds.length === 0 &&
+      st.selectedShapeIds.length === 1
+    ) {
+      const sh = st.shapes.find((x) => x.id === st.selectedShapeIds[0]);
+      if (sh && !isLineLikeShape(sh.kind)) {
+        const pivot = shapeCenter(sh);
+        const angle = normalizeAngle(sh.rotation);
+        const up = { x: Math.sin(angle), y: -Math.cos(angle) };
+        const halfH = shapeRect(sh).height / 2;
+        return {
+          pivot,
+          stemStart: { x: pivot.x + up.x * halfH, y: pivot.y + up.y * halfH },
+          handleCenter: {
+            x: pivot.x + up.x * (halfH + stemLength),
+            y: pivot.y + up.y * (halfH + stemLength),
+          },
+          displayAngleRadians: angle,
+        };
+      }
+    }
+
+    if (
+      st.selectedStrokeIds.length === 0 &&
+      st.selectedFillIds.length === 0 &&
+      st.selectedImageIds.length === 0 &&
+      st.selectedShapeIds.length === 0 &&
+      st.selectedTextIds.length === 1
+    ) {
+      const lbl = st.textLabels.find((x) => x.id === st.selectedTextIds[0]);
+      if (lbl) {
+        const pivot = textLabelCenter(lbl);
+        const angle = normalizeAngle(lbl.rotation);
+        const up = { x: Math.sin(angle), y: -Math.cos(angle) };
+        const halfH = textLabelSize(lbl).height / 2;
+        return {
+          pivot,
+          stemStart: { x: pivot.x + up.x * halfH, y: pivot.y + up.y * halfH },
+          handleCenter: {
+            x: pivot.x + up.x * (halfH + stemLength),
+            y: pivot.y + up.y * (halfH + stemLength),
+          },
+          displayAngleRadians: angle,
+        };
+      }
+    }
+
+    const selS = new Set(st.selectedStrokeIds);
+    const selI = new Set(st.selectedImageIds);
+    const selF = new Set(st.selectedFillIds);
+    const selSh = new Set(st.selectedShapeIds);
+    const selT = new Set(st.selectedTextIds);
+    const selStrokes = st.strokes.filter((s) => selS.has(s.id));
+    const selImages = st.placedImages.filter((im) => selI.has(im.id));
+    const selFills = st.fills.filter((f) => selF.has(f.id));
+    const selShapes = st.shapes.filter((sh) => selSh.has(sh.id));
+    const selTexts = st.textLabels.filter((lbl) => selT.has(lbl.id));
+    const box = boundingBox(selStrokes, selImages, selFills, 0, selShapes, selTexts);
     if (!box) return null;
 
-    const pivot = this.state.isRotating
+    const pivot = st.isRotating
       ? this.rotatePivot
       : this.selectionRotationPivot ?? { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 
-    const angle = normalizeAngle(this.state.selectionRotationAngle);
+    const angle = normalizeAngle(st.selectionRotationAngle);
     const up = { x: Math.sin(angle), y: -Math.cos(angle) };
 
     let maxExtent = 0;
@@ -1190,7 +1835,9 @@ export class DrawingStore {
     for (const s of selStrokes) for (const p of s.points) consider(p);
     for (const f of selFills) for (const loop of f.contours) for (const p of loop) consider(p);
     for (const img of selImages) for (const c of imageRotatedCorners(img)) consider(c);
-    for (const p of this.state.selectionBoundary) consider(p);
+    for (const sh of selShapes) for (const c of shapeRotatedCorners(sh)) consider(c);
+    for (const lbl of selTexts) for (const c of textLabelRotatedCorners(lbl)) consider(c);
+    for (const p of st.selectionBoundary) consider(p);
 
     return {
       pivot,
@@ -1226,6 +1873,22 @@ export class DrawingStore {
     return null;
   }
 
+  hitTestShapeHandle(point: Point, scale = 1): { shapeId: string; handleIndex: number } | null {
+    const r = Math.max(10, 12 / Math.max(scale, 0.1));
+    const rSq = r * r;
+    const selSh = new Set(this.state.selectedShapeIds);
+    for (const sh of this.state.shapes) {
+      if (!selSh.has(sh.id)) continue;
+      const handles = shapeRotatedCorners(sh);
+      for (let i = 0; i < handles.length; i++) {
+        if (distanceSquared(point, handles[i]) <= rSq) {
+          return { shapeId: sh.id, handleIndex: i };
+        }
+      }
+    }
+    return null;
+  }
+
   beginRotate(point: Point, scale = 1): void {
     const geom = this.rotationHandleGeometry(scale);
     if (!geom) return;
@@ -1240,6 +1903,8 @@ export class DrawingStore {
     const selS = new Set(this.state.selectedStrokeIds);
     const selF = new Set(this.state.selectedFillIds);
     const selI = new Set(this.state.selectedImageIds);
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
 
     this.rotateSnapshotStrokes.clear();
     for (const s of this.state.strokes) {
@@ -1261,6 +1926,27 @@ export class DrawingStore {
           center: imageCenter(img),
           size: { ...img.size },
           rotation: img.rotation,
+        });
+      }
+    }
+    this.rotateSnapshotShapes.clear();
+    for (const sh of this.state.shapes) {
+      if (selSh.has(sh.id)) {
+        this.rotateSnapshotShapes.set(sh.id, {
+          ...sh,
+          start: { ...sh.start },
+          end: { ...sh.end },
+          color: { ...sh.color },
+        });
+      }
+    }
+    this.rotateSnapshotTexts.clear();
+    for (const lbl of this.state.textLabels) {
+      if (selT.has(lbl.id)) {
+        this.rotateSnapshotTexts.set(lbl.id, {
+          center: textLabelCenter(lbl),
+          size: textLabelSize(lbl),
+          rotation: lbl.rotation,
         });
       }
     }
@@ -1325,6 +2011,41 @@ export class DrawingStore {
           })
         : this.state.placedImages;
 
+    const nextShapes =
+      this.rotateSnapshotShapes.size > 0
+        ? this.state.shapes.map((sh) => {
+            const orig = this.rotateSnapshotShapes.get(sh.id);
+            if (!orig) return sh;
+            if (isLineLikeShape(orig.kind)) {
+              return { ...sh, start: rot(orig.start), end: rot(orig.end), rotation: 0 };
+            }
+            const oc = shapeCenter(orig);
+            const nc = rot(oc);
+            const dx = nc.x - oc.x;
+            const dy = nc.y - oc.y;
+            return {
+              ...sh,
+              start: { x: orig.start.x + dx, y: orig.start.y + dy },
+              end: { x: orig.end.x + dx, y: orig.end.y + dy },
+              rotation: normalizeAngle(orig.rotation + appliedDelta),
+            };
+          })
+        : this.state.shapes;
+
+    const nextTexts =
+      this.rotateSnapshotTexts.size > 0
+        ? this.state.textLabels.map((lbl) => {
+            const orig = this.rotateSnapshotTexts.get(lbl.id);
+            if (!orig) return lbl;
+            const nc = rot(orig.center);
+            return {
+              ...lbl,
+              position: { x: nc.x - orig.size.width / 2, y: nc.y - orig.size.height / 2 },
+              rotation: normalizeAngle(orig.rotation + appliedDelta),
+            };
+          })
+        : this.state.textLabels;
+
     const nextBoundary =
       this.rotateSnapshotBoundary.length > 0
         ? this.rotateSnapshotBoundary.map(rot)
@@ -1335,6 +2056,8 @@ export class DrawingStore {
         strokes: nextStrokes,
         fills: nextFills,
         placedImages: nextImages,
+        shapes: nextShapes,
+        textLabels: nextTexts,
         selectionBoundary: nextBoundary,
         selectionRotationAngle: snappedTotal,
         isRotationSnapped: snapped,
@@ -1348,6 +2071,8 @@ export class DrawingStore {
     this.rotateSnapshotStrokes.clear();
     this.rotateSnapshotFills.clear();
     this.rotateSnapshotImages.clear();
+    this.rotateSnapshotShapes.clear();
+    this.rotateSnapshotTexts.clear();
     this.rotateSnapshotBoundary = [];
     this.rotateSnapshotTaken = false;
     if (didMutate) {
@@ -1364,12 +2089,25 @@ export class DrawingStore {
     this.recordUndo();
 
     const selI = new Set(this.state.selectedImageIds);
-    if (this.state.selectedStrokeIds.length === 0 && this.state.selectedFillIds.length === 0) {
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
+    const hasLineShapes = this.state.shapes.some((sh) => selSh.has(sh.id) && isLineLikeShape(sh.kind));
+
+    if (this.state.selectedStrokeIds.length === 0 && this.state.selectedFillIds.length === 0 && !hasLineShapes) {
       const nextImages = this.state.placedImages.map((img) =>
         selI.has(img.id) ? { ...img, rotation: 0 } : img
       );
+      const nextShapes = this.state.shapes.map((sh) =>
+        selSh.has(sh.id) ? { ...sh, rotation: 0 } : sh
+      );
+      const nextTexts = this.state.textLabels.map((lbl) =>
+        selT.has(lbl.id) ? { ...lbl, rotation: 0 } : lbl
+      );
       this.resetSelectionRotationTracking();
-      this.emit({ placedImages: nextImages, ...this.syncUndoFlags() }, true);
+      this.emit(
+        { placedImages: nextImages, shapes: nextShapes, textLabels: nextTexts, ...this.syncUndoFlags() },
+        true
+      );
       this.scheduleAutoSave();
       return;
     }
@@ -1378,6 +2116,8 @@ export class DrawingStore {
     let nextStrokes = this.state.strokes;
     let nextFills = this.state.fills;
     let nextImages = this.state.placedImages;
+    let nextShapes = this.state.shapes;
+    let nextTexts = this.state.textLabels;
     let nextBoundary = this.state.selectionBoundary;
 
     if (Math.abs(sessionAngle) > 0.001) {
@@ -1388,7 +2128,9 @@ export class DrawingStore {
         this.state.strokes.filter((s) => selS.has(s.id)),
         this.state.placedImages.filter((im) => selI.has(im.id)),
         this.state.fills.filter((f) => selF.has(f.id)),
-        0
+        0,
+        this.state.shapes.filter((sh) => selSh.has(sh.id)),
+        this.state.textLabels.filter((lbl) => selT.has(lbl.id))
       );
       const pivot =
         this.selectionRotationPivot ??
@@ -1420,9 +2162,45 @@ export class DrawingStore {
           };
         });
       }
+      if (selSh.size > 0) {
+        nextShapes = nextShapes.map((sh) => {
+          if (!selSh.has(sh.id)) return sh;
+          if (isLineLikeShape(sh.kind)) {
+            return { ...sh, start: rot(sh.start), end: rot(sh.end), rotation: 0 };
+          }
+          const oc = shapeCenter(sh);
+          const nc = rot(oc);
+          const dx = nc.x - oc.x;
+          const dy = nc.y - oc.y;
+          return {
+            ...sh,
+            start: { x: sh.start.x + dx, y: sh.start.y + dy },
+            end: { x: sh.end.x + dx, y: sh.end.y + dy },
+            rotation: normalizeAngle(sh.rotation + delta),
+          };
+        });
+      }
+      if (selT.size > 0) {
+        nextTexts = nextTexts.map((lbl) => {
+          if (!selT.has(lbl.id)) return lbl;
+          const sz = textLabelSize(lbl);
+          const nc = rot(textLabelCenter(lbl));
+          return {
+            ...lbl,
+            position: { x: nc.x - sz.width / 2, y: nc.y - sz.height / 2 },
+            rotation: normalizeAngle(lbl.rotation + delta),
+          };
+        });
+      }
       if (nextBoundary.length > 0) nextBoundary = nextBoundary.map(rot);
-    } else if (selI.size > 0) {
-      nextImages = nextImages.map((img) => (selI.has(img.id) ? { ...img, rotation: 0 } : img));
+    } else {
+      if (selI.size > 0) nextImages = nextImages.map((img) => (selI.has(img.id) ? { ...img, rotation: 0 } : img));
+      if (selSh.size > 0) {
+        nextShapes = nextShapes.map((sh) =>
+          selSh.has(sh.id) && !isLineLikeShape(sh.kind) ? { ...sh, rotation: 0 } : sh
+        );
+      }
+      if (selT.size > 0) nextTexts = nextTexts.map((lbl) => (selT.has(lbl.id) ? { ...lbl, rotation: 0 } : lbl));
     }
 
     this.resetSelectionRotationTracking();
@@ -1432,6 +2210,8 @@ export class DrawingStore {
         strokes: nextStrokes,
         fills: nextFills,
         placedImages: nextImages,
+        shapes: nextShapes,
+        textLabels: nextTexts,
         selectionBoundary: nextBoundary,
         ...this.syncUndoFlags(),
       },
@@ -1449,6 +2229,7 @@ export class DrawingStore {
       this.isMoving = false;
       this.resizeCorner = hit.corner;
       this.resizeImageId = hit.imgId;
+      this.resizeShapeId = null;
       this.lastMovePoint = point;
       this.moveSnapshotTaken = false;
       const img = this.state.placedImages.find((im) => im.id === hit.imgId);
@@ -1464,6 +2245,23 @@ export class DrawingStore {
       return;
     }
 
+    const shapeHit = this.hitTestShapeHandle(point, scale);
+    if (shapeHit) {
+      this.isResizing = true;
+      this.isMoving = false;
+      this.resizeCorner = shapeHit.handleIndex;
+      this.resizeShapeId = shapeHit.shapeId;
+      this.resizeImageId = null;
+      this.lastMovePoint = point;
+      this.moveSnapshotTaken = false;
+      const sh = this.state.shapes.find((x) => x.id === shapeHit.shapeId);
+      if (sh) {
+        this.resizeStartRect = shapeRect(sh);
+      }
+      this.emit({ showQuickMenu: false });
+      return;
+    }
+
     this.isMoving = true;
     this.isResizing = false;
     this.lastMovePoint = point;
@@ -1471,10 +2269,84 @@ export class DrawingStore {
     this.emit({ showQuickMenu: false });
   }
 
-  moveSelected(offset: { width: number; height: number }): void {
+  moveSelected(offset: { width: number; height: number }, lockAspect = false): void {
     if (offset.width === 0 && offset.height === 0) return;
 
     if (this.isResizing) {
+      if (this.resizeShapeId) {
+        const existing = this.state.shapes.find((x) => x.id === this.resizeShapeId);
+        if (!existing) return;
+
+        if (isLineLikeShape(existing.kind)) {
+          let newStart = { ...existing.start };
+          let newEnd = { ...existing.end };
+          if (this.resizeCorner === 0) {
+            const raw = { x: newStart.x + offset.width, y: newStart.y + offset.height };
+            newStart = lockAspect ? constrainShapeEnd(newEnd, raw, existing.kind) : raw;
+          } else {
+            const raw = { x: newEnd.x + offset.width, y: newEnd.y + offset.height };
+            newEnd = lockAspect ? constrainShapeEnd(newStart, raw, existing.kind) : raw;
+          }
+          if (!this.moveSnapshotTaken) {
+            this.recordUndo();
+            this.moveSnapshotTaken = true;
+          }
+          const nextShapes = this.state.shapes.map((sh) =>
+            sh.id === this.resizeShapeId ? { ...sh, start: newStart, end: newEnd, rotation: 0 } : sh
+          );
+          this.emit({ shapes: nextShapes }, true);
+          return;
+        }
+
+        const rot = existing.rotation || 0;
+        let localOffset = offset;
+        if (rot !== 0) {
+          const cosA = Math.cos(-rot);
+          const sinA = Math.sin(-rot);
+          localOffset = {
+            width: offset.width * cosA - offset.height * sinA,
+            height: offset.width * sinA + offset.height * cosA,
+          };
+        }
+        const newLocal = resizedFreeRect(this.resizeStartRect, this.resizeCorner, localOffset, 12, lockAspect);
+        if (!newLocal) return;
+
+        let finalRect = newLocal;
+        if (rot !== 0) {
+          const oldCx = this.resizeStartRect.x + this.resizeStartRect.width / 2;
+          const oldCy = this.resizeStartRect.y + this.resizeStartRect.height / 2;
+          const ldx = newLocal.x + newLocal.width / 2 - oldCx;
+          const ldy = newLocal.y + newLocal.height / 2 - oldCy;
+          const cosA = Math.cos(rot);
+          const sinA = Math.sin(rot);
+          const newCx = oldCx + ldx * cosA - ldy * sinA;
+          const newCy = oldCy + ldx * sinA + ldy * cosA;
+          finalRect = {
+            x: newCx - newLocal.width / 2,
+            y: newCy - newLocal.height / 2,
+            width: newLocal.width,
+            height: newLocal.height,
+          };
+        }
+
+        if (!this.moveSnapshotTaken) {
+          this.recordUndo();
+          this.moveSnapshotTaken = true;
+        }
+        const nextShapes = this.state.shapes.map((sh) =>
+          sh.id === this.resizeShapeId
+            ? {
+                ...sh,
+                start: { x: finalRect.x, y: finalRect.y },
+                end: { x: finalRect.x + finalRect.width, y: finalRect.y + finalRect.height },
+              }
+            : sh
+        );
+        this.resizeStartRect = finalRect;
+        this.emit({ shapes: nextShapes }, true);
+        return;
+      }
+
       if (!this.resizeImageId) return;
       const existing = this.state.placedImages.find((im) => im.id === this.resizeImageId);
       if (!existing) return;
@@ -1536,6 +2408,8 @@ export class DrawingStore {
     const selS = new Set(this.state.selectedStrokeIds);
     const selI = new Set(this.state.selectedImageIds);
     const selF = new Set(this.state.selectedFillIds);
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
 
     const nextStrokes =
       selS.size > 0
@@ -1572,6 +2446,31 @@ export class DrawingStore {
           )
         : this.state.fills;
 
+    const nextShapes =
+      selSh.size > 0
+        ? this.state.shapes.map((sh) =>
+            selSh.has(sh.id)
+              ? {
+                  ...sh,
+                  start: { x: sh.start.x + offset.width, y: sh.start.y + offset.height },
+                  end: { x: sh.end.x + offset.width, y: sh.end.y + offset.height },
+                }
+              : sh
+          )
+        : this.state.shapes;
+
+    const nextTexts =
+      selT.size > 0
+        ? this.state.textLabels.map((lbl) =>
+            selT.has(lbl.id)
+              ? {
+                  ...lbl,
+                  position: { x: lbl.position.x + offset.width, y: lbl.position.y + offset.height },
+                }
+              : lbl
+          )
+        : this.state.textLabels;
+
     const nextBoundary = this.state.selectionBoundary.map((p) => ({
       x: p.x + offset.width,
       y: p.y + offset.height,
@@ -1589,6 +2488,8 @@ export class DrawingStore {
         strokes: nextStrokes,
         placedImages: nextImages,
         fills: nextFills,
+        shapes: nextShapes,
+        textLabels: nextTexts,
         selectionBoundary: nextBoundary,
       },
       true
@@ -1600,6 +2501,7 @@ export class DrawingStore {
     this.isMoving = false;
     this.isResizing = false;
     this.resizeImageId = null;
+    this.resizeShapeId = null;
     this.moveSnapshotTaken = false;
     if (didMutate) {
       this.spatialGrid.rebuild(this.state.strokes);
@@ -1616,9 +2518,13 @@ export class DrawingStore {
     const selS = new Set(this.state.selectedStrokeIds);
     const selI = new Set(this.state.selectedImageIds);
     const selF = new Set(this.state.selectedFillIds);
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
     const nextStrokes = this.state.strokes.filter((s) => !selS.has(s.id));
     const nextImages = this.state.placedImages.filter((im) => !selI.has(im.id));
     const nextFills = this.state.fills.filter((f) => !selF.has(f.id));
+    const nextShapes = this.state.shapes.filter((sh) => !selSh.has(sh.id));
+    const nextTexts = this.state.textLabels.filter((lbl) => !selT.has(lbl.id));
     this.spatialGrid.rebuild(nextStrokes);
     this.resetSelectionRotationTracking();
     this.emit(
@@ -1626,9 +2532,13 @@ export class DrawingStore {
         strokes: nextStrokes,
         placedImages: nextImages,
         fills: nextFills,
+        shapes: nextShapes,
+        textLabels: nextTexts,
         selectedStrokeIds: [],
         selectedImageIds: [],
         selectedFillIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         selectionBoundary: [],
         showQuickMenu: false,
         ...this.syncUndoFlags(),
@@ -1646,6 +2556,8 @@ export class DrawingStore {
     const selS = new Set(this.state.selectedStrokeIds);
     const selI = new Set(this.state.selectedImageIds);
     const selF = new Set(this.state.selectedFillIds);
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
 
     const newStrokes: Stroke[] = [];
     const newStrokeIds: string[] = [];
@@ -1688,6 +2600,35 @@ export class DrawingStore {
       newFillIds.push(copy.id);
     }
 
+    const newShapes: CanvasShape[] = [];
+    const newShapeIds: string[] = [];
+    for (const sh of this.state.shapes) {
+      if (!selSh.has(sh.id)) continue;
+      const copy: CanvasShape = {
+        ...sh,
+        id: generateId(),
+        start: { x: sh.start.x + dx, y: sh.start.y + dy },
+        end: { x: sh.end.x + dx, y: sh.end.y + dy },
+        color: { ...sh.color },
+      };
+      newShapes.push(copy);
+      newShapeIds.push(copy.id);
+    }
+
+    const newTexts: TextLabel[] = [];
+    const newTextIds: string[] = [];
+    for (const lbl of this.state.textLabels) {
+      if (!selT.has(lbl.id)) continue;
+      const copy: TextLabel = {
+        ...lbl,
+        id: generateId(),
+        position: { x: lbl.position.x + dx, y: lbl.position.y + dy },
+        color: { ...lbl.color },
+      };
+      newTexts.push(copy);
+      newTextIds.push(copy.id);
+    }
+
     const nextStrokes = [...this.state.strokes, ...newStrokes];
     this.spatialGrid.rebuild(nextStrokes);
     if (this.selectionRotationPivot) {
@@ -1702,9 +2643,13 @@ export class DrawingStore {
         strokes: nextStrokes,
         placedImages: [...this.state.placedImages, ...newImages],
         fills: [...this.state.fills, ...newFills],
+        shapes: [...this.state.shapes, ...newShapes],
+        textLabels: [...this.state.textLabels, ...newTexts],
         selectedStrokeIds: newStrokeIds,
         selectedImageIds: newImageIds,
         selectedFillIds: newFillIds,
+        selectedShapeIds: newShapeIds,
+        selectedTextIds: newTextIds,
         selectionBoundary: this.state.selectionBoundary.map((p) => ({ x: p.x + dx, y: p.y + dy })),
         ...this.syncUndoFlags(),
       },
@@ -1714,17 +2659,35 @@ export class DrawingStore {
   }
 
   recolorSelected(color: CodableColor, presetIndex = -1): void {
-    if (this.state.selectedStrokeIds.length === 0 && this.state.selectedFillIds.length === 0) return;
+    if (
+      this.state.selectedStrokeIds.length === 0 &&
+      this.state.selectedFillIds.length === 0 &&
+      this.state.selectedShapeIds.length === 0 &&
+      this.state.selectedTextIds.length === 0
+    ) {
+      return;
+    }
     this.recordUndo();
     const selS = new Set(this.state.selectedStrokeIds);
     const selF = new Set(this.state.selectedFillIds);
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
     const nextStrokes = this.state.strokes.map((s) =>
       selS.has(s.id) ? { ...s, color: { ...color }, presetIndex } : s
     );
     const nextFills = this.state.fills.map((f) =>
       selF.has(f.id) ? { ...f, color: { ...color }, presetIndex } : f
     );
-    this.emit({ strokes: nextStrokes, fills: nextFills, ...this.syncUndoFlags() }, true);
+    const nextShapes = this.state.shapes.map((sh) =>
+      selSh.has(sh.id) ? { ...sh, color: { ...color }, presetIndex } : sh
+    );
+    const nextTexts = this.state.textLabels.map((lbl) =>
+      selT.has(lbl.id) ? { ...lbl, color: { ...color }, presetIndex } : lbl
+    );
+    this.emit(
+      { strokes: nextStrokes, fills: nextFills, shapes: nextShapes, textLabels: nextTexts, ...this.syncUndoFlags() },
+      true
+    );
     this.scheduleAutoSave();
   }
 
@@ -1733,11 +2696,15 @@ export class DrawingStore {
     const selS = new Set(this.state.selectedStrokeIds);
     const selI = new Set(this.state.selectedImageIds);
     const selF = new Set(this.state.selectedFillIds);
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
     const box = boundingBox(
       this.state.strokes.filter((s) => selS.has(s.id)),
       this.state.placedImages.filter((im) => selI.has(im.id)),
       this.state.fills.filter((f) => selF.has(f.id)),
-      0
+      0,
+      this.state.shapes.filter((sh) => selSh.has(sh.id)),
+      this.state.textLabels.filter((lbl) => selT.has(lbl.id))
     );
     if (!box) return;
     const cx = box.x + box.width / 2;
@@ -1783,6 +2750,45 @@ export class DrawingStore {
           })
         : this.state.placedImages;
 
+    const nextShapes =
+      selSh.size > 0
+        ? this.state.shapes.map((sh) => {
+            if (!selSh.has(sh.id)) return sh;
+            const newLW = Math.max(0.5, sh.lineWidth * scale);
+            if (isLineLikeShape(sh.kind)) {
+              return { ...sh, start: xform(sh.start), end: xform(sh.end), lineWidth: newLW, rotation: 0 };
+            }
+            const r = shapeRect(sh);
+            const nc = xform(shapeCenter(sh));
+            const nw = Math.max(12, r.width * scale);
+            const nh = Math.max(12, r.height * scale);
+            return {
+              ...sh,
+              start: { x: nc.x - nw / 2, y: nc.y - nh / 2 },
+              end: { x: nc.x + nw / 2, y: nc.y + nh / 2 },
+              lineWidth: newLW,
+              rotation: normalizeAngle(sh.rotation + rotation),
+            };
+          })
+        : this.state.shapes;
+
+    const nextTexts =
+      selT.size > 0
+        ? this.state.textLabels.map((lbl) => {
+            if (!selT.has(lbl.id)) return lbl;
+            const nc = xform(textLabelCenter(lbl));
+            const newFontSize = Math.min(Math.max(lbl.fontSize * scale, 10), 160);
+            const nextRot = normalizeAngle(lbl.rotation + rotation);
+            const sz = textLabelSize({ ...lbl, fontSize: newFontSize });
+            return {
+              ...lbl,
+              position: { x: nc.x - sz.width / 2, y: nc.y - sz.height / 2 },
+              fontSize: newFontSize,
+              rotation: nextRot,
+            };
+          })
+        : this.state.textLabels;
+
     const nextBoundary = this.state.selectionBoundary.map(xform);
     const nextRot =
       rotation !== 0
@@ -1798,6 +2804,8 @@ export class DrawingStore {
         strokes: nextStrokes,
         fills: nextFills,
         placedImages: nextImages,
+        shapes: nextShapes,
+        textLabels: nextTexts,
         selectionBoundary: nextBoundary,
         selectionRotationAngle: nextRot,
         ...this.syncUndoFlags(),
@@ -1826,10 +2834,14 @@ export class DrawingStore {
     const selS = new Set(this.state.selectedStrokeIds);
     const selI = new Set(this.state.selectedImageIds);
     const selF = new Set(this.state.selectedFillIds);
+    const selSh = new Set(this.state.selectedShapeIds);
+    const selT = new Set(this.state.selectedTextIds);
     this.internalClipboard = {
       strokes: this.state.strokes.filter((s) => selS.has(s.id)).map((s) => ({ ...s, points: s.points.map((p) => ({ ...p })) })),
       fills: this.state.fills.filter((f) => selF.has(f.id)).map((f) => ({ ...f, contours: f.contours.map((l) => l.map((p) => ({ ...p }))) })),
       placedImages: this.state.placedImages.filter((im) => selI.has(im.id)).map((im) => ({ ...im, position: { ...im.position }, size: { ...im.size } })),
+      shapes: this.state.shapes.filter((sh) => selSh.has(sh.id)).map((sh) => ({ ...sh, start: { ...sh.start }, end: { ...sh.end }, color: { ...sh.color } })),
+      textLabels: this.state.textLabels.filter((lbl) => selT.has(lbl.id)).map((lbl) => ({ ...lbl, position: { ...lbl.position }, color: { ...lbl.color } })),
       boundary: this.state.selectionBoundary.map((p) => ({ ...p })),
     };
   }
@@ -1837,11 +2849,17 @@ export class DrawingStore {
   pasteInternal(): boolean {
     const clip = this.internalClipboard;
     if (!clip) return false;
-    if (clip.strokes.length === 0 && clip.fills.length === 0 && clip.placedImages.length === 0) {
+    if (
+      clip.strokes.length === 0 &&
+      clip.fills.length === 0 &&
+      clip.placedImages.length === 0 &&
+      clip.shapes.length === 0 &&
+      clip.textLabels.length === 0
+    ) {
       return false;
     }
 
-    const box = boundingBox(clip.strokes, clip.placedImages, clip.fills, 0);
+    const box = boundingBox(clip.strokes, clip.placedImages, clip.fills, 0, clip.shapes, clip.textLabels);
     let dx = 24;
     let dy = 24;
     const tap = this.lastCanvasTapLocation;
@@ -1872,6 +2890,19 @@ export class DrawingStore {
       position: { x: img.position.x + dx, y: img.position.y + dy },
       size: { ...img.size },
     }));
+    const newShapes = clip.shapes.map((sh) => ({
+      ...sh,
+      id: generateId(),
+      start: { x: sh.start.x + dx, y: sh.start.y + dy },
+      end: { x: sh.end.x + dx, y: sh.end.y + dy },
+      color: { ...sh.color },
+    }));
+    const newTexts = clip.textLabels.map((lbl) => ({
+      ...lbl,
+      id: generateId(),
+      position: { x: lbl.position.x + dx, y: lbl.position.y + dy },
+      color: { ...lbl.color },
+    }));
 
     const nextStrokes = [...this.state.strokes, ...newStrokes];
     this.spatialGrid.rebuild(nextStrokes);
@@ -1881,9 +2912,13 @@ export class DrawingStore {
         strokes: nextStrokes,
         fills: [...this.state.fills, ...newFills],
         placedImages: [...this.state.placedImages, ...newImages],
+        shapes: [...this.state.shapes, ...newShapes],
+        textLabels: [...this.state.textLabels, ...newTexts],
         selectedStrokeIds: newStrokes.map((s) => s.id),
         selectedFillIds: newFills.map((f) => f.id),
         selectedImageIds: newImages.map((im) => im.id),
+        selectedShapeIds: newShapes.map((sh) => sh.id),
+        selectedTextIds: newTexts.map((lbl) => lbl.id),
         selectionBoundary: clip.boundary.map((p) => ({ x: p.x + dx, y: p.y + dy })),
         currentTool: 'select',
         showQuickMenu: false,
@@ -1932,6 +2967,8 @@ export class DrawingStore {
         selectedImageIds: [img.id],
         selectedStrokeIds: [],
         selectedFillIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         selectionBoundary: [],
         showQuickMenu: false,
         ...this.syncUndoFlags(),
@@ -2063,6 +3100,7 @@ export class DrawingStore {
   // MARK: - Undo / Redo / Clear
 
   undo(): void {
+    if (this.state.isEditingText) this.cancelTextEditing();
     const prev = this.history.undo(this.makeSnapshot());
     if (!prev) return;
     this.spatialGrid.rebuild(prev.strokes);
@@ -2072,11 +3110,16 @@ export class DrawingStore {
         strokes: prev.strokes,
         placedImages: prev.placedImages,
         fills: prev.fills,
+        shapes: prev.shapes ?? [],
+        textLabels: prev.textLabels ?? [],
         selectedStrokeIds: prev.selectedStrokeIds,
         selectedImageIds: prev.selectedImageIds,
         selectedFillIds: prev.selectedFillIds,
+        selectedShapeIds: prev.selectedShapeIds ?? [],
+        selectedTextIds: prev.selectedTextIds ?? [],
         selectionBoundary: prev.selectionBoundary,
         currentStroke: null,
+        currentShape: null,
         selectionLasso: [],
         showQuickMenu: false,
         ...this.syncUndoFlags(),
@@ -2087,6 +3130,7 @@ export class DrawingStore {
   }
 
   redo(): void {
+    if (this.state.isEditingText) this.cancelTextEditing();
     const next = this.history.redo(this.makeSnapshot());
     if (!next) return;
     this.spatialGrid.rebuild(next.strokes);
@@ -2096,11 +3140,16 @@ export class DrawingStore {
         strokes: next.strokes,
         placedImages: next.placedImages,
         fills: next.fills,
+        shapes: next.shapes ?? [],
+        textLabels: next.textLabels ?? [],
         selectedStrokeIds: next.selectedStrokeIds,
         selectedImageIds: next.selectedImageIds,
         selectedFillIds: next.selectedFillIds,
+        selectedShapeIds: next.selectedShapeIds ?? [],
+        selectedTextIds: next.selectedTextIds ?? [],
         selectionBoundary: next.selectionBoundary,
         currentStroke: null,
+        currentShape: null,
         selectionLasso: [],
         showQuickMenu: false,
         ...this.syncUndoFlags(),
@@ -2111,10 +3160,13 @@ export class DrawingStore {
   }
 
   clearCanvas(): void {
+    if (this.state.isEditingText) this.cancelTextEditing();
     if (
       this.state.strokes.length === 0 &&
       this.state.fills.length === 0 &&
-      this.state.placedImages.length === 0
+      this.state.placedImages.length === 0 &&
+      this.state.shapes.length === 0 &&
+      this.state.textLabels.length === 0
     ) {
       return;
     }
@@ -2126,10 +3178,15 @@ export class DrawingStore {
         strokes: [],
         fills: [],
         placedImages: [],
+        shapes: [],
+        textLabels: [],
         currentStroke: null,
+        currentShape: null,
         selectedStrokeIds: [],
         selectedImageIds: [],
         selectedFillIds: [],
+        selectedShapeIds: [],
+        selectedTextIds: [],
         selectionBoundary: [],
         selectionLasso: [],
         showQuickMenu: false,

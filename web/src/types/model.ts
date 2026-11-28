@@ -111,7 +111,7 @@ export interface TrashEntry {
   data?: SaveData;
 }
 
-export type Tool = 'pen' | 'sharpie' | 'fill' | 'eraser' | 'select';
+export type Tool = 'pen' | 'sharpie' | 'fill' | 'shape' | 'text' | 'eraser' | 'select';
 
 export type ToolbarDockEdge = 'top' | 'bottom' | 'left' | 'right';
 
@@ -127,6 +127,8 @@ export type ToolbarItemID =
   | 'pen'
   | 'sharpie'
   | 'fill'
+  | 'shape'
+  | 'text'
   | 'eraser'
   | 'select'
   | 'scenes'
@@ -155,6 +157,8 @@ export const ALL_TOOLBAR_ITEMS: ToolbarItemID[] = [
   'pen',
   'sharpie',
   'fill',
+  'shape',
+  'text',
   'eraser',
   'select',
   'scenes',
@@ -184,6 +188,8 @@ export const DEFAULT_PINNED_TOOLBAR_ITEMS: ToolbarItemID[] = [
   'pen',
   'sharpie',
   'fill',
+  'shape',
+  'text',
   'eraser',
   'select',
   'scenes',

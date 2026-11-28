@@ -1,13 +1,21 @@
 import type {
   CanvasBackground,
   CanvasScene,
+  CanvasShape,
   CodableColor,
   FillShape,
   PlacedImage,
   Stroke,
+  TextLabel,
 } from '../types/model';
 import { colorToCss } from '../types/model';
-import { boundingBox } from './geometry';
+import {
+  boundingBox,
+  isLineLikeShape,
+  shapeCenter,
+  shapeRect,
+  textLabelCenter,
+} from './geometry';
 import { traceStrokeToContext } from './floodFill';
 import { imageBase64ToDataUrl } from './wbCodec';
 
@@ -32,6 +40,133 @@ export function resolveFillColor(fill: FillShape, fillPresets: CodableColor[]): 
       ? fillPresets[fill.presetIndex]
       : fill.color;
   return colorToCss(base, fill.opacity);
+}
+
+export function resolveShapeColor(shape: CanvasShape, shapePresets: CodableColor[]): CodableColor {
+  if (shape.presetIndex >= 0 && shape.presetIndex < shapePresets.length) {
+    return shapePresets[shape.presetIndex];
+  }
+  return shape.color;
+}
+
+export function resolveTextColor(label: TextLabel, textPresets: CodableColor[]): CodableColor {
+  if (label.presetIndex >= 0 && label.presetIndex < textPresets.length) {
+    return textPresets[label.presetIndex];
+  }
+  return label.color;
+}
+
+export function drawCanvasShape(
+  ctx: CanvasRenderingContext2D,
+  shape: CanvasShape,
+  shapePresets: CodableColor[]
+): void {
+  const resolved = resolveShapeColor(shape, shapePresets);
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = shape.lineWidth;
+  ctx.strokeStyle = colorToCss(resolved);
+
+  if (isLineLikeShape(shape.kind)) {
+    ctx.beginPath();
+    ctx.moveTo(shape.start.x, shape.start.y);
+    ctx.lineTo(shape.end.x, shape.end.y);
+    if (shape.kind === 'arrow') {
+      const dx = shape.end.x - shape.start.x;
+      const dy = shape.end.y - shape.start.y;
+      const len = Math.hypot(dx, dy);
+      if (len > 1) {
+        const headLen = Math.min(Math.max(12, shape.lineWidth * 4.5), len * 0.45);
+        const angle = Math.atan2(dy, dx);
+        const spread = Math.PI / 6;
+        ctx.moveTo(
+          shape.end.x - headLen * Math.cos(angle - spread),
+          shape.end.y - headLen * Math.sin(angle - spread)
+        );
+        ctx.lineTo(shape.end.x, shape.end.y);
+        ctx.lineTo(
+          shape.end.x - headLen * Math.cos(angle + spread),
+          shape.end.y - headLen * Math.sin(angle + spread)
+        );
+      }
+    }
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
+
+  const r = shapeRect(shape);
+  if (r.width < 0.5 && r.height < 0.5) {
+    ctx.restore();
+    return;
+  }
+  if (shape.rotation) {
+    const c = shapeCenter(shape);
+    ctx.translate(c.x, c.y);
+    ctx.rotate(shape.rotation);
+    ctx.translate(-c.x, -c.y);
+  }
+
+  ctx.beginPath();
+  if (shape.kind === 'rectangle') {
+    ctx.rect(r.x, r.y, r.width, r.height);
+  } else if (shape.kind === 'ellipse') {
+    ctx.ellipse(
+      r.x + r.width / 2,
+      r.y + r.height / 2,
+      Math.max(0.5, r.width / 2),
+      Math.max(0.5, r.height / 2),
+      0,
+      0,
+      Math.PI * 2
+    );
+  } else if (shape.kind === 'triangle') {
+    ctx.moveTo(r.x + r.width / 2, r.y);
+    ctx.lineTo(r.x + r.width, r.y + r.height);
+    ctx.lineTo(r.x, r.y + r.height);
+    ctx.closePath();
+  } else if (shape.kind === 'diamond') {
+    ctx.moveTo(r.x + r.width / 2, r.y);
+    ctx.lineTo(r.x + r.width, r.y + r.height / 2);
+    ctx.lineTo(r.x + r.width / 2, r.y + r.height);
+    ctx.lineTo(r.x, r.y + r.height / 2);
+    ctx.closePath();
+  }
+
+  if (shape.isFilled) {
+    ctx.fillStyle = colorToCss(resolved, 0.2);
+    ctx.fill();
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+export function drawTextLabel(
+  ctx: CanvasRenderingContext2D,
+  label: TextLabel,
+  textPresets: CodableColor[]
+): void {
+  if (!label.text) return;
+  const resolved = resolveTextColor(label, textPresets);
+  const lines = label.text.split('\n');
+  const lineHeight = label.fontSize * 1.28;
+
+  ctx.save();
+  if (label.rotation) {
+    const c = textLabelCenter(label);
+    ctx.translate(c.x, c.y);
+    ctx.rotate(label.rotation);
+    ctx.translate(-c.x, -c.y);
+  }
+  ctx.fillStyle = colorToCss(resolved);
+  ctx.font = `${label.isBold ? '700' : '400'} ${label.fontSize}px -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], label.position.x + 4, label.position.y + 2 + i * lineHeight);
+  }
+  ctx.restore();
 }
 
 export function canvasBackgroundFill(isDarkMode: boolean, isWarmPaper: boolean): string {
@@ -206,13 +341,19 @@ export async function renderPNGBlob(params: {
   strokes: Stroke[];
   placedImages: PlacedImage[];
   fills: FillShape[];
+  shapes?: CanvasShape[];
+  textLabels?: TextLabel[];
   penPresets: CodableColor[];
   sharpiePresets: CodableColor[];
   fillPresets: CodableColor[];
+  shapePresets?: CodableColor[];
+  textPresets?: CodableColor[];
   isDarkMode: boolean;
   scale?: number;
 }): Promise<Blob | null> {
-  const bounds = boundingBox(params.strokes, params.placedImages, params.fills, 24);
+  const shapes = params.shapes ?? [];
+  const textLabels = params.textLabels ?? [];
+  const bounds = boundingBox(params.strokes, params.placedImages, params.fills, 24, shapes, textLabels);
   if (!bounds) return null;
 
   const exportScale = Math.min(params.scale ?? 3, 8192 / Math.max(bounds.width, bounds.height));
@@ -239,10 +380,18 @@ export async function renderPNGBlob(params: {
   for (const f of params.fills) {
     drawFillShape(ctx, f, params.fillPresets);
   }
+  const shapePresets = params.shapePresets ?? params.penPresets;
+  const textPresets = params.textPresets ?? params.penPresets;
+  for (const sh of shapes) {
+    drawCanvasShape(ctx, sh, shapePresets);
+  }
   for (const s of params.strokes) {
     if (!s.isEraser) {
       drawStroke(ctx, s, params.penPresets, params.sharpiePresets, params.isDarkMode);
     }
+  }
+  for (const lbl of textLabels) {
+    drawTextLabel(ctx, lbl, textPresets);
   }
   ctx.restore();
 
@@ -256,9 +405,13 @@ export async function renderBoardThumbnailDataUrl(params: {
   strokes: Stroke[];
   placedImages: PlacedImage[];
   fills: FillShape[];
+  shapes?: CanvasShape[];
+  textLabels?: TextLabel[];
   penPresets: CodableColor[];
   sharpiePresets: CodableColor[];
   fillPresets: CodableColor[];
+  shapePresets?: CodableColor[];
+  textPresets?: CodableColor[];
   isDarkMode: boolean;
   isWarmPaper: boolean;
   width?: number;
@@ -266,7 +419,9 @@ export async function renderBoardThumbnailDataUrl(params: {
 }): Promise<string | null> {
   const w = params.width ?? 400;
   const h = params.height ?? 300;
-  const bounds = boundingBox(params.strokes, params.placedImages, params.fills, 16);
+  const shapes = params.shapes ?? [];
+  const textLabels = params.textLabels ?? [];
+  const bounds = boundingBox(params.strokes, params.placedImages, params.fills, 16, shapes, textLabels);
   if (!bounds) return null;
 
   const canvas = document.createElement('canvas');
@@ -297,10 +452,18 @@ export async function renderBoardThumbnailDataUrl(params: {
   for (const f of params.fills) {
     drawFillShape(ctx, f, params.fillPresets);
   }
+  const shapePresets = params.shapePresets ?? params.penPresets;
+  const textPresets = params.textPresets ?? params.penPresets;
+  for (const sh of shapes) {
+    drawCanvasShape(ctx, sh, shapePresets);
+  }
   for (const s of params.strokes) {
     if (!s.isEraser) {
       drawStroke(ctx, s, params.penPresets, params.sharpiePresets, params.isDarkMode);
     }
+  }
+  for (const lbl of textLabels) {
+    drawTextLabel(ctx, lbl, textPresets);
   }
   ctx.restore();
 
@@ -315,9 +478,13 @@ export async function renderSceneThumbnailDataUrl(params: {
   strokes: Stroke[];
   placedImages: PlacedImage[];
   fills: FillShape[];
+  shapes?: CanvasShape[];
+  textLabels?: TextLabel[];
   penPresets: CodableColor[];
   sharpiePresets: CodableColor[];
   fillPresets: CodableColor[];
+  shapePresets?: CodableColor[];
+  textPresets?: CodableColor[];
   isDarkMode: boolean;
   isWarmPaper: boolean;
   width?: number;
@@ -325,6 +492,8 @@ export async function renderSceneThumbnailDataUrl(params: {
 }): Promise<string | null> {
   const w = params.width ?? 144;
   const h = params.height ?? 108;
+  const shapes = params.shapes ?? [];
+  const textLabels = params.textLabels ?? [];
   const canvas = document.createElement('canvas');
   canvas.width = w;
   canvas.height = h;
@@ -358,10 +527,18 @@ export async function renderSceneThumbnailDataUrl(params: {
   for (const f of params.fills) {
     drawFillShape(ctx, f, params.fillPresets);
   }
+  const shapePresets = params.shapePresets ?? params.penPresets;
+  const textPresets = params.textPresets ?? params.penPresets;
+  for (const sh of shapes) {
+    drawCanvasShape(ctx, sh, shapePresets);
+  }
   for (const s of params.strokes) {
     if (!s.isEraser) {
       drawStroke(ctx, s, params.penPresets, params.sharpiePresets, params.isDarkMode);
     }
+  }
+  for (const lbl of textLabels) {
+    drawTextLabel(ctx, lbl, textPresets);
   }
   ctx.restore();
 

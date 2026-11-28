@@ -25,7 +25,21 @@ export const HelpModal: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       color: '#00b4d8',
       title: 'Fill',
       key: 'F',
-      detail: 'Tap inside any closed shape to fill cleanly without bleeding. Tap the swatch to cycle opacity (25%–100%), or use the icons for gap-closing (Strict / Auto / Wide) and Replace vs. Blend mode.',
+      detail: 'Tap inside any closed stroke or shape to fill cleanly without bleeding. Tap the swatch to cycle opacity (25%–100%), or use the icons for gap-closing (Strict / Auto / Wide) and Replace vs. Blend mode.',
+    },
+    {
+      icon: 'shape',
+      color: '#34c759',
+      title: 'Shapes',
+      key: 'R',
+      detail: 'Drag to draw crisp rectangles, ellipses, triangles, diamonds, lines, and arrows. Hold ⇧ while dragging for perfect squares, circles, or 15° angles; toggle translucent fill in options.',
+    },
+    {
+      icon: 'text',
+      color: '#32ade6',
+      title: 'Text',
+      key: 'T',
+      detail: 'Click anywhere to add a multi-line text label with size presets (S / M / L / XL), Bold, and theme-adaptive colors. Double-click any text label to re-edit; press Enter to commit or ⇧Enter for a new line.',
     },
     {
       icon: 'eraser',

@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { drawingStore, useDrawingState } from '../store/drawingStore';
 import {
   drawBackgroundGrid,
+  drawCanvasShape,
   drawFillShape,
   drawPlacedImage,
   drawStroke,
+  drawTextLabel,
   loadHtmlImage,
 } from '../engine/renderer';
 import { imageBase64ToDataUrl } from '../engine/wbCodec';
@@ -13,9 +15,14 @@ import {
   distanceSquared,
   imageRotatedBoundingBox,
   imageRotatedCorners,
+  isLineLikeShape,
   rectsIntersect,
+  shapeRotatedBoundingBox,
+  shapeRotatedCorners,
+  textLabelRotatedBoundingBox,
+  textLabelRotatedCorners,
 } from '../engine/geometry';
-import type { Point } from '../types/model';
+import { colorToCss, type Point } from '../types/model';
 
 interface CanvasStageProps {
   onBeginDraw?: () => void;
@@ -54,6 +61,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
   const bgCanvasRef = useRef<HTMLCanvasElement>(null);
   const committedCanvasRef = useRef<HTMLCanvasElement>(null);
   const liveCanvasRef = useRef<HTMLCanvasElement>(null);
+  const inlineTextRef = useRef<HTMLTextAreaElement>(null);
   const imageCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
 
   const [viewport, setViewport] = useState({ offsetX: 0, offsetY: 0, scale: 1 });
@@ -162,10 +170,20 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
     }
   }, [state.pendingSceneNavigation]);
 
+  // Auto-focus inline text editor whenever it opens
+  useEffect(() => {
+    if (state.isEditingText && inlineTextRef.current) {
+      const el = inlineTextRef.current;
+      el.focus();
+      const len = el.value.length;
+      el.setSelectionRange(len, len);
+    }
+  }, [state.isEditingText, state.editingTextId]);
+
   useEffect(() => {
     if (state.needsRecenter) {
       drawingStore.consumeRecenter();
-      const box = boundingBox(state.strokes, state.placedImages, state.fills, 60);
+      const box = boundingBox(state.strokes, state.placedImages, state.fills, 60, state.shapes, state.textLabels);
       if (box) {
         animateTo({ x: box.x + box.width / 2, y: box.y + box.height / 2 }, 1);
       } else {
@@ -177,7 +195,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
   useEffect(() => {
     if (state.needsFitToContent) {
       drawingStore.consumeFitToContent();
-      const box = boundingBox(state.strokes, state.placedImages, state.fills, 60);
+      const box = boundingBox(state.strokes, state.placedImages, state.fills, 60, state.shapes, state.textLabels);
       if (box) {
         const sz = canvasSizeRef.current;
         const fitScale = Math.min(sz.width / box.width, sz.height / box.height, 2);
@@ -253,6 +271,8 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
     const penPresets = drawingStore.penPresets;
     const sharpiePresets = drawingStore.sharpiePresets;
     const fillPresets = drawingStore.fillPresets;
+    const shapePresets = drawingStore.shapePresets;
+    const textPresets = drawingStore.textPresets;
 
     for (const img of state.placedImages) {
       if (!rectsIntersect(imageRotatedBoundingBox(img), visibleRect)) continue;
@@ -273,6 +293,11 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
       drawFillShape(ctx, fill, fillPresets);
     }
 
+    for (const sh of state.shapes) {
+      if (!rectsIntersect(shapeRotatedBoundingBox(sh), visibleRect)) continue;
+      drawCanvasShape(ctx, sh, shapePresets);
+    }
+
     drawingStore.spatialGrid.sync(state.strokes);
     const visibleIndices = drawingStore.spatialGrid.queryIndices(visibleRect);
     for (const idx of visibleIndices) {
@@ -280,6 +305,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
       if (!s.isEraser) {
         drawStroke(ctx, s, penPresets, sharpiePresets, state.appSettings.isDarkMode);
       }
+    }
+
+    for (const lbl of state.textLabels) {
+      if (state.isEditingText && state.editingTextId === lbl.id) continue;
+      if (!rectsIntersect(textLabelRotatedBoundingBox(lbl), visibleRect)) continue;
+      drawTextLabel(ctx, lbl, textPresets);
     }
     ctx.restore();
   }, [
@@ -289,16 +320,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
     state.strokes,
     state.fills,
     state.placedImages,
+    state.shapes,
+    state.textLabels,
+    state.isEditingText,
+    state.editingTextId,
     state.appSettings.isDarkMode,
   ]);
 
-  // Layer 3: Live Stroke + Selection Lasso / Boundary / Rotated Image Handles / Rotation Handle & Badge
+  // Layer 3: Live Stroke + Active Shape + Selection Lasso / Boundary / Handles / Rotation Handle & Badge
   const hasSelectionOverlay =
     state.selectionLasso.length > 0 ||
     state.selectionBoundary.length > 0 ||
     state.selectedImageIds.length > 0 ||
     state.selectedStrokeIds.length > 0 ||
-    state.selectedFillIds.length > 0;
+    state.selectedFillIds.length > 0 ||
+    state.selectedShapeIds.length > 0 ||
+    state.selectedTextIds.length > 0;
 
   useEffect(() => {
     let rafId: number | null = null;
@@ -338,6 +375,15 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
           state.appSettings.isDarkMode,
           state.eraserSettings.size / safeScale
         );
+        ctx.restore();
+      }
+
+      // Active shape preview
+      if (state.currentShape) {
+        ctx.save();
+        ctx.translate(viewport.offsetX, viewport.offsetY);
+        ctx.scale(safeScale, safeScale);
+        drawCanvasShape(ctx, state.currentShape, drawingStore.shapePresets);
         ctx.restore();
       }
 
@@ -400,6 +446,63 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
             ctx.lineWidth = 1.6;
             ctx.stroke();
           }
+          ctx.restore();
+        }
+      }
+
+      // Selected CanvasShape borders & corner/endpoint handles
+      if (state.selectedShapeIds.length > 0) {
+        const selSh = new Set(state.selectedShapeIds);
+        for (const sh of state.shapes) {
+          if (!selSh.has(sh.id)) continue;
+          const handles = shapeRotatedCorners(sh).map(toScreen);
+          ctx.save();
+          if (!isLineLikeShape(sh.kind) && handles.length === 4) {
+            ctx.strokeStyle = '#007aff';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 5]);
+            ctx.lineDashOffset = -phase;
+            ctx.beginPath();
+            ctx.moveTo(handles[0].x, handles[0].y);
+            ctx.lineTo(handles[1].x, handles[1].y);
+            ctx.lineTo(handles[2].x, handles[2].y);
+            ctx.lineTo(handles[3].x, handles[3].y);
+            ctx.closePath();
+            ctx.stroke();
+          }
+          ctx.setLineDash([]);
+          for (const pt of handles) {
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, 4.8, 0, Math.PI * 2);
+            ctx.fillStyle = '#007aff';
+            ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+      }
+
+      // Selected TextLabel dashed borders
+      if (state.selectedTextIds.length > 0) {
+        const selT = new Set(state.selectedTextIds);
+        for (const lbl of state.textLabels) {
+          if (!selT.has(lbl.id)) continue;
+          if (state.isEditingText && state.editingTextId === lbl.id) continue;
+          const corners = textLabelRotatedCorners(lbl).map(toScreen);
+          ctx.save();
+          ctx.strokeStyle = '#007aff';
+          ctx.lineWidth = 2;
+          ctx.setLineDash([8, 5]);
+          ctx.lineDashOffset = -phase;
+          ctx.beginPath();
+          ctx.moveTo(corners[0].x, corners[0].y);
+          ctx.lineTo(corners[1].x, corners[1].y);
+          ctx.lineTo(corners[2].x, corners[2].y);
+          ctx.lineTo(corners[3].x, corners[3].y);
+          ctx.closePath();
+          ctx.stroke();
           ctx.restore();
         }
       }
@@ -492,12 +595,19 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
     canvasSize,
     viewport,
     state.currentStroke,
+    state.currentShape,
     state.selectionLasso,
     state.selectionBoundary,
     state.selectedStrokeIds,
     state.selectedFillIds,
     state.selectedImageIds,
+    state.selectedShapeIds,
+    state.selectedTextIds,
     state.placedImages,
+    state.shapes,
+    state.textLabels,
+    state.isEditingText,
+    state.editingTextId,
     state.currentTool,
     state.isRotating,
     state.selectionRotationAngle,
@@ -574,6 +684,16 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
       setHideHoverDot(true);
       return;
     }
+    if (state.currentTool === 'text') {
+      setCursorStyle('text');
+      setHideHoverDot(true);
+      return;
+    }
+    if (state.currentTool === 'shape') {
+      setCursorStyle('crosshair');
+      setHideHoverDot(true);
+      return;
+    }
     if (state.currentTool !== 'select') {
       setCursorStyle('crosshair');
       setHideHoverDot(false);
@@ -583,11 +703,23 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
     const cp = toCanvas(clientX, clientY);
     const scale = Math.max(viewportRef.current.scale, 0.01);
 
-    if (drawingStore.isResizing && drawingStore.resizeImageId) {
-      const img = state.placedImages.find((im) => im.id === drawingStore.resizeImageId);
-      setCursorStyle(resizeCssCursor(drawingStore.resizeCorner, img?.rotation ?? 0));
-      setHideHoverDot(true);
-      return;
+    if (drawingStore.isResizing) {
+      if (drawingStore.resizeImageId) {
+        const img = state.placedImages.find((im) => im.id === drawingStore.resizeImageId);
+        setCursorStyle(resizeCssCursor(drawingStore.resizeCorner, img?.rotation ?? 0));
+        setHideHoverDot(true);
+        return;
+      }
+      if (drawingStore.resizeShapeId) {
+        const sh = state.shapes.find((x) => x.id === drawingStore.resizeShapeId);
+        if (sh) {
+          setCursorStyle(
+            isLineLikeShape(sh.kind) ? 'crosshair' : resizeCssCursor(drawingStore.resizeCorner, sh.rotation ?? 0)
+          );
+          setHideHoverDot(true);
+          return;
+        }
+      }
     }
     if (state.isRotating) {
       setCursorStyle('grabbing');
@@ -601,6 +733,18 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
       setCursorStyle(resizeCssCursor(resizeHit.corner, img?.rotation ?? 0));
       setHideHoverDot(true);
       return;
+    }
+
+    const shapeHit = drawingStore.hitTestShapeHandle(cp, scale);
+    if (shapeHit) {
+      const sh = state.shapes.find((x) => x.id === shapeHit.shapeId);
+      if (sh) {
+        setCursorStyle(
+          isLineLikeShape(sh.kind) ? 'crosshair' : resizeCssCursor(shapeHit.handleIndex, sh.rotation ?? 0)
+        );
+        setHideHoverDot(true);
+        return;
+      }
     }
 
     if (drawingStore.hitTestRotateHandle(cp, scale)) {
@@ -659,10 +803,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
     }
 
     onBeginDraw?.();
-    activePointerId.current = e.pointerId;
     const cp = toCanvas(e.clientX, e.clientY);
     const scale = Math.max(viewportRef.current.scale, 0.01);
     drawingStore.lastCanvasTapLocation = cp;
+
+    if (state.isEditingText) {
+      drawingStore.commitTextEditing();
+      if (state.currentTool === 'text') {
+        const existing = drawingStore.hitTestTextLabel(cp);
+        if (existing) {
+          drawingStore.beginTextEditing(existing.position, existing.id);
+        }
+      }
+      return;
+    }
+
+    activePointerId.current = e.pointerId;
 
     if (state.currentTool === 'select') {
       const hasSel = drawingStore.hasSelection || state.selectionBoundary.length > 0;
@@ -672,7 +828,10 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
           updateDynamicCursor(e.clientX, e.clientY);
           return;
         }
-        if (drawingStore.hitTestResizeHandle(cp, scale) !== null) {
+        if (
+          drawingStore.hitTestResizeHandle(cp, scale) !== null ||
+          drawingStore.hitTestShapeHandle(cp, scale) !== null
+        ) {
           drawingStore.beginMove(cp, scale);
           updateDynamicCursor(e.clientX, e.clientY);
           return;
@@ -684,6 +843,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
           const now = Date.now();
           if (now - lastSelectTapRef.current < 360) {
             lastSelectTapRef.current = 0;
+            const hitLbl = drawingStore.hitTestTextLabel(cp);
+            if (hitLbl && state.selectedTextIds.includes(hitLbl.id)) {
+              drawingStore.beginTextEditing(hitLbl.position, hitLbl.id);
+              activePointerId.current = null;
+              return;
+            }
             drawingStore.setQuickMenu(true, { x: e.clientX + 20, y: e.clientY - 12 });
             return;
           }
@@ -710,6 +875,22 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
 
     if (state.currentTool === 'fill') {
       drawingStore.floodFill(cp);
+      return;
+    }
+
+    if (state.currentTool === 'shape') {
+      drawingStore.beginShape(cp);
+      return;
+    }
+
+    if (state.currentTool === 'text') {
+      activePointerId.current = null;
+      const existing = drawingStore.hitTestTextLabel(cp);
+      if (existing) {
+        drawingStore.beginTextEditing(existing.position, existing.id);
+      } else {
+        drawingStore.beginTextEditing(cp);
+      }
       return;
     }
 
@@ -788,7 +969,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
           width: cp.x - drawingStore.lastMovePoint.x,
           height: cp.y - drawingStore.lastMovePoint.y,
         };
-        drawingStore.moveSelected(delta);
+        drawingStore.moveSelected(delta, e.shiftKey);
         drawingStore.lastMovePoint = cp;
         return;
       }
@@ -798,7 +979,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
       return;
     }
 
-    if (state.currentTool === 'fill') return;
+    if (state.currentTool === 'fill' || state.currentTool === 'text') return;
+
+    if (state.currentTool === 'shape') {
+      drawingStore.updateShape(cp, e.shiftKey);
+      return;
+    }
 
     const nativeEvt = e.nativeEvent;
     const coalesced =
@@ -853,7 +1039,12 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
       return;
     }
 
-    if (state.currentTool !== 'fill') {
+    if (state.currentTool === 'shape') {
+      drawingStore.endShape();
+      return;
+    }
+
+    if (state.currentTool !== 'fill' && state.currentTool !== 'text') {
       drawingStore.endStroke(scale);
     }
   };
@@ -912,7 +1103,51 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({ onBeginDraw }) => {
       <canvas ref={bgCanvasRef} className="canvas-layer" />
       <canvas ref={committedCanvasRef} className="canvas-layer" />
       <canvas ref={liveCanvasRef} className="canvas-layer" />
-      {hoverPos && !hideHoverDot && (
+      {state.isEditingText && (() => {
+        const safeScale = Math.max(viewport.scale, 0.1);
+        const scaledFont = Math.max(10, state.editingTextFontSize * safeScale);
+        const lines = state.editingTextDraft.split('\n');
+        const longest = lines.reduce((m, l) => Math.max(m, l.length), 0);
+        const minW = Math.max(120 * safeScale, scaledFont * 6.8, (longest + 2) * scaledFont * 0.65 + 24);
+        const minH = Math.max(scaledFont * 1.4, lines.length * scaledFont * 1.28 + 10);
+        const left = state.editingTextPosition.x * safeScale + viewport.offsetX;
+        const top = state.editingTextPosition.y * safeScale + viewport.offsetY;
+        return (
+          <textarea
+            ref={inlineTextRef}
+            className="inline-text-editor"
+            value={state.editingTextDraft}
+            placeholder="Type text…"
+            spellCheck={false}
+            style={{
+              left,
+              top,
+              width: minW,
+              height: minH,
+              fontSize: scaledFont,
+              lineHeight: 1.28,
+              fontWeight: state.editingTextIsBold ? 700 : 400,
+              color: colorToCss(drawingStore.editingTextDisplayColor),
+              transform: state.editingTextRotation
+                ? `rotate(${state.editingTextRotation}rad)`
+                : undefined,
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onChange={(e) => drawingStore.setEditingTextDraft(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                drawingStore.cancelTextEditing();
+              } else if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                drawingStore.commitTextEditing();
+              }
+            }}
+          />
+        );
+      })()}
+      {hoverPos && !hideHoverDot && !state.isEditingText && (
         <div
           className="hover-dot"
           style={{

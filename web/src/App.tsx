@@ -91,9 +91,13 @@ export const App: React.FC = () => {
           strokes: data.strokes,
           placedImages: data.placedImages,
           fills: data.fills,
+          shapes: data.shapes ?? [],
+          textLabels: data.textLabels ?? [],
           penPresets: drawingStore.penPresets,
           sharpiePresets: drawingStore.sharpiePresets,
           fillPresets: drawingStore.fillPresets,
+          shapePresets: drawingStore.shapePresets,
+          textPresets: drawingStore.textPresets,
           isDarkMode: state.appSettings.isDarkMode,
           isWarmPaper: state.appSettings.isWarmPaper,
         });
@@ -169,6 +173,8 @@ export const App: React.FC = () => {
       strokes: [],
       placedImages: [],
       fills: [],
+      shapes: [],
+      textLabels: [],
       scenes: [defaultScene],
     };
 
@@ -319,9 +325,13 @@ export const App: React.FC = () => {
       strokes: data.strokes,
       placedImages: data.placedImages,
       fills: data.fills,
+      shapes: data.shapes ?? [],
+      textLabels: data.textLabels ?? [],
       penPresets: drawingStore.penPresets,
       sharpiePresets: drawingStore.sharpiePresets,
       fillPresets: drawingStore.fillPresets,
+      shapePresets: drawingStore.shapePresets,
+      textPresets: drawingStore.textPresets,
       isDarkMode: state.appSettings.isDarkMode,
     });
     if (!blob) {
@@ -337,9 +347,13 @@ export const App: React.FC = () => {
       strokes: data.strokes,
       placedImages: data.placedImages,
       fills: data.fills,
+      shapes: data.shapes ?? [],
+      textLabels: data.textLabels ?? [],
       penPresets: drawingStore.penPresets,
       sharpiePresets: drawingStore.sharpiePresets,
       fillPresets: drawingStore.fillPresets,
+      shapePresets: drawingStore.shapePresets,
+      textPresets: drawingStore.textPresets,
       isDarkMode: state.appSettings.isDarkMode,
       isWarmPaper: state.appSettings.isWarmPaper,
     });
@@ -357,9 +371,13 @@ export const App: React.FC = () => {
       strokes: data.strokes,
       placedImages: data.placedImages,
       fills: data.fills,
+      shapes: data.shapes ?? [],
+      textLabels: data.textLabels ?? [],
       penPresets: drawingStore.penPresets,
       sharpiePresets: drawingStore.sharpiePresets,
       fillPresets: drawingStore.fillPresets,
+      shapePresets: drawingStore.shapePresets,
+      textPresets: drawingStore.textPresets,
       isDarkMode: state.appSettings.isDarkMode,
       isWarmPaper: state.appSettings.isWarmPaper,
     });
@@ -506,6 +524,16 @@ export const App: React.FC = () => {
           setSettingsTool(null);
           return;
         }
+        if (key === 'r') {
+          drawingStore.selectTool('shape');
+          setSettingsTool(null);
+          return;
+        }
+        if (key === 't') {
+          drawingStore.selectTool('text');
+          setSettingsTool(null);
+          return;
+        }
         if (key === 'e') {
           const prior = state.currentTool;
           drawingStore.selectTool('eraser');
@@ -544,6 +572,8 @@ export const App: React.FC = () => {
           if (state.currentTool === 'pen') drawingStore.selectPenPreset(idx);
           else if (state.currentTool === 'sharpie') drawingStore.selectSharpiePreset(idx);
           else if (state.currentTool === 'fill') drawingStore.selectFillPreset(idx);
+          else if (state.currentTool === 'shape') drawingStore.selectShapePreset(idx);
+          else if (state.currentTool === 'text') drawingStore.selectTextPreset(idx);
         }
       }
     };

@@ -585,4 +585,108 @@ describe('Shapes & TextLabels Phase 1 (Geometry, FloodFill, .wb Codec)', () => {
     expect(decoded.textLabels?.[0].text).toBe('Hello\nTissue Box');
     expect(decoded.textLabels?.[0].isBold).toBe(true);
   });
+
+  it('supports DrawingStore shape/text creation, resize, rotate, recolor, undo, and vector PDF export', async () => {
+    const store = new DrawingStore(false);
+
+    // 1) Draw a Shift-constrained square with translucent fill
+    store.selectTool('shape');
+    store.setShapeKind('rectangle');
+    store.setShapeSettings({ isFilled: true, lineWidth: 3 });
+    store.selectShapePreset(5);
+    store.beginShape({ x: 20, y: 20 });
+    store.updateShape({ x: 120, y: 70 }, true);
+    store.endShape();
+    expect(store.getSnapshot().shapes.length).toBe(1);
+    const rectId = store.getSnapshot().shapes[0].id;
+    expect(store.getSnapshot().shapes[0].end).toEqual({ x: 120, y: 120 });
+
+    // 2) Draw an arrow
+    store.setShapeKind('arrow');
+    store.beginShape({ x: 200, y: 20 });
+    store.updateShape({ x: 320, y: 20 }, true);
+    store.endShape();
+    expect(store.getSnapshot().shapes.length).toBe(2);
+    const arrowId = store.getSnapshot().shapes[1].id;
+
+    // 3) Create and re-edit a multi-line TextLabel
+    store.selectTool('text');
+    store.setTextFontSize(30);
+    store.toggleTextBold();
+    store.selectTextPreset(1);
+    store.beginTextEditing({ x: 40, y: 160 });
+    store.setEditingTextDraft('System\nOverview');
+    store.commitTextEditing();
+    expect(store.getSnapshot().isEditingText).toBe(false);
+    expect(store.getSnapshot().textLabels.length).toBe(1);
+    const lblId = store.getSnapshot().textLabels[0].id;
+    expect(store.getSnapshot().textLabels[0].isBold).toBe(true);
+
+    store.beginTextEditing(store.getSnapshot().textLabels[0].position, lblId);
+    store.setEditingTextDraft('Updated Label');
+    store.commitTextEditing();
+    expect(store.getSnapshot().textLabels[0].text).toBe('Updated Label');
+
+    // 4) Select rectangle, resize via bottom-right handle, rotate 45°, reset rotation
+    store.selectTool('select');
+    expect(store.selectElement({ x: 20, y: 60 }, 1)).toBe(true);
+    expect(store.getSnapshot().selectedShapeIds).toEqual([rectId]);
+    const hit = store.hitTestShapeHandle({ x: 120, y: 120 }, 1);
+    expect(hit).toEqual({ shapeId: rectId, handleIndex: 2 });
+    store.beginMove({ x: 120, y: 120 }, 1);
+    store.moveSelected({ width: 40, height: 20 });
+    store.commitMove();
+    expect(store.getSnapshot().shapes[0].end).toEqual({ x: 160, y: 140 });
+
+    const geom = store.rotationHandleGeometry(1)!;
+    expect(geom).not.toBeNull();
+    store.beginRotate(geom.handleCenter, 1);
+    store.updateRotate({ x: geom.pivot.x + 50, y: geom.pivot.y - 50 }, true);
+    store.commitRotate();
+    expect(store.getSnapshot().shapes[0].rotation).toBeCloseTo(Math.PI / 4, 4);
+    expect(store.canResetSelectionRotation).toBe(true);
+    store.resetSelectionRotation();
+    expect(store.getSnapshot().shapes[0].rotation).toBeCloseTo(0, 5);
+
+    // 5) Drag arrow endpoint handle
+    expect(store.selectElement({ x: 260, y: 20 }, 1)).toBe(true);
+    expect(store.getSnapshot().selectedShapeIds).toEqual([arrowId]);
+    store.beginMove({ x: 320, y: 20 }, 1);
+    store.moveSelected({ width: 30, height: 40 });
+    store.commitMove();
+    expect(store.getSnapshot().shapes[1].end).toEqual({ x: 350, y: 60 });
+
+    // 6) Select text label, scale, recolor, duplicate, undo
+    const lblCenter = textLabelCenter(store.getSnapshot().textLabels[0]);
+    expect(store.selectElement(lblCenter, 1)).toBe(true);
+    expect(store.getSnapshot().selectedTextIds).toEqual([lblId]);
+    store.transformSelected(1.2, 0);
+    expect(store.getSnapshot().textLabels[0].fontSize).toBeCloseTo(36, 1);
+    store.recolorSelected(DEFAULT_LIGHT_PRESETS[4], 4);
+    expect(store.getSnapshot().textLabels[0].presetIndex).toBe(4);
+    store.duplicateSelected();
+    expect(store.getSnapshot().textLabels.length).toBe(2);
+    store.undo();
+    expect(store.getSnapshot().textLabels.length).toBe(1);
+
+    // 7) Export vector PDF containing shapes and selectable text
+    const save = store.exportSaveData();
+    const pdfBytes = await exportCanvasPDFBytes({
+      strokes: save.strokes,
+      placedImages: save.placedImages,
+      fills: save.fills,
+      shapes: save.shapes,
+      textLabels: save.textLabels,
+      penPresets: DEFAULT_LIGHT_PRESETS,
+      sharpiePresets: DEFAULT_LIGHT_PRESETS,
+      fillPresets: DEFAULT_LIGHT_PRESETS,
+      shapePresets: DEFAULT_LIGHT_PRESETS,
+      textPresets: DEFAULT_LIGHT_PRESETS,
+      isDarkMode: false,
+      isWarmPaper: false,
+    });
+    expect(pdfBytes).not.toBeNull();
+    expect(new TextDecoder().decode(pdfBytes!.slice(0, 5))).toBe('%PDF-');
+    expect(pdfBytes!.length).toBeGreaterThan(800);
+  });
 });

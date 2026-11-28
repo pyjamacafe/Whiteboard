@@ -25,9 +25,13 @@ export const ScenesPopover: React.FC<ScenesPopoverProps> = ({ onClose, onExportS
           strokes: state.strokes,
           placedImages: state.placedImages,
           fills: state.fills,
+          shapes: state.shapes,
+          textLabels: state.textLabels,
           penPresets: drawingStore.penPresets,
           sharpiePresets: drawingStore.sharpiePresets,
           fillPresets: drawingStore.fillPresets,
+          shapePresets: drawingStore.shapePresets,
+          textPresets: drawingStore.textPresets,
           isDarkMode: state.appSettings.isDarkMode,
           isWarmPaper: state.appSettings.isWarmPaper,
         });

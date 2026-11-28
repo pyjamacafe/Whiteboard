@@ -4,8 +4,19 @@ export type IconName =
   | 'pen'
   | 'sharpie'
   | 'fill'
+  | 'shape'
+  | 'text'
   | 'eraser'
   | 'select'
+  | 'rectShape'
+  | 'ellipseShape'
+  | 'triangleShape'
+  | 'diamondShape'
+  | 'lineShape'
+  | 'arrowShape'
+  | 'bold'
+  | 'shapeFillOn'
+  | 'shapeFillOff'
   | 'scenes'
   | 'home'
   | 'undo'
@@ -112,6 +123,78 @@ export const Icon: React.FC<IconProps> = ({ name, size = 18, className }) => {
           <path d="M5.5 11.5L11.5 5.5L18.5 12.5L13 18C12 19 10.4 19 9.4 18L5.5 14.1C4.5 13.1 4.5 12.5 5.5 11.5Z" />
           <path d="M9.5 3.5L13.5 7.5" />
           <path d="M19 15.2C19 15.2 21 17.4 21 18.8C21 19.9 20.1 20.8 19 20.8C17.9 20.8 17 19.9 17 18.8C17 17.4 19 15.2 19 15.2Z" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'shape':
+      // square.on.circle silhouette
+      return (
+        <svg {...common}>
+          <rect x="4" y="4" width="10.5" height="10.5" rx="1.8" />
+          <circle cx="15" cy="15" r="5.2" />
+        </svg>
+      );
+    case 'text':
+      // character.textbox silhouette
+      return (
+        <svg {...common}>
+          <rect x="3.5" y="5" width="17" height="14" rx="2.5" />
+          <path d="M8.5 9.5H15.5M12 9.5V15.5" />
+        </svg>
+      );
+    case 'rectShape':
+      return (
+        <svg {...common}>
+          <rect x="4.5" y="6" width="15" height="12" rx="1.5" />
+        </svg>
+      );
+    case 'ellipseShape':
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="7.5" />
+        </svg>
+      );
+    case 'triangleShape':
+      return (
+        <svg {...common}>
+          <path d="M12 4.5L20 18.5H4L12 4.5Z" />
+        </svg>
+      );
+    case 'diamondShape':
+      return (
+        <svg {...common}>
+          <path d="M12 4L20 12L12 20L4 12L12 4Z" />
+        </svg>
+      );
+    case 'lineShape':
+      return (
+        <svg {...common}>
+          <path d="M5 19L19 5" />
+        </svg>
+      );
+    case 'arrowShape':
+      return (
+        <svg {...common}>
+          <path d="M5 19L19 5" />
+          <path d="M11 5H19V13" />
+        </svg>
+      );
+    case 'bold':
+      return (
+        <svg {...common} strokeWidth={2.3}>
+          <path d="M7 5H13C15 5 16.5 6.3 16.5 8.2C16.5 10 15.2 11.2 13.5 11.5C15.6 11.8 17 13.2 17 15.2C17 17.4 15.4 19 13 19H7V5Z" />
+          <path d="M7 11.7H13.2" />
+        </svg>
+      );
+    case 'shapeFillOn':
+      return (
+        <svg {...common}>
+          <rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" fillOpacity={0.35} />
+        </svg>
+      );
+    case 'shapeFillOff':
+      return (
+        <svg {...common}>
+          <rect x="5" y="5" width="14" height="14" rx="2" />
         </svg>
       );
     case 'eraser':

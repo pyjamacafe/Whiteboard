@@ -34,6 +34,8 @@ const ITEM_META: Record<ToolbarItemID, { title: string; icon: IconName; tool?: T
   pen: { title: 'Pen (P)', icon: 'pen', tool: 'pen' },
   sharpie: { title: 'Sharpie (S)', icon: 'sharpie', tool: 'sharpie' },
   fill: { title: 'Fill (F)', icon: 'fill', tool: 'fill' },
+  shape: { title: 'Shapes (R)', icon: 'shape', tool: 'shape' },
+  text: { title: 'Text (T)', icon: 'text', tool: 'text' },
   eraser: { title: 'Eraser (E)', icon: 'eraser', tool: 'eraser' },
   select: { title: 'Select (⇧S)', icon: 'select', tool: 'select' },
   scenes: { title: 'Scenes', icon: 'scenes' },
@@ -73,7 +75,11 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
     state.appSettings.toolbarDockEdge === 'left' || state.appSettings.toolbarDockEdge === 'right';
   const hasSelection = drawingStore.hasSelection;
   const isEmptyCanvas =
-    state.strokes.length === 0 && state.fills.length === 0 && state.placedImages.length === 0;
+    state.strokes.length === 0 &&
+    state.fills.length === 0 &&
+    state.placedImages.length === 0 &&
+    state.shapes.length === 0 &&
+    state.textLabels.length === 0;
 
   const getIcon = (id: ToolbarItemID): IconName => {
     if (id === 'darkMode') return state.appSettings.isDarkMode ? 'sun' : 'moon';
@@ -121,6 +127,14 @@ export const Toolbar: React.FC<ToolbarProps> = (props) => {
     }
     if (tool === 'fill') {
       const c = drawingStore.activeFillColor;
+      return { backgroundColor: colorToCss(c), color: contrastOnColor(c) };
+    }
+    if (tool === 'shape') {
+      const c = drawingStore.activeShapeColor;
+      return { backgroundColor: colorToCss(c), color: contrastOnColor(c) };
+    }
+    if (tool === 'text') {
+      const c = drawingStore.activeTextColor;
       return { backgroundColor: colorToCss(c), color: contrastOnColor(c) };
     }
     return undefined;

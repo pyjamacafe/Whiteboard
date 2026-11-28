@@ -8,7 +8,9 @@ export const SelectionPill: React.FC = () => {
   const hasSelection =
     state.selectedStrokeIds.length > 0 ||
     state.selectedFillIds.length > 0 ||
-    state.selectedImageIds.length > 0;
+    state.selectedImageIds.length > 0 ||
+    state.selectedShapeIds.length > 0 ||
+    state.selectedTextIds.length > 0;
 
   if (state.currentTool !== 'select' || !hasSelection) return null;
 
@@ -34,7 +36,10 @@ export const SelectionPill: React.FC = () => {
         <Icon name="duplicate" size={14} />
       </button>
 
-      {(state.selectedStrokeIds.length > 0 || state.selectedFillIds.length > 0) && (
+      {(state.selectedStrokeIds.length > 0 ||
+        state.selectedFillIds.length > 0 ||
+        state.selectedShapeIds.length > 0 ||
+        state.selectedTextIds.length > 0) && (
         <>
           <div className="pill-divider short" />
           <div className="sel-swatches">
@@ -101,7 +106,9 @@ export const QuickSelectionMenu: React.FC = () => {
   const hasSel =
     state.selectedStrokeIds.length > 0 ||
     state.selectedFillIds.length > 0 ||
-    state.selectedImageIds.length > 0;
+    state.selectedImageIds.length > 0 ||
+    state.selectedShapeIds.length > 0 ||
+    state.selectedTextIds.length > 0;
 
   return (
     <div
