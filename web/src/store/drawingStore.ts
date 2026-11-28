@@ -45,7 +45,6 @@ import {
   pointSegmentDistanceSquared,
   recognizeShape,
   resizedRect,
-  simplifyRDP,
   snapRotationAngle,
   SpatialHashGrid,
 } from '../engine/geometry';
@@ -829,7 +828,7 @@ export class DrawingStore {
 
     const finalStroke: Stroke = {
       ...stroke,
-      points: stroke.isCatmullRom ? simplifyRDP(stroke.points, 0.35) : stroke.points,
+      points: stroke.points.map((p) => ({ x: p.x, y: p.y })),
     };
     this.recordUndo();
     const nextStrokes = [...this.state.strokes, finalStroke];

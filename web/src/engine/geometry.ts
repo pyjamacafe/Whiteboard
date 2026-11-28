@@ -304,36 +304,129 @@ export function simplifyRDP(points: Point[], tolerance = 0.3): Point[] {
   return result;
 }
 
+/**
+ * Corner- & spacing-aware light pre-filtering followed by centripetal Catmull-Rom (α = 0.5)
+ * cubic Bézier control-point generation.
+ * - Pins start and end points exactly.
+ * - Preserves sharp corners/turns (> ~35° bend) so handwriting and arrows stay crisp.
+ * - Scales down smoothing on sparse/fast browser pointer samples to avoid shrinking strokes.
+ * - Uses centripetal parameterization + handle clamping to eliminate overshoot/bulging.
+ */
 export function smoothCatmullRom(points: Point[]): Point[] {
-  if (points.length < 3) return points;
-  const gaussWeights = [0.061, 0.242, 0.394, 0.242, 0.061];
-  const smoothed: Point[] = new Array(points.length);
-  for (let i = 0; i < points.length; i++) {
-    let sx = 0;
-    let sy = 0;
-    let sw = 0;
-    for (let w = -2; w <= 2; w++) {
-      const idx = i + w;
-      if (idx < 0 || idx >= points.length) continue;
-      const weight = gaussWeights[w + 2];
-      sx += points[idx].x * weight;
-      sy += points[idx].y * weight;
-      sw += weight;
+  const n = points.length;
+  if (n < 3) return points;
+
+  // 1. Light, corner-preserving, spacing-aware 3-point filter (endpoints pinned)
+  const smoothed: Point[] = new Array(n);
+  smoothed[0] = points[0];
+  smoothed[n - 1] = points[n - 1];
+
+  const cosSharp = Math.cos((35 * Math.PI) / 180); // ~0.819
+  const cosGentle = Math.cos((15 * Math.PI) / 180); // ~0.966
+
+  for (let i = 1; i < n - 1; i++) {
+    const prev = points[i - 1];
+    const curr = points[i];
+    const next = points[i + 1];
+    const v1x = curr.x - prev.x;
+    const v1y = curr.y - prev.y;
+    const v2x = next.x - curr.x;
+    const v2y = next.y - curr.y;
+    const d1 = Math.hypot(v1x, v1y);
+    const d2 = Math.hypot(v2x, v2y);
+
+    if (d1 < 1e-4 || d2 < 1e-4) {
+      smoothed[i] = curr;
+      continue;
     }
-    smoothed[i] = sw > 0 ? { x: sx / sw, y: sy / sw } : points[i];
+
+    const cosTheta = (v1x * v2x + v1y * v2y) / (d1 * d2);
+    // Corner preservation: 0 smoothing at sharp bends (>35°), smoothly ramping to 1 on gentle curves
+    const cornerFactor = Math.max(0, Math.min(1, (cosTheta - cosSharp) / (cosGentle - cosSharp)));
+    // Spacing awareness: full light smoothing on dense points (<=6pt), fading on sparse fast points
+    const avgDist = (d1 + d2) * 0.5;
+    const spacingFactor = Math.max(0.12, Math.min(1, 1 - (avgDist - 6) / 14));
+    const w = 0.22 * cornerFactor * spacingFactor;
+
+    if (w <= 1e-4) {
+      smoothed[i] = curr;
+    } else {
+      const centerW = 1 - 2 * w;
+      smoothed[i] = {
+        x: prev.x * w + curr.x * centerW + next.x * w,
+        y: prev.y * w + curr.y * centerW + next.y * w,
+      };
+    }
   }
 
+  // 2. Centripetal Catmull-Rom (α = 0.5) to cubic Bézier control points with corner-tangent preservation
   const result: Point[] = [smoothed[0]];
-  for (let i = 0; i < smoothed.length - 1; i++) {
-    const p0 = i > 0 ? smoothed[i - 1] : smoothed[i];
+  const cornerTangentCos = Math.cos((45 * Math.PI) / 180); // ~0.707
+
+  const isSharpVertex = (idx: number): boolean => {
+    if (idx <= 0 || idx >= n - 1) return false;
+    const a = smoothed[idx - 1];
+    const b = smoothed[idx];
+    const c = smoothed[idx + 1];
+    const v1x = b.x - a.x;
+    const v1y = b.y - a.y;
+    const v2x = c.x - b.x;
+    const v2y = c.y - b.y;
+    const l1 = Math.hypot(v1x, v1y);
+    const l2 = Math.hypot(v2x, v2y);
+    if (l1 < 1e-4 || l2 < 1e-4) return false;
+    return (v1x * v2x + v1y * v2y) / (l1 * l2) < cornerTangentCos;
+  };
+
+  const clampHandle = (anchor: Point, handle: Point, maxLen: number): Point => {
+    const dx = handle.x - anchor.x;
+    const dy = handle.y - anchor.y;
+    const len = Math.hypot(dx, dy);
+    if (len <= maxLen || len < 1e-6) return handle;
+    const s = maxLen / len;
+    return { x: anchor.x + dx * s, y: anchor.y + dy * s };
+  };
+
+  for (let i = 0; i < n - 1; i++) {
     const p1 = smoothed[i];
     const p2 = smoothed[i + 1];
-    const p3 = i + 2 < smoothed.length ? smoothed[i + 2] : smoothed[i + 1];
-    result.push(
-      { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 },
-      { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 },
-      p2
-    );
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const d12 = Math.max(Math.sqrt(segLen), 1e-4);
+    const maxHandleLen = segLen * 0.35;
+
+    let cp1: Point;
+    if (i === 0 || isSharpVertex(i)) {
+      cp1 = { x: p1.x + (p2.x - p1.x) / 3, y: p1.y + (p2.y - p1.y) / 3 };
+    } else {
+      const p0 = smoothed[i - 1];
+      const d01 = Math.max(Math.sqrt(Math.hypot(p1.x - p0.x, p1.y - p0.y)), 1e-4);
+      const denom = d01 + d12;
+      const t1x = ((p1.x - p0.x) / d01) * (d12 / denom) + ((p2.x - p1.x) / d12) * (d01 / denom);
+      const t1y = ((p1.y - p0.y) / d01) * (d12 / denom) + ((p2.y - p1.y) / d12) * (d01 / denom);
+      cp1 = clampHandle(
+        p1,
+        { x: p1.x + (t1x * d12) / 3, y: p1.y + (t1y * d12) / 3 },
+        maxHandleLen
+      );
+    }
+
+    let cp2: Point;
+    if (i + 2 >= n || isSharpVertex(i + 1)) {
+      cp2 = { x: p2.x - (p2.x - p1.x) / 3, y: p2.y - (p2.y - p1.y) / 3 };
+    } else {
+      const p3 = smoothed[i + 2];
+      const d23 = Math.max(Math.sqrt(Math.hypot(p3.x - p2.x, p3.y - p2.y)), 1e-4);
+      const denom = d12 + d23;
+      const t2x = ((p2.x - p1.x) / d12) * (d23 / denom) + ((p3.x - p2.x) / d23) * (d12 / denom);
+      const t2y = ((p2.y - p1.y) / d12) * (d23 / denom) + ((p3.y - p2.y) / d23) * (d12 / denom);
+      cp2 = clampHandle(
+        p2,
+        { x: p2.x - (t2x * d12) / 3, y: p2.y - (t2y * d12) / 3 },
+        maxHandleLen
+      );
+    }
+
+    result.push(cp1, cp2, p2);
   }
   return result;
 }

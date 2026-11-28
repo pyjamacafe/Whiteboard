@@ -53,7 +53,7 @@ describe('GeometryEngine', () => {
     expect(simplified[1]).toEqual({ x: 100, y: 0 });
   });
 
-  it('produces Catmull-Rom cubic control points', () => {
+  it('produces Catmull-Rom cubic control points and preserves sharp corners & endpoints', () => {
     const pts = [
       { x: 0, y: 0 },
       { x: 10, y: 5 },
@@ -62,6 +62,19 @@ describe('GeometryEngine', () => {
     ];
     const smooth = smoothCatmullRom(pts);
     expect(smooth.length).toBe(1 + (pts.length - 1) * 3);
+    expect(smooth[0]).toEqual(pts[0]);
+    expect(smooth[smooth.length - 1]).toEqual(pts[pts.length - 1]);
+
+    // Crisp 90-degree L-corner must not be melted/rounded off
+    const cornerPts = [
+      { x: 0, y: 0 },
+      { x: 50, y: 0 },
+      { x: 50, y: 50 },
+    ];
+    const cornerSmooth = smoothCatmullRom(cornerPts);
+    // Vertex index 1 sits at result[3]
+    expect(cornerSmooth[3].x).toBeCloseTo(50, 4);
+    expect(cornerSmooth[3].y).toBeCloseTo(0, 4);
   });
 
   it('supports SpatialHashGrid incremental sync and query', () => {
