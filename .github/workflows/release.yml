@@ -24,17 +24,19 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Show Xcode version
-        run: xcodebuild -version
+      - name: Show Xcode version and SDKs
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
 
-      - name: Build Tissue Box (Release, macOS arm64)
+      - name: Build Tissue Box (Release, macOS 27 arm64)
         run: |
           xcodebuild \
             -project Whiteboard.xcodeproj \
             -scheme Whiteboard \
             -configuration Release \
             -destination "generic/platform=macOS" \
-            -derivedDataPath build/DerivedData \
+            -derivedDataPath build/DerivedData-macOS \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=NO \
             MACOSX_DEPLOYMENT_TARGET=27.0 \
@@ -42,29 +44,51 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             clean build
 
-      - name: Package macOS DMG, ZIP, and checksums
+      - name: Build Tissue Box (Release, iOS 27 arm64)
         run: |
-          APP_PATH="build/DerivedData/Build/Products/Release/Tissue Box.app"
+          xcodebuild \
+            -project Whiteboard.xcodeproj \
+            -scheme Whiteboard \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -derivedDataPath build/DerivedData-iOS \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=27.0 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+
+      - name: Package macOS DMG/ZIP, iOS IPA, and checksums
+        run: |
+          MAC_APP_PATH="build/DerivedData-macOS/Build/Products/Release/Tissue Box.app"
+          IOS_APP_PATH="build/DerivedData-iOS/Build/Products/Release-iphoneos/Tissue Box.app"
+
           if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
             RAW_TAG="${{ github.event.release.tag_name }}"
             VERSION="${RAW_TAG#v}"
           elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist" 2>/dev/null || echo '1.0')"
+            SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MAC_APP_PATH/Contents/Info.plist" 2>/dev/null || echo '1.0')"
             VERSION="${SHORT_VER}-${GITHUB_SHA::7}"
           fi
 
           DIST_DIR="build/dist"
           DMG_STAGE="build/dmg-stage"
+          IPA_STAGE="build/ipa-stage"
 
-          mkdir -p "$DIST_DIR" "$DMG_STAGE"
-          cp -R "$APP_PATH" "$DMG_STAGE/"
+          mkdir -p "$DIST_DIR" "$DMG_STAGE" "$IPA_STAGE/Payload"
+
+          # macOS DMG & ZIP
+          cp -R "$MAC_APP_PATH" "$DMG_STAGE/"
           ln -s /Applications "$DMG_STAGE/Applications"
           cp LICENSE "$DMG_STAGE/"
 
           DMG_NAME="TissueBox-${VERSION}-macOS-arm64.dmg"
           ZIP_NAME="TissueBox-${VERSION}-macOS-arm64.zip"
+          IPA_NAME="TissueBox-${VERSION}-iOS-arm64.ipa"
 
           hdiutil create \
             -volname "Tissue Box ${VERSION}" \
@@ -72,9 +96,14 @@ jobs:
             -ov -format UDZO \
             "$DIST_DIR/$DMG_NAME"
 
-          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$DIST_DIR/$ZIP_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "$MAC_APP_PATH" "$DIST_DIR/$ZIP_NAME"
 
-          (cd "$DIST_DIR" && shasum -a 256 "$DMG_NAME" "$ZIP_NAME" > SHA256SUMS.txt)
+          # iOS / iPadOS unsigned IPA
+          DIST_ABS="$(cd "$DIST_DIR" && pwd)"
+          cp -R "$IOS_APP_PATH" "$IPA_STAGE/Payload/"
+          (cd "$IPA_STAGE" && zip -qry "$DIST_ABS/$IPA_NAME" Payload)
+
+          (cd "$DIST_DIR" && shasum -a 256 "$DMG_NAME" "$ZIP_NAME" "$IPA_NAME" > SHA256SUMS.txt)
 
       - name: Upload assets to GitHub Release
         if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
@@ -83,8 +112,9 @@ jobs:
           tag_name: ${{ github.event.release.tag_name || github.ref_name }}
           generate_release_notes: true
           body: |
-            ## Installation (macOS 27 Golden Gate+, Apple Silicon)
+            ## Installation
 
+            ### macOS 27+ (Apple Silicon)
             1. Download the `.dmg` (or `.zip`) below and copy **Tissue Box.app** to `/Applications`.
             2. Because this build is ad-hoc signed (not notarized with an Apple Developer ID), macOS Gatekeeper may block it on first launch. To allow it, either:
                - Run:
@@ -92,14 +122,19 @@ jobs:
                  xattr -dr com.apple.quarantine "/Applications/Tissue Box.app"
                  ```
                - Or open **System Settings → Privacy & Security** and click **Open Anyway**.
+
+            ### iOS / iPadOS 27+
+            1. Download the unsigned `.ipa` below.
+            2. Install it onto your iPad or iPhone using Xcode (**Window → Devices and Simulators**), AltStore, SideStore, or Sideloadly (which re-signs the `.ipa` with your Apple ID).
           files: |
             build/dist/*.dmg
             build/dist/*.zip
+            build/dist/*.ipa
             build/dist/SHA256SUMS.txt
 
       - name: Upload Workflow Artifacts (manual runs)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: TissueBox-macOS-arm64
+          name: TissueBox-macOS-iOS-27
           path: build/dist/*
