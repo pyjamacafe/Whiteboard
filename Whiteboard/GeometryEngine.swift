@@ -325,7 +325,7 @@ nonisolated enum GeometryEngine {
         }
 
         for img in images {
-            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            let rect = img.rotatedBoundingBox()
             guard rect.width > 0, rect.height > 0 else { continue }
             minX = min(minX, rect.minX)
             maxX = max(maxX, rect.maxX)
@@ -616,6 +616,54 @@ nonisolated enum GeometryEngine {
         guard newRect.width >= minSize, newRect.height >= minSize,
               newRect.origin.x.isFinite, newRect.origin.y.isFinite else { return nil }
         return newRect
+    }
+
+    // MARK: - Rotation Helpers
+
+    /// Normalizes an angle in radians to the half-open interval `(-π, π]`.
+    static func normalizeAngle(_ radians: CGFloat) -> CGFloat {
+        var a = radians.truncatingRemainder(dividingBy: 2 * .pi)
+        if a <= -.pi { a += 2 * .pi }
+        if a > .pi { a -= 2 * .pi }
+        if abs(a) < 1e-6 { return 0 }
+        return a
+    }
+
+    /// Rotates a point around `pivot` by `radians` (clockwise in y-down coordinates).
+    static func rotatePoint(_ point: CGPoint, around pivot: CGPoint, by radians: CGFloat) -> CGPoint {
+        guard radians != 0 else { return point }
+        let dx = point.x - pivot.x
+        let dy = point.y - pivot.y
+        let cosA = cos(radians)
+        let sinA = sin(radians)
+        return CGPoint(
+            x: pivot.x + dx * cosA - dy * sinA,
+            y: pivot.y + dx * sinA + dy * cosA
+        )
+    }
+
+    /// Snaps an angle (radians):
+    /// - When `snapToStep` is true, snaps to nearest `stepRadians` (default 15°).
+    /// - Otherwise applies a light magnetic snap when within `cardinalThreshold` (default 4°)
+    ///   of cardinal angles (0°, ±90°, 180°).
+    static func snapRotationAngle(
+        _ radians: CGFloat,
+        snapToStep: Bool,
+        stepRadians: CGFloat = .pi / 12,
+        cardinalThreshold: CGFloat = 4 * .pi / 180
+    ) -> (angle: CGFloat, snapped: Bool) {
+        let normalized = normalizeAngle(radians)
+        if snapToStep, stepRadians > 0 {
+            let stepped = (normalized / stepRadians).rounded() * stepRadians
+            return (normalizeAngle(stepped), true)
+        }
+        let cardinals: [CGFloat] = [-.pi, -.pi / 2, 0, .pi / 2, .pi]
+        for c in cardinals {
+            if abs(normalized - c) <= cardinalThreshold {
+                return (normalizeAngle(c), true)
+            }
+        }
+        return (normalized, false)
     }
 
     // MARK: - Shape Recognition (Draw & Hold)

@@ -76,9 +76,12 @@ enum StrokeRenderer {
         guard let cgImage else { return }
         ctx.saveGState()
         ctx.setBlendMode(.normal)
-        ctx.translateBy(x: rect.minX, y: rect.minY + rect.height)
+        ctx.translateBy(x: rect.midX, y: rect.midY)
+        if img.rotation != 0 {
+            ctx.rotate(by: img.cgRotation)
+        }
         ctx.scaleBy(x: 1, y: -1)
-        ctx.draw(cgImage, in: CGRect(origin: .zero, size: rect.size))
+        ctx.draw(cgImage, in: CGRect(x: -rect.width / 2, y: -rect.height / 2, width: rect.width, height: rect.height))
         ctx.restoreGState()
     }
 

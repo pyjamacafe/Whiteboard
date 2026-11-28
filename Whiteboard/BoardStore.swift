@@ -60,6 +60,26 @@ private nonisolated struct StoredImageRef: Codable, Sendable {
     let id: UUID
     let position: CodablePoint
     let size: CodablePoint
+    let rotation: Double
+
+    enum CodingKeys: String, CodingKey {
+        case id, position, size, rotation
+    }
+
+    init(id: UUID, position: CodablePoint, size: CodablePoint, rotation: Double = 0) {
+        self.id = id
+        self.position = position
+        self.size = size
+        self.rotation = rotation
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        position = try c.decode(CodablePoint.self, forKey: .position)
+        size = try c.decode(CodablePoint.self, forKey: .size)
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+    }
 }
 
 private nonisolated struct BinaryBoardData: Codable, Sendable {
@@ -287,7 +307,8 @@ nonisolated final class BoardStore: @unchecked Sendable {
                         id: ref.id,
                         position: ref.position.cgPoint,
                         size: CGSize(width: ref.size.x, height: ref.size.y),
-                        imageData: imgData
+                        imageData: imgData,
+                        rotation: ref.rotation
                     ))
                 }
             }
@@ -307,7 +328,7 @@ nonisolated final class BoardStore: @unchecked Sendable {
             }
         }
         let refs = saveData.placedImages.map {
-            StoredImageRef(id: $0.id, position: $0.position, size: $0.size)
+            StoredImageRef(id: $0.id, position: $0.position, size: $0.size, rotation: $0.rotation)
         }
         let payload = BinaryBoardData(version: 4, strokes: saveData.strokes, imageRefs: refs, fills: saveData.fills, scenes: saveData.scenes)
         let encoder = PropertyListEncoder()

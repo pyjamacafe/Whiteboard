@@ -30,17 +30,17 @@ struct HelpView: View {
                         ToolGuideRow(icon: "pencil.tip", color: .blue, title: "Pen", key: "P",
                                      detail: "Smooth vector strokes with 8 theme-adaptive colors and adjustable width.")
                         Divider().opacity(0.4)
-                        ToolGuideRow(icon: "pencil", color: .orange, title: "Sharpie", key: "S",
+                        ToolGuideRow(icon: "highlighter", color: .orange, title: "Sharpie", key: "S",
                                      detail: "Bold two-pass glow/core stroke with its own independent color presets.")
                         Divider().opacity(0.4)
-                        ToolGuideRow(icon: "drop.fill", color: .teal, title: "Fill", key: "F",
+                        ToolGuideRow(icon: "paint.bucket.classic", color: .teal, title: "Fill", key: "F",
                                      detail: "Tap inside any closed shape to fill it cleanly without bleeding. Tap the swatch to cycle opacity (25%–100%), or use the icons to cycle gap-closing (Strict / Auto / Wide) and Replace vs. Blend mode.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "eraser", color: .pink, title: "Eraser", key: "E",
                                      detail: "Switch between Full Stroke and Partial erase, tap the layer icon (or press 0–3) to target All, Pen, Sharpie, or Fill.")
                         Divider().opacity(0.4)
-                        ToolGuideRow(icon: "cursorarrow.click", color: .purple, title: "Select", key: "⇧S",
-                                     detail: "Draw a lasso to select strokes, fills, and images. Drag to move, double-tap for Copy/Paste/Delete.")
+                        ToolGuideRow(icon: "lasso", color: .purple, title: "Select", key: "⇧S",
+                                     detail: "Tap any pen, sharpie, fill, or image to select it, or draw a lasso around multiple items. Tap free space or press Esc to unselect; drag to move, drag the top handle to rotate (hold ⇧ for 15° steps), or double-tap for Copy/Paste/Delete.")
                         Divider().opacity(0.4)
                         ToolGuideRow(icon: "rectangle.stack", color: .indigo, title: "Scenes", key: "⇧X",
                                      detail: "Bookmark regions of your tissue to jump between views like slides. Use ‹ / › (or , / .) to navigate; swipe left to delete, swipe right to rename, or hold and drag to reorder.")
@@ -58,6 +58,7 @@ struct HelpView: View {
                                 ("Undo / Redo", "⌘Z / ⌘⇧Z"),
                                 ("Copy / Paste", "⌘C / ⌘V"),
                                 ("Delete selected", "⌫"),
+                                ("Clear selection", "Esc"),
                                 ("Import image", "⌘I"),
                                 ("Resize selected image", "⌘+ / ⌘-"),
                             ])

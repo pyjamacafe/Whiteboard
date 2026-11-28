@@ -813,4 +813,161 @@ final class WhiteboardTests: XCTestCase {
         XCTAssertNotNil(pdf)
         XCTAssertGreaterThan(pdf?.count ?? 0, 200)
     }
+
+    func testRotationAngleSnappingCardinalAndStep() {
+        // Light cardinal snap within 4° of 0°, 90°, -90°, 180°
+        let near90 = (90.0 - 2.5) * .pi / 180.0
+        let snap90 = GeometryEngine.snapRotationAngle(near90, snapToStep: false)
+        XCTAssertTrue(snap90.snapped)
+        XCTAssertEqual(snap90.angle, .pi / 2, accuracy: 1e-5)
+
+        let nearZero = (3.0) * .pi / 180.0
+        let snap0 = GeometryEngine.snapRotationAngle(nearZero, snapToStep: false)
+        XCTAssertTrue(snap0.snapped)
+        XCTAssertEqual(snap0.angle, 0, accuracy: 1e-5)
+
+        // Outside cardinal threshold should not snap when Shift is not held
+        let freeAngle = 37.0 * .pi / 180.0
+        let unsnapped = GeometryEngine.snapRotationAngle(freeAngle, snapToStep: false)
+        XCTAssertFalse(unsnapped.snapped)
+        XCTAssertEqual(unsnapped.angle, freeAngle, accuracy: 1e-5)
+
+        // Shift-snap locks to nearest 15°
+        let stepSnapped = GeometryEngine.snapRotationAngle(37.0 * .pi / 180.0, snapToStep: true)
+        XCTAssertTrue(stepSnapped.snapped)
+        XCTAssertEqual(stepSnapped.angle, 30.0 * .pi / 180.0, accuracy: 1e-5)
+    }
+
+    func testRotationHandleDragAndResetForStrokesAndPlacedImages() throws {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.currentTool = .select
+
+        // 1) Stroke drag-rotation via handle + single undo + reset
+        let s = Stroke(points: [CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 0)], color: .black, lineWidth: 2, isEraser: false)
+        model.strokes = [s]
+        model.selectedStrokeIds = [s.id]
+        XCTAssertFalse(model.canResetSelectionRotation)
+
+        let geom = try XCTUnwrap(model.rotationHandleGeometry(scale: 1.0))
+        XCTAssertTrue(model.hitTestRotateHandle(geom.handleCenter, scale: 1.0))
+        XCTAssertFalse(model.hitTestRotateHandle(CGPoint(x: 500, y: 500), scale: 1.0))
+
+        // Drag handle 90° clockwise (from north (50, -28) to east (50 + 28, 0))
+        model.beginRotate(at: geom.handleCenter, scale: 1.0)
+        XCTAssertTrue(model.isRotating)
+        model.updateRotate(to: CGPoint(x: geom.pivot.x + 15, y: geom.pivot.y - 25), snapTo15Degrees: false)
+        model.updateRotate(to: CGPoint(x: geom.pivot.x + 28, y: geom.pivot.y), snapTo15Degrees: false)
+        model.commitRotate()
+
+        XCTAssertFalse(model.isRotating)
+        XCTAssertTrue(model.canResetSelectionRotation)
+        XCTAssertEqual(model.selectionRotationAngle, .pi / 2, accuracy: 1e-4)
+        XCTAssertEqual(model.activeRotationLabel, "90°")
+        // Horizontal segment (0,0)-(100,0) rotated +90° around (50,0) -> vertical (50,-50)-(50,50)
+        XCTAssertEqual(model.strokes[0].points[0].x, 50, accuracy: 0.1)
+        XCTAssertEqual(model.strokes[0].points[0].y, -50, accuracy: 0.1)
+        XCTAssertEqual(model.strokes[0].points[1].x, 50, accuracy: 0.1)
+        XCTAssertEqual(model.strokes[0].points[1].y, 50, accuracy: 0.1)
+
+        // Reset Rotation brings stroke back to horizontal (0,0)-(100,0)
+        model.resetSelectionRotation()
+        XCTAssertFalse(model.canResetSelectionRotation)
+        XCTAssertEqual(model.strokes[0].points[0].x, 0, accuracy: 0.1)
+        XCTAssertEqual(model.strokes[0].points[0].y, 0, accuracy: 0.1)
+        XCTAssertEqual(model.strokes[0].points[1].x, 100, accuracy: 0.1)
+        XCTAssertEqual(model.strokes[0].points[1].y, 0, accuracy: 0.1)
+
+        // Undo reverts Reset Rotation (back to 90°), second undo reverts the whole handle drag in 1 step
+        model.undo()
+        XCTAssertEqual(model.strokes[0].points[0].x, 50, accuracy: 0.1)
+        model.undo()
+        XCTAssertEqual(model.strokes[0].points[0].x, 0, accuracy: 0.1)
+
+        // 2) PlacedImage rotation via handle, persistence across re-select, rotated corner hit-test, and BoardStore round-trip
+        model.clearSelection()
+        let imgData = makeTestPNGData(width: 80, height: 40, opaque: true)
+        let img = PlacedImage(position: CGPoint(x: 100, y: 100), size: CGSize(width: 80, height: 40), imageData: imgData)
+        model.placedImages = [img]
+        model.selectedImageIds = [img.id]
+
+        let imgGeom = try XCTUnwrap(model.rotationHandleGeometry(scale: 1.0))
+        model.beginRotate(at: imgGeom.handleCenter, scale: 1.0)
+        // Drag 45° clockwise with Shift-snap
+        let targetPt = CGPoint(x: imgGeom.pivot.x + 40, y: imgGeom.pivot.y - 40)
+        model.updateRotate(to: targetPt, snapTo15Degrees: true)
+        model.commitRotate()
+
+        XCTAssertEqual(model.placedImages[0].rotation, .pi / 4, accuracy: 1e-4)
+        // Rotated corner hit-test should hit the rotated top-left corner
+        let rotatedCorners = model.placedImages[0].rotatedCorners()
+        let cornerHit = model.hitTestResizeHandle(rotatedCorners[0], scale: 1.0)
+        XCTAssertEqual(cornerHit?.imgId, img.id)
+        XCTAssertEqual(cornerHit?.corner, 0)
+
+        // Persist through BoardStore binary plist and verify rotation survives
+        try store.saveBoardSync(id: "rot_board", saveData: SaveData(strokes: [], placedImages: model.placedImages))
+        let reloaded = try store.loadBoard(id: "rot_board")
+        XCTAssertEqual(reloaded.placedImages.count, 1)
+        XCTAssertEqual(reloaded.placedImages[0].rotation, .pi / 4, accuracy: 1e-4)
+
+        // Deselect and re-select: Reset Rotation should STILL be enabled for rotated image
+        model.clearSelection()
+        model.selectedImageIds = [img.id]
+        XCTAssertTrue(model.canResetSelectionRotation)
+        XCTAssertEqual(model.activeRotationLabel, "45°")
+        model.resetSelectionRotation()
+        XCTAssertEqual(model.placedImages[0].rotation, 0, accuracy: 1e-5)
+        XCTAssertFalse(model.canResetSelectionRotation)
+    }
+
+    func testLassoTapToSelectElementsAndClearSelection() {
+        let model = DrawingModel(store: store, userDefaults: testDefaults)
+        model.currentTool = .select
+
+        let pen = Stroke(points: [CGPoint(x: 0, y: 0), CGPoint(x: 80, y: 0)], color: .black, lineWidth: 2, isEraser: false, isSharpie: false)
+        let sharpie = Stroke(points: [CGPoint(x: 0, y: 100), CGPoint(x: 80, y: 100)], color: .orange, lineWidth: 3, isEraser: false, isSharpie: true)
+        let fill = FillShape(
+            contours: [[CGPoint(x: 200, y: 0), CGPoint(x: 280, y: 0), CGPoint(x: 280, y: 80), CGPoint(x: 200, y: 80)]],
+            color: .blue,
+            opacity: 0.5
+        )
+        model.strokes = [pen, sharpie]
+        model.fills = [fill]
+
+        // Tap on pen stroke via beginLasso + endLasso (no drag) selects just pen
+        model.beginLasso(at: CGPoint(x: 40, y: 2))
+        model.endLasso(scale: 1.0)
+        XCTAssertEqual(model.selectedStrokeIds, [pen.id])
+        XCTAssertTrue(model.selectedFillIds.isEmpty)
+        XCTAssertFalse(model.selectionBoundary.isEmpty)
+
+        // Tap on sharpie stroke selects just sharpie
+        XCTAssertTrue(model.selectElement(at: CGPoint(x: 40, y: 100), scale: 1.0))
+        XCTAssertEqual(model.selectedStrokeIds, [sharpie.id])
+        XCTAssertFalse(model.selectionBoundary.isEmpty)
+
+        // Tap inside fill selects just fill
+        XCTAssertTrue(model.selectElement(at: CGPoint(x: 240, y: 40), scale: 1.0))
+        XCTAssertEqual(model.selectedFillIds, [fill.id])
+        XCTAssertTrue(model.selectedStrokeIds.isEmpty)
+        XCTAssertFalse(model.selectionBoundary.isEmpty)
+
+        // Escape / clearLassoSelection clears active selection while staying in .select tool
+        model.clearLassoSelection()
+        XCTAssertEqual(model.currentTool, .select)
+        XCTAssertFalse(model.hasAnySelectionOrLasso)
+
+        // Tap in free area selects nothing
+        model.beginLasso(at: CGPoint(x: 500, y: 500))
+        model.endLasso(scale: 1.0)
+        XCTAssertFalse(model.hasAnySelectionOrLasso)
+
+        // Dragging a lasso around empty space leaves no stale boundary
+        model.beginLasso(at: CGPoint(x: 450, y: 450))
+        model.addLassoPoint(CGPoint(x: 550, y: 450))
+        model.addLassoPoint(CGPoint(x: 550, y: 550))
+        model.addLassoPoint(CGPoint(x: 450, y: 550))
+        model.endLasso(scale: 1.0)
+        XCTAssertTrue(model.selectionBoundary.isEmpty)
+    }
 }

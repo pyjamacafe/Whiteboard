@@ -74,6 +74,9 @@ struct CanvasView: UIViewRepresentable {
         let _ = model.selectionBoundary.count
         let _ = model.selectionLasso.count
         let _ = model.selectedImageIds.count
+        let _ = model.isRotating
+        let _ = model.selectionRotationAngle
+        let _ = model.isRotationSnapped
         let _ = model.needsRecenter
         let _ = model.needsFitToContent
         let _ = model.needsResetZoom
@@ -222,7 +225,7 @@ class CommittedLayerView: UIView {
         ctx.scaleBy(x: scale, y: scale)
 
         for img in model.placedImages {
-            let imgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            let imgRect = img.rotatedBoundingBox()
             guard imgRect.intersects(visibleCanvasRect) else { continue }
             let cached: UIImage? = {
                 if let hit = model.imageCache[img.id] { return hit }
@@ -316,26 +319,128 @@ class LiveOverlayView: UIView {
         }
 
         for img in model.placedImages where model.selectedImageIds.contains(img.id) {
-            let imgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
+            let corners = img.rotatedCorners()
+            guard corners.count == 4 else { continue }
             ctx.saveGState()
             ctx.setStrokeColor(UIColor.systemBlue.cgColor)
             ctx.setLineWidth(2 / scale)
             ctx.setLineDash(phase: dashPhase / scale, lengths: [8 / scale, 5 / scale])
-            ctx.stroke(imgRect)
+            ctx.beginPath()
+            ctx.move(to: corners[0])
+            ctx.addLine(to: corners[1])
+            ctx.addLine(to: corners[2])
+            ctx.addLine(to: corners[3])
+            ctx.closePath()
+            ctx.strokePath()
+
+            ctx.setLineDash(phase: 0, lengths: [])
             let handleSize: CGFloat = 10 / scale
-            for corner in [
-                imgRect.origin,
-                CGPoint(x: imgRect.maxX, y: imgRect.minY),
-                CGPoint(x: imgRect.maxX, y: imgRect.maxY),
-                CGPoint(x: imgRect.minX, y: imgRect.maxY),
-            ] {
+            for corner in corners {
                 let handle = CGRect(x: corner.x - handleSize / 2, y: corner.y - handleSize / 2, width: handleSize, height: handleSize)
                 ctx.setFillColor(UIColor.systemBlue.cgColor)
-                ctx.fill(handle)
+                ctx.fillEllipse(in: handle)
+                ctx.setStrokeColor(UIColor.white.cgColor)
+                ctx.setLineWidth(1.5 / scale)
+                ctx.strokeEllipse(in: handle)
             }
             ctx.restoreGState()
         }
 
+        if model.currentTool == .select, let geom = model.rotationHandleGeometry(scale: scale) {
+            drawRotationHandle(geom, model: model, in: ctx)
+        }
+
+        ctx.restoreGState()
+    }
+
+    private func drawRotationHandle(_ geom: DrawingModel.RotationHandleGeometry, model: DrawingModel, in ctx: CGContext) {
+        let accent: UIColor = (model.isRotating && model.isRotationSnapped) ? .systemOrange : .systemBlue
+
+        ctx.saveGState()
+        // Stem connecting selection edge to rotation knob
+        ctx.setStrokeColor(accent.cgColor)
+        ctx.setLineWidth(1.6 / scale)
+        ctx.setLineCap(.round)
+        ctx.beginPath()
+        ctx.move(to: geom.stemStart)
+        ctx.addLine(to: geom.handleCenter)
+        ctx.strokePath()
+
+        // Circular rotation knob
+        let radius: CGFloat = (model.isRotating ? 10.5 : 9.0) / scale
+        let knobRect = CGRect(
+            x: geom.handleCenter.x - radius,
+            y: geom.handleCenter.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        let knobFill: UIColor = model.isRotating
+            ? accent
+            : (model.appSettings.isDarkMode ? UIColor(white: 0.14, alpha: 1) : .white)
+        ctx.setFillColor(knobFill.cgColor)
+        ctx.fillEllipse(in: knobRect)
+        ctx.setStrokeColor(accent.cgColor)
+        ctx.setLineWidth(1.8 / scale)
+        ctx.strokeEllipse(in: knobRect)
+
+        // Small circular arrow glyph inside the knob
+        let iconColor: UIColor = model.isRotating ? .white : accent
+        let arcR = radius * 0.46
+        ctx.setStrokeColor(iconColor.cgColor)
+        ctx.setLineWidth(1.4 / scale)
+        ctx.beginPath()
+        ctx.addArc(center: geom.handleCenter, radius: arcR, startAngle: -.pi * 0.75, endAngle: .pi * 0.55, clockwise: false)
+        ctx.strokePath()
+        let tipAngle: CGFloat = .pi * 0.55
+        let tip = CGPoint(
+            x: geom.handleCenter.x + cos(tipAngle) * arcR,
+            y: geom.handleCenter.y + sin(tipAngle) * arcR
+        )
+        let arrowLen = 2.8 / scale
+        ctx.beginPath()
+        ctx.move(to: CGPoint(x: tip.x + arrowLen, y: tip.y - arrowLen * 0.6))
+        ctx.addLine(to: tip)
+        ctx.addLine(to: CGPoint(x: tip.x + arrowLen * 0.4, y: tip.y + arrowLen))
+        ctx.strokePath()
+
+        // Live angle readout pill while actively rotating
+        if model.isRotating {
+            let dx = geom.handleCenter.x - geom.stemStart.x
+            let dy = geom.handleCenter.y - geom.stemStart.y
+            let len = max(hypot(dx, dy), 0.001)
+            let ux = dx / len
+            let uy = dy / len
+            let badgeCanvas = CGPoint(
+                x: geom.handleCenter.x + ux * (26 / scale),
+                y: geom.handleCenter.y + uy * (26 / scale)
+            )
+            ctx.saveGState()
+            ctx.translateBy(x: badgeCanvas.x, y: badgeCanvas.y)
+            ctx.scaleBy(x: 1 / scale, y: 1 / scale)
+            let text = model.activeRotationLabel as NSString
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: UIColor.white,
+            ]
+            let textSize = text.size(withAttributes: attrs)
+            let padX: CGFloat = 7
+            let padY: CGFloat = 3
+            let pillRect = CGRect(
+                x: -(textSize.width / 2 + padX),
+                y: -(textSize.height / 2 + padY),
+                width: textSize.width + padX * 2,
+                height: textSize.height + padY * 2
+            )
+            let pillPath = UIBezierPath(roundedRect: pillRect, cornerRadius: pillRect.height / 2)
+            let pillColor: UIColor = model.isRotationSnapped ? .systemOrange : UIColor.black.withAlphaComponent(0.78)
+            ctx.setFillColor(pillColor.cgColor)
+            ctx.addPath(pillPath.cgPath)
+            ctx.fillPath()
+            UIGraphicsPushContext(ctx)
+            text.draw(at: CGPoint(x: -textSize.width / 2, y: -textSize.height / 2), withAttributes: attrs)
+            UIGraphicsPopContext()
+            ctx.restoreGState()
+        }
         ctx.restoreGState()
     }
 
@@ -800,16 +905,14 @@ class DrawingCanvasView: UIView {
 
         if model.currentTool == .select {
             let cp = toCanvas(touch.location(in: self))
-            if let imgId = model.hitTestImage(cp), !model.selectedImageIds.contains(imgId) {
-                model.selectedStrokeIds.removeAll()
-                model.selectedImageIds = [imgId]
-                model.selectionBoundary.removeAll()
-                syncDashAnimationState()
-                liveOverlay.setNeedsDisplay()
-                return
-            }
-            if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
-                if model.hitTestResizeHandle(cp) != nil {
+            let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty
+            if hasSelection {
+                if model.hitTestRotateHandle(cp, scale: scale) {
+                    model.beginRotate(at: cp, scale: scale)
+                    liveOverlay.setNeedsDisplay()
+                    return
+                }
+                if model.hitTestResizeHandle(cp, scale: scale) != nil {
                     let now = Date()
                     if now.timeIntervalSince(Self.lastSelectTap) < 0.4 {
                         Self.lastSelectTap = .distantPast
@@ -820,7 +923,7 @@ class DrawingCanvasView: UIView {
                         return
                     }
                     Self.lastSelectTap = now
-                    model.beginMove(at: cp)
+                    model.beginMove(at: cp, scale: scale)
                     liveOverlay.setNeedsDisplay()
                     return
                 }
@@ -836,19 +939,17 @@ class DrawingCanvasView: UIView {
                         return
                     }
                     Self.lastSelectTap = now
-                    model.beginMove(at: cp)
+                    model.beginMove(at: cp, scale: scale)
                 } else {
-                    model.selectedStrokeIds.removeAll()
-                    model.selectedImageIds.removeAll()
-                    model.selectedFillIds.removeAll()
-                    model.selectionBoundary.removeAll()
+                    model.clearSelection()
+                    model.pendingDeselectPoint = cp
                     syncDashAnimationState()
                     liveOverlay.setNeedsDisplay()
                     return
                 }
             } else {
                 let now = Date()
-                if now.timeIntervalSince(Self.lastEmptyTap) < 0.4 {
+                if !model.hasElement(at: cp, scale: scale), now.timeIntervalSince(Self.lastEmptyTap) < 0.4 {
                     Self.lastEmptyTap = .distantPast
                     model.showDeleteMenu = true
                     let tapLoc = touch.location(in: self)
@@ -856,7 +957,7 @@ class DrawingCanvasView: UIView {
                     liveOverlay.setNeedsDisplay()
                     return
                 }
-                Self.lastEmptyTap = now
+                Self.lastEmptyTap = model.hasElement(at: cp, scale: scale) ? .distantPast : now
                 model.beginLasso(at: cp)
                 syncDashAnimationState()
             }
@@ -905,7 +1006,24 @@ class DrawingCanvasView: UIView {
 
         if model.currentTool == .select {
             if model.showDeleteMenu { return }
-            if model.isMoving || model.isResizing {
+            if let start = model.pendingDeselectPoint {
+                let cur = toCanvas(touch.location(in: self))
+                let threshold = 6 / max(scale, 0.1)
+                if GeometryEngine.distanceSquared(start, cur) > threshold * threshold {
+                    model.pendingDeselectPoint = nil
+                    model.beginLasso(at: start)
+                    model.addLassoPoint(cur)
+                    syncDashAnimationState()
+                    liveOverlay.setNeedsDisplay()
+                }
+                return
+            }
+            if model.isRotating {
+                let cur = toCanvas(touch.location(in: self))
+                model.updateRotate(to: cur, snapTo15Degrees: false)
+                committedLayer.setNeedsDisplay()
+                liveOverlay.setNeedsDisplay()
+            } else if model.isMoving || model.isResizing {
                 let cur = toCanvas(touch.location(in: self))
                 let delta = CGSize(width: cur.x - model.lastMovePoint.x, height: cur.y - model.lastMovePoint.y)
                 model.moveSelected(by: delta)
@@ -954,11 +1072,17 @@ class DrawingCanvasView: UIView {
         isTouchActive = false
         if model?.currentTool == .select {
             if model?.showDeleteMenu == true { return }
-            if model?.isMoving == true || model?.isResizing == true {
+            if let tapPt = model?.pendingDeselectPoint {
+                model?.pendingDeselectPoint = nil
+                _ = model?.selectElement(at: tapPt, scale: scale)
+            } else if model?.isRotating == true {
+                model?.commitRotate()
+                committedLayer.setNeedsDisplay()
+            } else if model?.isMoving == true || model?.isResizing == true {
                 model?.commitMove()
                 committedLayer.setNeedsDisplay()
             } else {
-                model?.endLasso()
+                model?.endLasso(scale: scale)
             }
             syncDashAnimationState()
             liveOverlay.setNeedsDisplay()
@@ -984,11 +1108,15 @@ class DrawingCanvasView: UIView {
         }
         isTouchActive = false
         if model?.currentTool == .select {
-            if model?.isMoving == true || model?.isResizing == true {
+            model?.pendingDeselectPoint = nil
+            if model?.isRotating == true {
+                model?.commitRotate()
+                committedLayer.setNeedsDisplay()
+            } else if model?.isMoving == true || model?.isResizing == true {
                 model?.commitMove()
                 committedLayer.setNeedsDisplay()
             } else {
-                model?.endLasso()
+                model?.endLasso(scale: scale)
             }
             syncDashAnimationState()
             liveOverlay.setNeedsDisplay()
@@ -1215,8 +1343,8 @@ private struct CommittedStrokesCanvas: View {
 
             // Placed images
             for img in model.placedImages {
-                let canvasImgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
-                guard canvasImgRect.intersects(visibleCanvasRect) else { continue }
+                let canvasImgBounds = img.rotatedBoundingBox()
+                guard canvasImgBounds.intersects(visibleCanvasRect) else { continue }
                 let nsImage: NSImage? = {
                     if let cached = model.imageCache[img.id] { return cached }
                     if let imgObj = NSImage(data: img.imageData) {
@@ -1226,7 +1354,24 @@ private struct CommittedStrokesCanvas: View {
                     return nil
                 }()
                 if let nsImg = nsImage {
-                    context.draw(Image(nsImage: nsImg), in: canvasImgRect)
+                    let canvasImgRect = CGRect(origin: img.cgPosition, size: img.cgSize)
+                    if img.rotation != 0 {
+                        var imgCtx = context
+                        let center = img.cgCenter
+                        imgCtx.translateBy(x: center.x, y: center.y)
+                        imgCtx.rotate(by: Angle(radians: img.rotation))
+                        imgCtx.draw(
+                            Image(nsImage: nsImg),
+                            in: CGRect(
+                                x: -canvasImgRect.width / 2,
+                                y: -canvasImgRect.height / 2,
+                                width: canvasImgRect.width,
+                                height: canvasImgRect.height
+                            )
+                        )
+                    } else {
+                        context.draw(Image(nsImage: nsImg), in: canvasImgRect)
+                    }
                 }
             }
 
@@ -1309,7 +1454,11 @@ private struct LiveInteractionCanvas: View {
     let scale: CGFloat
 
     private var hasActiveSelection: Bool {
-        !model.selectionBoundary.isEmpty || !model.selectionLasso.isEmpty || !model.selectedImageIds.isEmpty
+        !model.selectionBoundary.isEmpty
+            || !model.selectionLasso.isEmpty
+            || !model.selectedImageIds.isEmpty
+            || !model.selectedStrokeIds.isEmpty
+            || !model.selectedFillIds.isEmpty
     }
 
     var body: some View {
@@ -1379,21 +1528,87 @@ private struct LiveInteractionCanvas: View {
                 }
 
                 for img in model.placedImages where model.selectedImageIds.contains(img.id) {
-                    let rect = CGRect(origin: img.cgPosition, size: img.cgSize).applying(tf)
+                    let corners = img.rotatedCorners().map { $0.applying(tf) }
+                    guard corners.count == 4 else { continue }
+                    var borderPath = Path()
+                    borderPath.move(to: corners[0])
+                    borderPath.addLine(to: corners[1])
+                    borderPath.addLine(to: corners[2])
+                    borderPath.addLine(to: corners[3])
+                    borderPath.closeSubpath()
                     context.stroke(
-                        Path(roundedRect: rect, cornerRadius: 0),
+                        borderPath,
                         with: .color(.blue),
                         style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [8, 5], dashPhase: dashPhase)
                     )
-                    let hs: CGFloat = 8
-                    for corner in [
-                        rect.origin,
-                        CGPoint(x: rect.maxX, y: rect.minY),
-                        CGPoint(x: rect.maxX, y: rect.maxY),
-                        CGPoint(x: rect.minX, y: rect.maxY),
-                    ] {
+                    let hs: CGFloat = 9
+                    for corner in corners {
                         let handle = CGRect(x: corner.x - hs / 2, y: corner.y - hs / 2, width: hs, height: hs)
                         context.fill(Path(ellipseIn: handle), with: .color(.blue))
+                        context.stroke(Path(ellipseIn: handle), with: .color(.white), lineWidth: 1.5)
+                    }
+                }
+
+                // Read rotation state so @Observable tracks live drag frames
+                let isRotating = model.isRotating
+                let isSnapped = model.isRotationSnapped
+                let _ = model.selectionRotationAngle
+                if model.currentTool == .select, let geom = model.rotationHandleGeometry(scale: safeScale) {
+                    let stemStart = geom.stemStart.applying(tf)
+                    let handleCenter = geom.handleCenter.applying(tf)
+                    let accent: Color = (isRotating && isSnapped) ? .orange : .blue
+
+                    var stemPath = Path()
+                    stemPath.move(to: stemStart)
+                    stemPath.addLine(to: handleCenter)
+                    context.stroke(stemPath, with: .color(accent), style: StrokeStyle(lineWidth: 1.6, lineCap: .round))
+
+                    let radius: CGFloat = isRotating ? 10 : 9
+                    let knobRect = CGRect(
+                        x: handleCenter.x - radius,
+                        y: handleCenter.y - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )
+                    let knobFill: Color = isRotating
+                        ? accent
+                        : (model.appSettings.isDarkMode ? Color(white: 0.14) : .white)
+                    context.fill(Path(ellipseIn: knobRect), with: .color(knobFill))
+                    context.stroke(Path(ellipseIn: knobRect), with: .color(accent), lineWidth: 1.75)
+
+                    let glyphColor: Color = isRotating ? .white : accent
+                    let glyph = context.resolve(
+                        Text(Image(systemName: "arrow.trianglehead.2.clockwise"))
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundStyle(glyphColor)
+                    )
+                    context.draw(glyph, at: handleCenter, anchor: .center)
+
+                    if isRotating {
+                        let dx = handleCenter.x - stemStart.x
+                        let dy = handleCenter.y - stemStart.y
+                        let len = max(hypot(dx, dy), 0.001)
+                        let badgeCenter = CGPoint(
+                            x: handleCenter.x + (dx / len) * 26,
+                            y: handleCenter.y + (dy / len) * 26
+                        )
+                        let label = context.resolve(
+                            Text(model.activeRotationLabel)
+                                .font(.system(size: 11, weight: .semibold, design: .rounded).monospacedDigit())
+                                .foregroundStyle(.white)
+                        )
+                        let textSize = label.measure(in: CGSize(width: 100, height: 30))
+                        let padX: CGFloat = 7
+                        let padY: CGFloat = 3
+                        let pillRect = CGRect(
+                            x: badgeCenter.x - textSize.width / 2 - padX,
+                            y: badgeCenter.y - textSize.height / 2 - padY,
+                            width: textSize.width + padX * 2,
+                            height: textSize.height + padY * 2
+                        )
+                        let pillBg: Color = isSnapped ? .orange : Color.black.opacity(0.78)
+                        context.fill(Path(roundedRect: pillRect, cornerRadius: pillRect.height / 2), with: .color(pillBg))
+                        context.draw(label, at: badgeCenter, anchor: .center)
                     }
                 }
             }
@@ -1586,6 +1801,18 @@ struct CanvasView: View {
             }
 
             if !hasCmd && !hasCtrlOrOpt {
+                if event.keyCode == 53 || char == "\u{1B}" {
+                    if model.currentTool == .select && (model.hasAnySelectionOrLasso || model.showDeleteMenu) {
+                        model.clearLassoSelection()
+                        return nil
+                    }
+                    if model.showDeleteMenu {
+                        model.showDeleteMenu = false
+                        return nil
+                    }
+                    return event
+                }
+
                 if event.keyCode == 48 || char == "\t" {
                     model.isToolbarVisible.toggle()
                     return nil
@@ -1800,6 +2027,7 @@ struct DrawingInputOverlay: NSViewRepresentable {
         private var hasUsedPencil: Bool = false
         private var isFingerPanning: Bool = false
         private var lastPanPoint: CGPoint = .zero
+        private var isShowingCustomCursor: Bool = false
 
         /// GPU-composited hover dot — moving the mouse updates this CALayer directly
         /// with ZERO SwiftUI state mutations or Canvas redraws!
@@ -1840,9 +2068,88 @@ struct DrawingInputOverlay: NSViewRepresentable {
             updateHoverDot(at: point)
         }
 
+        private func resizeCursor(forCorner corner: Int, rotation: CGFloat) -> NSCursor {
+            let baseAngle: CGFloat
+            switch corner {
+            case 0: baseAngle = -3 * .pi / 4
+            case 1: baseAngle = -.pi / 4
+            case 2: baseAngle = .pi / 4
+            default: baseAngle = 3 * .pi / 4
+            }
+            var angle = (baseAngle + rotation).truncatingRemainder(dividingBy: .pi)
+            if angle < 0 { angle += .pi }
+            if angle < .pi / 8 || angle >= 7 * .pi / 8 {
+                return NSCursor.frameResize(position: .left, directions: .all)
+            } else if angle < 3 * .pi / 8 {
+                return NSCursor.frameResize(position: .topLeft, directions: .all)
+            } else if angle < 5 * .pi / 8 {
+                return NSCursor.frameResize(position: .top, directions: .all)
+            } else {
+                return NSCursor.frameResize(position: .topRight, directions: .all)
+            }
+        }
+
+        private func canvasPoint(forViewPoint p: CGPoint) -> CGPoint {
+            guard let h = handler else { return p }
+            let safeScale = max(h.scale, 0.01)
+            return CGPoint(
+                x: (p.x - h.offset.width) / safeScale,
+                y: (p.y - h.offset.height) / safeScale
+            )
+        }
+
+        /// Updates the pointer cursor on macOS when hovering or dragging image resize handles
+        /// or the selection rotation handle. Returns true when a handle cursor is active.
+        @discardableResult
+        private func updateSelectCursor(at point: CGPoint?) -> Bool {
+            guard !isFingerPanning else { return false }
+            guard let point, let h = handler, h.model.currentTool == .select else {
+                if isShowingCustomCursor {
+                    NSCursor.arrow.set()
+                    isShowingCustomCursor = false
+                }
+                return false
+            }
+
+            let model = h.model
+            let cp = canvasPoint(forViewPoint: point)
+            let safeScale = max(h.scale, 0.01)
+
+            if model.isResizing,
+               let imgId = model.resizeImageId,
+               let img = model.placedImages.first(where: { $0.id == imgId }) {
+                resizeCursor(forCorner: model.resizeCorner, rotation: img.cgRotation).set()
+                isShowingCustomCursor = true
+                return true
+            }
+            if model.isRotating {
+                NSCursor.closedHand.set()
+                isShowingCustomCursor = true
+                return true
+            }
+            if let hit = model.hitTestResizeHandle(cp, scale: safeScale),
+               let img = model.placedImages.first(where: { $0.id == hit.imgId }) {
+                resizeCursor(forCorner: hit.corner, rotation: img.cgRotation).set()
+                isShowingCustomCursor = true
+                return true
+            }
+            if model.hitTestRotateHandle(cp, scale: safeScale) {
+                NSCursor.openHand.set()
+                isShowingCustomCursor = true
+                return true
+            }
+
+            if isShowingCustomCursor {
+                NSCursor.arrow.set()
+                isShowingCustomCursor = false
+            }
+            return false
+        }
+
         private func updateHoverDot(at point: CGPoint?) {
             lastHoverPoint = point
-            guard let point, let model = handler?.model else {
+            let handleCursorActive = updateSelectCursor(at: point)
+            guard let point, let model = handler?.model, !handleCursorActive else {
                 CATransaction.begin()
                 CATransaction.setDisableActions(true)
                 hoverDotLayer.isHidden = true
@@ -1935,8 +2242,8 @@ struct DrawingInputOverlay: NSViewRepresentable {
                 return
             }
             guard shouldAcceptInput(event, handler: h) else { return }
+            h.onChange(canvasPoint(for: event), drawing: true, shiftPressed: event.modifierFlags.contains(.shift))
             updateHoverDot(at: loc)
-            h.onChange(canvasPoint(for: event), drawing: true)
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -1951,8 +2258,8 @@ struct DrawingInputOverlay: NSViewRepresentable {
                 return
             }
             guard shouldAcceptInput(event, handler: h) else { return }
+            h.onChange(canvasPoint(for: event), drawing: false, shiftPressed: event.modifierFlags.contains(.shift))
             updateHoverDot(at: loc)
-            h.onChange(canvasPoint(for: event), drawing: false)
         }
 
         override func mouseUp(with event: NSEvent) {
@@ -1965,6 +2272,7 @@ struct DrawingInputOverlay: NSViewRepresentable {
             }
             guard let h = handler, shouldAcceptInput(event, handler: h) else { return }
             h.onEnd()
+            updateHoverDot(at: convert(event.locationInWindow, from: nil))
         }
 
         override func mouseMoved(with event: NSEvent) {
@@ -1991,26 +2299,40 @@ struct CanvasPointerHandler {
     let onBeginDraw: (() -> Void)?
     let onPan: (CGSize) -> Void
 
-    func onChange(_ canvas: CGPoint, drawing: Bool) {
+    func onChange(_ canvas: CGPoint, drawing: Bool, shiftPressed: Bool = false) {
         if drawing {
             onBeginDraw?()
             model.lastCanvasTapLocation = canvas
         }
 
         if model.currentTool == .select {
-            if let imgId = model.hitTestImage(canvas), !model.selectedImageIds.contains(imgId) {
-                model.selectedStrokeIds.removeAll()
-                model.selectedImageIds = [imgId]
-                model.selectionBoundary.removeAll()
+            if let start = model.pendingDeselectPoint, !drawing {
+                let threshold = 6 / max(scale, 0.1)
+                if GeometryEngine.distanceSquared(start, canvas) > threshold * threshold {
+                    model.pendingDeselectPoint = nil
+                    model.beginLasso(at: start)
+                    model.addLassoPoint(canvas)
+                }
+                return
+            }
+            if model.isRotating {
+                model.updateRotate(to: canvas, snapTo15Degrees: shiftPressed)
                 return
             }
             if model.isMoving || model.isResizing {
                 let delta = CGSize(width: canvas.x - model.lastMovePoint.x, height: canvas.y - model.lastMovePoint.y)
                 model.moveSelected(by: delta)
                 model.lastMovePoint = canvas
-            } else if !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty {
-                if model.hitTestResizeHandle(canvas) != nil {
-                    model.beginMove(at: canvas)
+                return
+            }
+            let hasSelection = !model.selectedStrokeIds.isEmpty || !model.selectedImageIds.isEmpty || !model.selectedFillIds.isEmpty || !model.selectionBoundary.isEmpty
+            if drawing && hasSelection {
+                if model.hitTestRotateHandle(canvas, scale: scale) {
+                    model.beginRotate(at: canvas, scale: scale)
+                    return
+                }
+                if model.hitTestResizeHandle(canvas, scale: scale) != nil {
+                    model.beginMove(at: canvas, scale: scale)
                     return
                 }
                 let onSelected = model.isPointOnSelectedItem(canvas) || (!model.selectionBoundary.isEmpty && model.isPointInSelectionBoundary(canvas))
@@ -2023,24 +2345,25 @@ struct CanvasPointerHandler {
                         return
                     }
                     CanvasView.lastSelectTap = now
-                    model.beginMove(at: canvas)
+                    model.beginMove(at: canvas, scale: scale)
                 } else {
-                    model.selectedStrokeIds.removeAll()
-                    model.selectedImageIds.removeAll()
-                    model.selectedFillIds.removeAll()
-                    model.selectionBoundary.removeAll()
+                    model.clearSelection()
+                    model.pendingDeselectPoint = canvas
                 }
-            } else if model.selectionLasso.isEmpty {
+                return
+            }
+            if drawing && model.selectionLasso.isEmpty {
                 let now = Date()
-                if now.timeIntervalSince(CanvasView.lastEmptyTap) < 0.4 {
+                let onElement = model.hasElement(at: canvas, scale: scale)
+                if !onElement, now.timeIntervalSince(CanvasView.lastEmptyTap) < 0.4 {
                     CanvasView.lastEmptyTap = .distantPast
                     model.showDeleteMenu = true
                     model.deleteMenuLocation = CGPoint(x: canvas.x * scale + offset.width + 60, y: canvas.y * scale + offset.height)
                     return
                 }
-                CanvasView.lastEmptyTap = now
+                CanvasView.lastEmptyTap = onElement ? .distantPast : now
                 model.beginLasso(at: canvas)
-            } else {
+            } else if !model.selectionLasso.isEmpty {
                 model.addLassoPoint(canvas)
             }
             return
@@ -2064,8 +2387,16 @@ struct CanvasPointerHandler {
     func onEnd() {
         if model.currentTool == .fill { return }
         if model.currentTool == .select {
-            if model.isMoving || model.isResizing { model.commitMove() }
-            else { model.endLasso() }
+            if let tapPt = model.pendingDeselectPoint {
+                model.pendingDeselectPoint = nil
+                _ = model.selectElement(at: tapPt, scale: scale)
+            } else if model.isRotating {
+                model.commitRotate()
+            } else if model.isMoving || model.isResizing {
+                model.commitMove()
+            } else {
+                model.endLasso(scale: scale)
+            }
             return
         }
         model.endStroke()

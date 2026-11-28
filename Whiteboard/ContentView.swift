@@ -303,6 +303,12 @@ struct ContentView: View {
                 .keyboardShortcut("z", modifiers: [.command, .shift])
             Button("") { model.deleteSelected() }
                 .keyboardShortcut(.delete, modifiers: [])
+            Button("") {
+                if model.currentTool == .select {
+                    model.clearLassoSelection()
+                }
+            }
+            .keyboardShortcut(.escape, modifiers: [])
             Button("") { model.copySelected() }
                 .keyboardShortcut("c", modifiers: .command)
             Button("") { model.paste() }
@@ -594,14 +600,16 @@ struct ContentView: View {
             .pointingHand()
             .pencilHoverEffect()
 
-            Button(action: { model.transformSelected(scale: 1.0, rotation: .pi / 12) }) {
-                Image(systemName: "rotate.right")
+            Button(action: { model.resetSelectionRotation() }) {
+                Image(systemName: "arrow.counterclockwise")
                     .font(.system(size: 13))
                     .frame(width: 28, height: 28)
                     .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .help("Rotate Selection 15°")
+            .disabled(!model.canResetSelectionRotation)
+            .opacity(model.canResetSelectionRotation ? 1.0 : 0.35)
+            .help(model.canResetSelectionRotation ? "Reset Rotation (\(model.activeRotationLabel) → 0°)" : "Reset Rotation")
             .pointingHand()
             .pencilHoverEffect()
 

@@ -245,8 +245,8 @@ struct ToolSettingsView: View {
         switch model.eraserSettings.eraseTarget {
         case .all: return "square.stack.3d.up"
         case .pen: return "pencil.tip"
-        case .sharpie: return "pencil"
-        case .fill: return "drop.fill"
+        case .sharpie: return "highlighter"
+        case .fill: return "paint.bucket.classic"
         }
     }
 

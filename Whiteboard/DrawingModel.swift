@@ -92,16 +92,90 @@ nonisolated struct PlacedImage: Identifiable, Codable, Sendable {
     var position: CodablePoint
     var size: CodablePoint  // stored as (width, height)
     let imageData: Data
+    var rotation: Double    // radians, clockwise in canvas (y-down) coordinates
 
-    init(id: UUID = UUID(), position: CGPoint, size: CGSize, imageData: Data) {
+    enum CodingKeys: String, CodingKey {
+        case id, position, size, imageData, rotation
+    }
+
+    init(id: UUID = UUID(), position: CGPoint, size: CGSize, imageData: Data, rotation: Double = 0) {
         self.id = id
         self.position = CodablePoint(position)
         self.size = CodablePoint(CGPoint(x: size.width, y: size.height))
         self.imageData = imageData
+        self.rotation = rotation
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        position = try c.decode(CodablePoint.self, forKey: .position)
+        size = try c.decode(CodablePoint.self, forKey: .size)
+        imageData = try c.decode(Data.self, forKey: .imageData)
+        rotation = try c.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
     }
 
     var cgPosition: CGPoint { position.cgPoint }
     var cgSize: CGSize { CGSize(width: size.cgPoint.x, height: size.cgPoint.y) }
+    var cgRotation: CGFloat { CGFloat(rotation) }
+    var cgCenter: CGPoint {
+        CGPoint(x: cgPosition.x + cgSize.width / 2, y: cgPosition.y + cgSize.height / 2)
+    }
+
+    /// Returns the four corners [topLeft, topRight, bottomRight, bottomLeft] in canvas coordinates.
+    func rotatedCorners() -> [CGPoint] {
+        let rect = CGRect(origin: cgPosition, size: cgSize)
+        let raw = [
+            CGPoint(x: rect.minX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY),
+        ]
+        guard rotation != 0 else { return raw }
+        let center = cgCenter
+        let cosA = cos(cgRotation)
+        let sinA = sin(cgRotation)
+        return raw.map { p in
+            let dx = p.x - center.x
+            let dy = p.y - center.y
+            return CGPoint(
+                x: center.x + dx * cosA - dy * sinA,
+                y: center.y + dx * sinA + dy * cosA
+            )
+        }
+    }
+
+    /// Axis-aligned bounding box enclosing the (possibly rotated) image in canvas coordinates.
+    func rotatedBoundingBox() -> CGRect {
+        guard rotation != 0 else {
+            return CGRect(origin: cgPosition, size: cgSize)
+        }
+        let corners = rotatedCorners()
+        guard let first = corners.first else { return CGRect(origin: cgPosition, size: cgSize) }
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        for c in corners.dropFirst() {
+            minX = min(minX, c.x)
+            maxX = max(maxX, c.x)
+            minY = min(minY, c.y)
+            maxY = max(maxY, c.y)
+        }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Hit-tests a canvas-space point against the (possibly rotated) image rectangle.
+    func containsPoint(_ point: CGPoint) -> Bool {
+        guard rotation != 0 else {
+            return CGRect(origin: cgPosition, size: cgSize).contains(point)
+        }
+        let center = cgCenter
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        let cosA = cos(-cgRotation)
+        let sinA = sin(-cgRotation)
+        let lx = dx * cosA - dy * sinA
+        let ly = dx * sinA + dy * cosA
+        return abs(lx) <= cgSize.width / 2 && abs(ly) <= cgSize.height / 2
+    }
 }
 
 nonisolated struct CodablePoint: Codable, Equatable, Sendable {
@@ -204,10 +278,10 @@ nonisolated enum ToolbarItemID: String, CaseIterable, Identifiable, Codable, Has
     var systemImage: String {
         switch self {
         case .pen: return "pencil.tip"
-        case .sharpie: return "pencil"
-        case .fill: return "drop.fill"
+        case .sharpie: return "highlighter"
+        case .fill: return "paint.bucket.classic"
         case .eraser: return "eraser"
-        case .select: return "cursorarrow.click"
+        case .select: return "lasso"
         case .scenes: return "rectangle.stack"
         case .home: return "house"
         case .undo: return "arrow.uturn.backward"
@@ -430,6 +504,9 @@ final class DrawingModel {
     var selectedStrokeIds: Set<UUID> = []
     var selectedImageIds: Set<UUID> = []
     var selectedFillIds: Set<UUID> = []
+    var isRotating: Bool = false
+    var selectionRotationAngle: CGFloat = 0
+    var isRotationSnapped: Bool = false
 
     var pendingAction: PendingAction?
     var showDeleteMenu: Bool = false
@@ -491,14 +568,24 @@ final class DrawingModel {
     @ObservationIgnored private var inFlightThumbnails: Set<String> = []
     @ObservationIgnored private let thumbnailQueue = DispatchQueue(label: "com.whiteboard.thumbnails", qos: .userInitiated)
 
-    // Move / Resize state
+    // Move / Resize / Rotate state
     @ObservationIgnored var isMoving: Bool = false
     @ObservationIgnored var isResizing: Bool = false
     @ObservationIgnored var resizeCorner: Int = 0  // 0=topLeft, 1=topRight, 2=bottomRight, 3=bottomLeft
     @ObservationIgnored var resizeImageId: UUID?
     @ObservationIgnored var resizeStartRect: CGRect = .zero
     @ObservationIgnored var lastMovePoint: CGPoint = .zero
+    @ObservationIgnored var pendingDeselectPoint: CGPoint?
     @ObservationIgnored private var moveSnapshotTaken: Bool = false
+    @ObservationIgnored private var selectionRotationPivot: CGPoint?
+    @ObservationIgnored private var rotatePivot: CGPoint = .zero
+    @ObservationIgnored private var rotateStartPointerAngle: CGFloat = 0
+    @ObservationIgnored private var rotateInitialSelectionAngle: CGFloat = 0
+    @ObservationIgnored private var rotateSnapshotStrokes: [UUID: [CGPoint]] = [:]
+    @ObservationIgnored private var rotateSnapshotFills: [UUID: [[CGPoint]]] = [:]
+    @ObservationIgnored private var rotateSnapshotImages: [UUID: (center: CGPoint, size: CGSize, rotation: Double)] = [:]
+    @ObservationIgnored private var rotateSnapshotBoundary: [CGPoint] = []
+    @ObservationIgnored private var rotateSnapshotTaken: Bool = false
 
     /// Minimum canvas-space squared distance between consecutive raw stroke points.
     @ObservationIgnored private let minStrokePointDistanceSq: CGFloat = 1.25 * 1.25
@@ -1268,10 +1355,15 @@ final class DrawingModel {
         selectionLasso.append(point)
     }
 
-    func endLasso() {
-        guard selectionLasso.count >= 3 else { selectionLasso = []; return }
-
-        saveState()
+    func endLasso(scale: CGFloat = 1.0) {
+        guard selectionLasso.count >= 3 else {
+            let tapPoint = selectionLasso.first
+            selectionLasso = []
+            if let tapPoint {
+                _ = selectElement(at: tapPoint, scale: scale)
+            }
+            return
+        }
 
         let path = CGMutablePath()
         path.move(to: selectionLasso[0])
@@ -1280,9 +1372,9 @@ final class DrawingModel {
         }
         path.closeSubpath()
 
-        selectedStrokeIds.removeAll()
-        selectedImageIds.removeAll()
-        selectedFillIds.removeAll()
+        var hitStrokes = Set<UUID>()
+        var hitFills = Set<UUID>()
+        var hitImages = Set<UUID>()
 
         spatialGrid.sync(with: strokes)
         let candidateIndices = spatialGrid.queryIndices(in: path.boundingBoxOfPath)
@@ -1290,7 +1382,7 @@ final class DrawingModel {
             let stroke = strokes[idx]
             guard !stroke.isEraser else { continue }
             for p in stroke.points where path.contains(p) {
-                selectedStrokeIds.insert(stroke.id)
+                hitStrokes.insert(stroke.id)
                 break
             }
         }
@@ -1300,24 +1392,495 @@ final class DrawingModel {
             guard !box.isNull else { continue }
             let center = CGPoint(x: box.midX, y: box.midY)
             if path.contains(center) || fill.contours.first?.contains(where: { path.contains($0) }) == true {
-                selectedFillIds.insert(fill.id)
+                hitFills.insert(fill.id)
             }
         }
 
         for img in placedImages {
-            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
-            let center = CGPoint(x: rect.midX, y: rect.midY)
-            if path.contains(center) || path.contains(rect.origin) {
-                selectedImageIds.insert(img.id)
+            let center = img.cgCenter
+            if path.contains(center) || img.rotatedCorners().contains(where: { path.contains($0) }) {
+                hitImages.insert(img.id)
             }
         }
 
+        // Lassoing empty space shouldn't leave a stale marching-ants loop behind.
+        guard !hitStrokes.isEmpty || !hitFills.isEmpty || !hitImages.isEmpty else {
+            selectionLasso = []
+            clearSelection()
+            return
+        }
+
+        saveState()
+        selectedStrokeIds = hitStrokes
+        selectedFillIds = hitFills
+        selectedImageIds = hitImages
         selectionBoundary = selectionLasso
         selectionLasso = []
+        resetSelectionRotationTracking()
         updateUndoRedo()
     }
 
-    // MARK: - Move & Resize Selection
+    /// Hit-tests top-to-bottom (strokes → fills → placed images) to check whether any
+    /// selectable canvas element lies under `point`.
+    func hasElement(at point: CGPoint, scale: CGFloat = 1.0) -> Bool {
+        if hitTestStroke(at: point, scale: scale) != nil { return true }
+        if hitTestFill(at: point) != nil { return true }
+        if hitTestImage(point) != nil { return true }
+        return false
+    }
+
+    private func hitTestStroke(at point: CGPoint, scale: CGFloat) -> Stroke? {
+        let baseRadius = max(10, 12 / max(scale, 0.1))
+        let queryRadius = baseRadius + 12
+        let queryRect = CGRect(
+            x: point.x - queryRadius,
+            y: point.y - queryRadius,
+            width: queryRadius * 2,
+            height: queryRadius * 2
+        )
+        spatialGrid.sync(with: strokes)
+        let candidates = spatialGrid.queryIndices(in: queryRect).sorted(by: >)
+        for idx in candidates {
+            let stroke = strokes[idx]
+            guard !stroke.isEraser, !stroke.points.isEmpty else { continue }
+            let halfWidth = (stroke.isSharpie ? stroke.lineWidth + 3 : stroke.lineWidth) / 2
+            let hitR = baseRadius + halfWidth
+            let hitRSq = hitR * hitR
+            if stroke.points.count == 1 {
+                if GeometryEngine.distanceSquared(point, stroke.points[0]) <= hitRSq {
+                    return stroke
+                }
+            } else {
+                for i in 0..<(stroke.points.count - 1) {
+                    if GeometryEngine.pointSegmentDistanceSquared(point, stroke.points[i], stroke.points[i + 1]) <= hitRSq {
+                        return stroke
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    private func hitTestFill(at point: CGPoint) -> FillShape? {
+        for fill in fills.reversed() {
+            let box = fill.boundingBox()
+            guard !box.isNull, box.contains(point) else { continue }
+            if fill.makeCGPath().contains(point, using: .evenOdd) {
+                return fill
+            }
+        }
+        return nil
+    }
+
+    private func paddedBoundingPolygon(for rect: CGRect) -> [CGPoint] {
+        guard !rect.isNull, rect.width > 0, rect.height > 0 else { return [] }
+        let r = min(8, rect.width * 0.25, rect.height * 0.25)
+        return [
+            CGPoint(x: rect.minX + r, y: rect.minY),
+            CGPoint(x: rect.maxX - r, y: rect.minY),
+            CGPoint(x: rect.maxX, y: rect.minY + r),
+            CGPoint(x: rect.maxX, y: rect.maxY - r),
+            CGPoint(x: rect.maxX - r, y: rect.maxY),
+            CGPoint(x: rect.minX + r, y: rect.maxY),
+            CGPoint(x: rect.minX, y: rect.maxY - r),
+            CGPoint(x: rect.minX, y: rect.minY + r),
+            CGPoint(x: rect.minX + r, y: rect.minY),
+        ]
+    }
+
+    /// Selects the single topmost element (Pen/Sharpie stroke, Fill shape, or Placed Image)
+    /// under `point`. Returns `true` if an element was found and selected.
+    @discardableResult
+    func selectElement(at point: CGPoint, scale: CGFloat = 1.0) -> Bool {
+        if let stroke = hitTestStroke(at: point, scale: scale) {
+            saveState()
+            clearSelection()
+            selectedStrokeIds = [stroke.id]
+            if let box = GeometryEngine.boundingBox(of: [stroke], images: [], fills: [], padding: 8) {
+                selectionBoundary = paddedBoundingPolygon(for: box)
+            }
+            updateUndoRedo()
+            return true
+        }
+        if let fill = hitTestFill(at: point) {
+            saveState()
+            clearSelection()
+            selectedFillIds = [fill.id]
+            let box = fill.boundingBox().insetBy(dx: -8, dy: -8)
+            selectionBoundary = paddedBoundingPolygon(for: box)
+            updateUndoRedo()
+            return true
+        }
+        if let imgId = hitTestImage(point) {
+            saveState()
+            clearSelection()
+            selectedImageIds = [imgId]
+            updateUndoRedo()
+            return true
+        }
+        return false
+    }
+
+    var hasAnySelectionOrLasso: Bool {
+        !selectedStrokeIds.isEmpty
+            || !selectedImageIds.isEmpty
+            || !selectedFillIds.isEmpty
+            || !selectionBoundary.isEmpty
+            || !selectionLasso.isEmpty
+    }
+
+    /// Clears the active lasso selection and any in-progress lasso/transform while
+    /// keeping the Lasso/Select tool active.
+    func clearLassoSelection() {
+        if isRotating { commitRotate() }
+        if isMoving || isResizing { commitMove() }
+        selectionLasso.removeAll()
+        pendingDeselectPoint = nil
+        clearSelection()
+        showDeleteMenu = false
+    }
+
+    // MARK: - Move, Resize & Rotate Selection
+
+    struct RotationHandleGeometry {
+        let pivot: CGPoint
+        let stemStart: CGPoint
+        let handleCenter: CGPoint
+        let displayAngleRadians: CGFloat
+    }
+
+    func resetSelectionRotationTracking() {
+        isRotating = false
+        selectionRotationAngle = 0
+        isRotationSnapped = false
+        selectionRotationPivot = nil
+    }
+
+    func clearSelection() {
+        selectedStrokeIds.removeAll()
+        selectedImageIds.removeAll()
+        selectedFillIds.removeAll()
+        selectionBoundary.removeAll()
+        resetSelectionRotationTracking()
+    }
+
+    /// Effective rotation angle (in radians) for the current selection.
+    /// For a single selected image, reflects its persistent `rotation`; otherwise the
+    /// cumulative rotation applied during the active selection session.
+    var effectiveSelectionRotation: CGFloat {
+        if selectedStrokeIds.isEmpty,
+           selectedFillIds.isEmpty,
+           selectedImageIds.count == 1,
+           let id = selectedImageIds.first,
+           let img = placedImages.first(where: { $0.id == id }) {
+            return GeometryEngine.normalizeAngle(img.cgRotation)
+        }
+        return GeometryEngine.normalizeAngle(selectionRotationAngle)
+    }
+
+    /// Whether the current selection has a non-zero rotation that can be reset.
+    var canResetSelectionRotation: Bool {
+        if abs(effectiveSelectionRotation) > 0.001 { return true }
+        for img in placedImages where selectedImageIds.contains(img.id) {
+            if abs(GeometryEngine.normalizeAngle(img.cgRotation)) > 0.001 {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// Formatted integer degree readout (e.g. `"45°"`, `"-15°"`, `"0°"`) for the live rotation badge.
+    var activeRotationLabel: String {
+        var deg = Int((effectiveSelectionRotation * 180 / .pi).rounded())
+        if deg == -180 { deg = 180 }
+        if deg == 0 { deg = 0 }
+        return "\(deg)°"
+    }
+
+    func rotationHandleGeometry(scale: CGFloat) -> RotationHandleGeometry? {
+        guard !selectedStrokeIds.isEmpty || !selectedFillIds.isEmpty || !selectedImageIds.isEmpty else {
+            return nil
+        }
+        let stemLength: CGFloat = 28 / max(scale, 0.1)
+
+        // Single PlacedImage selected: attach handle to the rotated image's top edge.
+        if selectedStrokeIds.isEmpty,
+           selectedFillIds.isEmpty,
+           selectedImageIds.count == 1,
+           let imgId = selectedImageIds.first,
+           let img = placedImages.first(where: { $0.id == imgId }) {
+            let pivot = img.cgCenter
+            let angle = GeometryEngine.normalizeAngle(img.cgRotation)
+            let up = CGPoint(x: sin(angle), y: -cos(angle))
+            let halfH = img.cgSize.height / 2
+            let stemStart = CGPoint(x: pivot.x + up.x * halfH, y: pivot.y + up.y * halfH)
+            let handleCenter = CGPoint(x: pivot.x + up.x * (halfH + stemLength), y: pivot.y + up.y * (halfH + stemLength))
+            return RotationHandleGeometry(
+                pivot: pivot,
+                stemStart: stemStart,
+                handleCenter: handleCenter,
+                displayAngleRadians: angle
+            )
+        }
+
+        let selStrokes = strokes.filter { selectedStrokeIds.contains($0.id) }
+        let selImages = placedImages.filter { selectedImageIds.contains($0.id) }
+        let selFills = fills.filter { selectedFillIds.contains($0.id) }
+        guard let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, padding: 0) else {
+            return nil
+        }
+
+        let pivot: CGPoint
+        if isRotating {
+            pivot = rotatePivot
+        } else if let tracked = selectionRotationPivot {
+            pivot = tracked
+        } else {
+            pivot = CGPoint(x: box.midX, y: box.midY)
+        }
+
+        let angle = GeometryEngine.normalizeAngle(selectionRotationAngle)
+        let up = CGPoint(x: sin(angle), y: -cos(angle))
+
+        var maxExtent: CGFloat = 0
+        func consider(_ p: CGPoint) {
+            let proj = (p.x - pivot.x) * up.x + (p.y - pivot.y) * up.y
+            if proj > maxExtent { maxExtent = proj }
+        }
+        for s in selStrokes {
+            for p in s.points { consider(p) }
+        }
+        for f in selFills {
+            for loop in f.contours {
+                for p in loop { consider(p) }
+            }
+        }
+        for img in selImages {
+            for c in img.rotatedCorners() { consider(c) }
+        }
+        for p in selectionBoundary { consider(p) }
+
+        let stemStart = CGPoint(x: pivot.x + up.x * maxExtent, y: pivot.y + up.y * maxExtent)
+        let handleCenter = CGPoint(x: pivot.x + up.x * (maxExtent + stemLength), y: pivot.y + up.y * (maxExtent + stemLength))
+        return RotationHandleGeometry(
+            pivot: pivot,
+            stemStart: stemStart,
+            handleCenter: handleCenter,
+            displayAngleRadians: angle
+        )
+    }
+
+    func hitTestRotateHandle(_ point: CGPoint, scale: CGFloat = 1.0) -> Bool {
+        guard let geom = rotationHandleGeometry(scale: scale) else { return false }
+        let hitRadius: CGFloat = 16 / max(scale, 0.1)
+        return GeometryEngine.distanceSquared(point, geom.handleCenter) <= hitRadius * hitRadius
+    }
+
+    func beginRotate(at point: CGPoint, scale: CGFloat = 1.0) {
+        guard let geom = rotationHandleGeometry(scale: scale) else { return }
+        isRotating = true
+        isMoving = false
+        isResizing = false
+        rotatePivot = geom.pivot
+        selectionRotationPivot = geom.pivot
+        rotateStartPointerAngle = atan2(point.y - geom.pivot.y, point.x - geom.pivot.x)
+        rotateInitialSelectionAngle = effectiveSelectionRotation
+        rotateSnapshotTaken = false
+        isRotationSnapped = false
+
+        rotateSnapshotStrokes = [:]
+        for s in strokes where selectedStrokeIds.contains(s.id) {
+            rotateSnapshotStrokes[s.id] = s.points
+        }
+        rotateSnapshotFills = [:]
+        for f in fills where selectedFillIds.contains(f.id) {
+            rotateSnapshotFills[f.id] = f.contours
+        }
+        rotateSnapshotImages = [:]
+        for img in placedImages where selectedImageIds.contains(img.id) {
+            rotateSnapshotImages[img.id] = (center: img.cgCenter, size: img.cgSize, rotation: img.rotation)
+        }
+        rotateSnapshotBoundary = selectionBoundary
+    }
+
+    func updateRotate(to point: CGPoint, snapTo15Degrees: Bool = false) {
+        guard isRotating else { return }
+        let currentPointerAngle = atan2(point.y - rotatePivot.y, point.x - rotatePivot.x)
+        let rawDelta = currentPointerAngle - rotateStartPointerAngle
+        let (snappedTotal, snapped) = GeometryEngine.snapRotationAngle(
+            rotateInitialSelectionAngle + rawDelta,
+            snapToStep: snapTo15Degrees
+        )
+        let appliedDelta = snappedTotal - rotateInitialSelectionAngle
+
+        if abs(appliedDelta) > 1e-6, !rotateSnapshotTaken {
+            saveState()
+            rotateSnapshotTaken = true
+        }
+
+        let pivot = rotatePivot
+        let cosA = cos(appliedDelta)
+        let sinA = sin(appliedDelta)
+        func rotatePt(_ p: CGPoint) -> CGPoint {
+            let dx = p.x - pivot.x
+            let dy = p.y - pivot.y
+            return CGPoint(x: pivot.x + dx * cosA - dy * sinA, y: pivot.y + dx * sinA + dy * cosA)
+        }
+
+        if !rotateSnapshotStrokes.isEmpty {
+            strokes = strokes.map { s in
+                guard let origPoints = rotateSnapshotStrokes[s.id] else { return s }
+                return Stroke(
+                    id: s.id,
+                    points: origPoints.map(rotatePt),
+                    color: s.uiColor,
+                    lineWidth: s.lineWidth,
+                    isEraser: s.isEraser,
+                    presetIndex: s.presetIndex,
+                    isCatmullRom: s.isCatmullRom,
+                    isSharpie: s.isSharpie
+                )
+            }
+        }
+        if !rotateSnapshotFills.isEmpty {
+            fills = fills.map { f in
+                guard let origContours = rotateSnapshotFills[f.id] else { return f }
+                return FillShape(
+                    id: f.id,
+                    contours: origContours.map { $0.map(rotatePt) },
+                    color: f.uiColor,
+                    opacity: f.opacity,
+                    presetIndex: f.presetIndex
+                )
+            }
+        }
+        if !rotateSnapshotImages.isEmpty {
+            placedImages = placedImages.map { img in
+                guard let orig = rotateSnapshotImages[img.id] else { return img }
+                let newCenter = rotatePt(orig.center)
+                let newOrigin = CGPoint(x: newCenter.x - orig.size.width / 2, y: newCenter.y - orig.size.height / 2)
+                let newRot = Double(GeometryEngine.normalizeAngle(CGFloat(orig.rotation) + appliedDelta))
+                return PlacedImage(
+                    id: img.id,
+                    position: newOrigin,
+                    size: orig.size,
+                    imageData: img.imageData,
+                    rotation: newRot
+                )
+            }
+        }
+        if !rotateSnapshotBoundary.isEmpty {
+            selectionBoundary = rotateSnapshotBoundary.map(rotatePt)
+        }
+
+        selectionRotationAngle = snappedTotal
+        isRotationSnapped = snapped
+    }
+
+    func commitRotate() {
+        let didMutate = rotateSnapshotTaken
+        isRotating = false
+        isRotationSnapped = false
+        rotateSnapshotStrokes.removeAll()
+        rotateSnapshotFills.removeAll()
+        rotateSnapshotImages.removeAll()
+        rotateSnapshotBoundary.removeAll()
+        rotateSnapshotTaken = false
+        if didMutate {
+            spatialGrid.rebuild(with: strokes)
+            updateUndoRedo()
+            scheduleAutoSave()
+        }
+    }
+
+    /// Resets the rotation of the active selection back to 0° in a single undoable step.
+    func resetSelectionRotation() {
+        guard canResetSelectionRotation else { return }
+        saveState()
+
+        if selectedStrokeIds.isEmpty && selectedFillIds.isEmpty {
+            placedImages = placedImages.map { img in
+                guard selectedImageIds.contains(img.id) else { return img }
+                return PlacedImage(id: img.id, position: img.cgPosition, size: img.cgSize, imageData: img.imageData, rotation: 0)
+            }
+            resetSelectionRotationTracking()
+            updateUndoRedo()
+            scheduleAutoSave()
+            return
+        }
+
+        let sessionAngle = GeometryEngine.normalizeAngle(selectionRotationAngle)
+        if abs(sessionAngle) > 0.001 {
+            let delta = -sessionAngle
+            let selStrokes = strokes.filter { selectedStrokeIds.contains($0.id) }
+            let selImages = placedImages.filter { selectedImageIds.contains($0.id) }
+            let selFills = fills.filter { selectedFillIds.contains($0.id) }
+            let fallbackCenter: CGPoint = {
+                if let box = GeometryEngine.boundingBox(of: selStrokes, images: selImages, fills: selFills, padding: 0) {
+                    return CGPoint(x: box.midX, y: box.midY)
+                }
+                return .zero
+            }()
+            let pivot = selectionRotationPivot ?? fallbackCenter
+            let cosA = cos(delta)
+            let sinA = sin(delta)
+            func rotatePt(_ p: CGPoint) -> CGPoint {
+                let dx = p.x - pivot.x
+                let dy = p.y - pivot.y
+                return CGPoint(x: pivot.x + dx * cosA - dy * sinA, y: pivot.y + dx * sinA + dy * cosA)
+            }
+
+            if !selectedStrokeIds.isEmpty {
+                strokes = strokes.map { s in
+                    guard selectedStrokeIds.contains(s.id) else { return s }
+                    return Stroke(
+                        id: s.id,
+                        points: s.points.map(rotatePt),
+                        color: s.uiColor,
+                        lineWidth: s.lineWidth,
+                        isEraser: s.isEraser,
+                        presetIndex: s.presetIndex,
+                        isCatmullRom: s.isCatmullRom,
+                        isSharpie: s.isSharpie
+                    )
+                }
+            }
+            if !selectedFillIds.isEmpty {
+                fills = fills.map { f in
+                    guard selectedFillIds.contains(f.id) else { return f }
+                    return FillShape(
+                        id: f.id,
+                        contours: f.contours.map { $0.map(rotatePt) },
+                        color: f.uiColor,
+                        opacity: f.opacity,
+                        presetIndex: f.presetIndex
+                    )
+                }
+            }
+            if !selectedImageIds.isEmpty {
+                placedImages = placedImages.map { img in
+                    guard selectedImageIds.contains(img.id) else { return img }
+                    let newCenter = rotatePt(img.cgCenter)
+                    let newOrigin = CGPoint(x: newCenter.x - img.cgSize.width / 2, y: newCenter.y - img.cgSize.height / 2)
+                    let newRot = Double(GeometryEngine.normalizeAngle(img.cgRotation + delta))
+                    return PlacedImage(id: img.id, position: newOrigin, size: img.cgSize, imageData: img.imageData, rotation: newRot)
+                }
+            }
+            if !selectionBoundary.isEmpty {
+                selectionBoundary = selectionBoundary.map(rotatePt)
+            }
+        } else if !selectedImageIds.isEmpty {
+            placedImages = placedImages.map { img in
+                guard selectedImageIds.contains(img.id) else { return img }
+                return PlacedImage(id: img.id, position: img.cgPosition, size: img.cgSize, imageData: img.imageData, rotation: 0)
+            }
+        }
+
+        resetSelectionRotationTracking()
+        spatialGrid.rebuild(with: strokes)
+        updateUndoRedo()
+        scheduleAutoSave()
+    }
 
     func isPointOnSelectedItem(_ point: CGPoint) -> Bool {
         let thresholdSq: CGFloat = 15 * 15
@@ -1330,7 +1893,7 @@ final class DrawingModel {
             }
         }
         for img in placedImages where selectedImageIds.contains(img.id) {
-            if CGRect(origin: img.cgPosition, size: img.cgSize).contains(point) {
+            if img.containsPoint(point) {
                 return true
             }
         }
@@ -1344,7 +1907,7 @@ final class DrawingModel {
 
     func hitTestImage(_ point: CGPoint) -> UUID? {
         for img in placedImages.reversed() {
-            if CGRect(origin: img.cgPosition, size: img.cgSize).contains(point) {
+            if img.containsPoint(point) {
                 return img.id
             }
         }
@@ -1355,26 +1918,22 @@ final class DrawingModel {
         GeometryEngine.pointInPolygon(point, selectionBoundary)
     }
 
-    func hitTestResizeHandle(_ point: CGPoint) -> (imgId: UUID, corner: Int)? {
-        let handleSize: CGFloat = 20
+    func hitTestResizeHandle(_ point: CGPoint, scale: CGFloat = 1.0) -> (imgId: UUID, corner: Int)? {
+        let hitRadius = max(10, 12 / max(scale, 0.1))
+        let hitRadiusSq = hitRadius * hitRadius
         for img in placedImages where selectedImageIds.contains(img.id) {
-            let rect = CGRect(origin: img.cgPosition, size: img.cgSize)
-            let handles: [(CGPoint, Int)] = [
-                (CGPoint(x: rect.minX, y: rect.minY), 0),
-                (CGPoint(x: rect.maxX, y: rect.minY), 1),
-                (CGPoint(x: rect.maxX, y: rect.maxY), 2),
-                (CGPoint(x: rect.minX, y: rect.maxY), 3),
-            ]
-            for (pos, corner) in handles {
-                let hRect = CGRect(x: pos.x - handleSize / 2, y: pos.y - handleSize / 2, width: handleSize, height: handleSize)
-                if hRect.contains(point) { return (img.id, corner) }
+            let corners = img.rotatedCorners()
+            for (corner, pos) in corners.enumerated() {
+                if GeometryEngine.distanceSquared(point, pos) <= hitRadiusSq {
+                    return (img.id, corner)
+                }
             }
         }
         return nil
     }
 
-    func beginMove(at point: CGPoint) {
-        if let hit = hitTestResizeHandle(point) {
+    func beginMove(at point: CGPoint, scale: CGFloat = 1.0) {
+        if let hit = hitTestResizeHandle(point, scale: scale) {
             isResizing = true
             resizeCorner = hit.corner
             resizeImageId = hit.imgId
@@ -1392,10 +1951,7 @@ final class DrawingModel {
             return
         }
         guard isPointOnSelectedItem(point) else {
-            selectedStrokeIds.removeAll()
-            selectedImageIds.removeAll()
-            selectedFillIds.removeAll()
-            selectionBoundary.removeAll()
+            clearSelection()
             beginLasso(at: point)
             return
         }
@@ -1422,8 +1978,41 @@ final class DrawingModel {
 
         if isResizing {
             guard let imgId = resizeImageId,
-                  let newRect = GeometryEngine.resizedRect(start: resizeStartRect, corner: resizeCorner, offset: offset) else {
+                  let existing = placedImages.first(where: { $0.id == imgId }) else {
                 return
+            }
+            let rot = existing.cgRotation
+            let localOffset: CGSize
+            if rot != 0 {
+                let cosA = cos(-rot)
+                let sinA = sin(-rot)
+                localOffset = CGSize(
+                    width: offset.width * cosA - offset.height * sinA,
+                    height: offset.width * sinA + offset.height * cosA
+                )
+            } else {
+                localOffset = offset
+            }
+            guard let newLocalRect = GeometryEngine.resizedRect(start: resizeStartRect, corner: resizeCorner, offset: localOffset) else {
+                return
+            }
+            let finalRect: CGRect
+            if rot != 0 {
+                let localCenterDx = newLocalRect.midX - resizeStartRect.midX
+                let localCenterDy = newLocalRect.midY - resizeStartRect.midY
+                let cosA = cos(rot)
+                let sinA = sin(rot)
+                let worldCenterDx = localCenterDx * cosA - localCenterDy * sinA
+                let worldCenterDy = localCenterDx * sinA + localCenterDy * cosA
+                let newCenter = CGPoint(x: resizeStartRect.midX + worldCenterDx, y: resizeStartRect.midY + worldCenterDy)
+                finalRect = CGRect(
+                    x: newCenter.x - newLocalRect.width / 2,
+                    y: newCenter.y - newLocalRect.height / 2,
+                    width: newLocalRect.width,
+                    height: newLocalRect.height
+                )
+            } else {
+                finalRect = newLocalRect
             }
             if !moveSnapshotTaken {
                 saveState()
@@ -1431,9 +2020,9 @@ final class DrawingModel {
             }
             placedImages = placedImages.map { img in
                 guard img.id == imgId else { return img }
-                return PlacedImage(id: img.id, position: newRect.origin, size: newRect.size, imageData: img.imageData)
+                return PlacedImage(id: img.id, position: finalRect.origin, size: finalRect.size, imageData: img.imageData, rotation: img.rotation)
             }
-            resizeStartRect = newRect
+            resizeStartRect = finalRect
             return
         }
 
@@ -1461,7 +2050,8 @@ final class DrawingModel {
                 id: img.id,
                 position: CGPoint(x: img.cgPosition.x + offset.width, y: img.cgPosition.y + offset.height),
                 size: img.cgSize,
-                imageData: img.imageData
+                imageData: img.imageData,
+                rotation: img.rotation
             )
         }
         if !selectedFillIds.isEmpty {
@@ -1475,6 +2065,9 @@ final class DrawingModel {
         }
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + offset.width, y: $0.y + offset.height) }
+        }
+        if let pivot = selectionRotationPivot {
+            selectionRotationPivot = CGPoint(x: pivot.x + offset.width, y: pivot.y + offset.height)
         }
     }
 
@@ -1495,6 +2088,7 @@ final class DrawingModel {
             selectedFillIds.removeAll()
         }
         selectionBoundary.removeAll()
+        resetSelectionRotationTracking()
         spatialGrid.rebuild(with: strokes)
         updateUndoRedo()
         scheduleAutoSave()
@@ -1528,7 +2122,8 @@ final class DrawingModel {
             let copy = PlacedImage(
                 position: CGPoint(x: img.cgPosition.x + dx, y: img.cgPosition.y + dy),
                 size: img.cgSize,
-                imageData: img.imageData
+                imageData: img.imageData,
+                rotation: img.rotation
             )
             newImageIds.insert(copy.id)
             placedImages.append(copy)
@@ -1545,6 +2140,9 @@ final class DrawingModel {
         selectedFillIds = newFillIds
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
+        }
+        if let pivot = selectionRotationPivot {
+            selectionRotationPivot = CGPoint(x: pivot.x + dx, y: pivot.y + dy)
         }
         spatialGrid.rebuild(with: strokes)
         updateUndoRedo()
@@ -1626,23 +2224,30 @@ final class DrawingModel {
                 )
             }
         }
-        if !selectedImageIds.isEmpty && scale != 1.0 {
+        if !selectedImageIds.isEmpty && (scale != 1.0 || rotation != 0.0) {
             placedImages = placedImages.map { img in
                 guard selectedImageIds.contains(img.id) else { return img }
-                let center = CGPoint(x: img.cgPosition.x + img.cgSize.width / 2, y: img.cgPosition.y + img.cgSize.height / 2)
-                let newCenter = xform(center)
+                let newCenter = xform(img.cgCenter)
                 let newW = max(10, img.cgSize.width * scale)
                 let newH = max(10, img.cgSize.height * scale)
+                let newRot = Double(GeometryEngine.normalizeAngle(img.cgRotation + rotation))
                 return PlacedImage(
                     id: img.id,
                     position: CGPoint(x: newCenter.x - newW / 2, y: newCenter.y - newH / 2),
                     size: CGSize(width: newW, height: newH),
-                    imageData: img.imageData
+                    imageData: img.imageData,
+                    rotation: newRot
                 )
             }
         }
         if !selectionBoundary.isEmpty {
             selectionBoundary = selectionBoundary.map(xform)
+        }
+        if rotation != 0 {
+            selectionRotationAngle = GeometryEngine.normalizeAngle(selectionRotationAngle + rotation)
+            if selectionRotationPivot == nil {
+                selectionRotationPivot = CGPoint(x: cx, y: cy)
+            }
         }
         spatialGrid.rebuild(with: strokes)
         updateUndoRedo()
@@ -1762,7 +2367,7 @@ final class DrawingModel {
         }
         for img in decodedImages {
             let newPos = CGPoint(x: img.cgPosition.x + dx, y: img.cgPosition.y + dy)
-            let newImg = PlacedImage(position: newPos, size: img.cgSize, imageData: img.imageData)
+            let newImg = PlacedImage(position: newPos, size: img.cgSize, imageData: img.imageData, rotation: img.rotation)
             pastedImageIds.insert(newImg.id)
             placedImages.append(newImg)
         }
@@ -1789,6 +2394,7 @@ final class DrawingModel {
         } else {
             selectionBoundary.removeAll()
         }
+        resetSelectionRotationTracking()
         currentTool = .select
         spatialGrid.rebuild(with: strokes)
         updateUndoRedo()
@@ -1940,6 +2546,7 @@ final class DrawingModel {
         selectedStrokeIds.removeAll()
         selectedFillIds.removeAll()
         selectionBoundary.removeAll()
+        resetSelectionRotationTracking()
         updateUndoRedo()
         scheduleAutoSave()
         return true
@@ -1952,7 +2559,7 @@ final class DrawingModel {
             guard selectedImageIds.contains(img.id) else { return img }
             let newW = max(10, img.cgSize.width * factor)
             let newH = max(10, img.cgSize.height * factor)
-            return PlacedImage(id: img.id, position: img.cgPosition, size: CGSize(width: newW, height: newH), imageData: img.imageData)
+            return PlacedImage(id: img.id, position: img.cgPosition, size: CGSize(width: newW, height: newH), imageData: img.imageData, rotation: img.rotation)
         }
         updateUndoRedo()
         scheduleAutoSave()
@@ -1966,10 +2573,7 @@ final class DrawingModel {
         }
         currentTool = tool
         if tool != .select {
-            selectedStrokeIds.removeAll()
-            selectedImageIds.removeAll()
-            selectedFillIds.removeAll()
-            selectionBoundary.removeAll()
+            clearSelection()
         }
         showDeleteMenu = false
         showClearConfirmation = false
@@ -2013,6 +2617,7 @@ final class DrawingModel {
         selectedImageIds = prev.selectedImageIds
         selectedFillIds = prev.selectedFillIds
         selectionBoundary = prev.selectionBoundary
+        resetSelectionRotationTracking()
         spatialGrid.rebuild(with: strokes)
         pruneImageCache()
         updateUndoRedo()
@@ -2028,6 +2633,7 @@ final class DrawingModel {
         selectedImageIds = next.selectedImageIds
         selectedFillIds = next.selectedFillIds
         selectionBoundary = next.selectionBoundary
+        resetSelectionRotationTracking()
         spatialGrid.rebuild(with: strokes)
         pruneImageCache()
         updateUndoRedo()
@@ -2047,11 +2653,8 @@ final class DrawingModel {
         imageCache.removeAll()
         spatialGrid.invalidate()
         currentStroke = nil
-        selectedStrokeIds.removeAll()
-        selectedImageIds.removeAll()
-        selectedFillIds.removeAll()
+        clearSelection()
         selectionLasso.removeAll()
-        selectionBoundary.removeAll()
         updateUndoRedo()
         scheduleAutoSave()
     }
